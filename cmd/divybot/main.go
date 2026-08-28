@@ -241,7 +241,12 @@ type Job struct {
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
 	// far too short for the worker to wake, decide, and run gh issue create.
 	FanoutNudgedAt time.Time `json:"fanout_nudged_at,omitempty"`
-	Track          tracker   `json:"track"`
+	// Overrides carries the parsed /swarm block (harness/model/effort/…) so a
+	// respawn re-launches with the same configuration.
+	Overrides Overrides `json:"overrides,omitempty"`
+	// Deadline (from a /swarm "timeout:" key) tears the job down when passed.
+	Deadline time.Time `json:"deadline,omitempty"`
+	Track    tracker   `json:"track"`
 	// Misses counts consecutive ticks the agent was absent from a successful
 	// fleetStatus while its host was up. herdr's agent detection is screen-scrape
 	// based, so a live agent can transiently drop out of the list (mid-render,
@@ -263,7 +268,9 @@ type State struct {
 	// cap, the slew anchor across ticks/restarts.
 	QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
 	PrevCap      map[string]int           `json:"prev_cap"`
-	path         string
+	// SeenSwarm dedups /swarm trigger comments ("owner/repo#c<commentID>").
+	SeenSwarm map[string]bool `json:"seen_swarm,omitempty"`
+	path      string
 }
 
 func loadState(path string) *State {
@@ -1893,6 +1900,9 @@ func (c *Coord) tick(ctx context.Context) {
 	// inbox so they're visible to pollIssues on this same cycle.
 	c.assignmentTick(ctx)
 
+	// /swarm comment trigger: mirror comment-triggered runs the same way.
+	c.commentTick(ctx)
+
 	// Branch-agnostic merge sweep: merge ANY green/ready bot PR on an automerge
 	// target, even one no job tracks. Per-job merge only sees PRs on the job's
 	// exact branch, but workers open follow-up PRs on fresh branches (pipelining)
@@ -2044,8 +2054,16 @@ func (c *Coord) tick(ctx context.Context) {
 		}
 		// Pick the first agent in the target's overflow preference with budget —
 		// claude work spills to codex automatically when claude is throttled.
-		acct, ok := pickAgent(tgt, budget)
-		if !ok {
+		// A /swarm "harness:" override pins the agent instead: honor it if that
+		// account still has budget, or unconditionally when the governor doesn't
+		// meter it at all (e.g. agy has no budget entry).
+		var acct string
+		if ovr := parseOverrides(is.Body); ovr.Harness != "" {
+			acct = accountKey(ovr.Harness) // spawn re-reads the override for the exact CLI
+			if rem, metered := budget[acct]; metered && rem <= 0 {
+				continue // pinned account exhausted this tick
+			}
+		} else if acct, ok = pickAgent(tgt, budget); !ok {
 			continue // every candidate account exhausted this tick
 		}
 		if c.dry {
@@ -2510,20 +2528,21 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// — herdr spawns argv with a bare system PATH. exec replaces the shell so the
 	// agent is the foreground process herdr's integration detects. The --env vars
 	// (creds/token/git identity/memory override) survive into the login shell.
-	agentCmd := "claude --dangerously-skip-permissions"
-	if agent == "codex" {
-		// "codex" agents run via OPENCODE, not the codex binary. codex's rust TUI
-		// is undriveable through herdr on Linux (herdr can't read or write its
-		// pane — confirmed on gcp+vultr; only macOS works), so codex agents on the
-		// Linux workers were dead weight. opencode's Go TUI IS herdr-drivable on
-		// Linux, and the opencode-openai-codex-auth plugin talks to the SAME
-		// ChatGPT-plan codex backend reusing the oauth token seeded from
-		// ~/.codex/auth.json — same quota, no API key, no Cloudflare. gpt-5.5 is
-		// the model the codex ChatGPT backend serves. Per-host config
-		// (~/.config/opencode + seeded ~/.local/share/opencode/auth.json) grants
-		// auto-approve so it runs autonomously like claude.
-		agentCmd = "opencode --model openai/gpt-5.5"
+	// /swarm block in the inbox issue body (written directly, or carried over
+	// by commentTick's mirror) parameterizes the run.
+	ovr := parseOverrides(is.Body)
+	if ovr.Harness != "" {
+		agent = ovr.Harness
 	}
+	// Note on "codex": those agents run via OPENCODE, not the codex binary.
+	// codex's rust TUI is undriveable through herdr on Linux (herdr can't read
+	// or write its pane — confirmed on gcp+vultr; only macOS works). opencode's
+	// Go TUI IS herdr-drivable, and the opencode-openai-codex-auth plugin talks
+	// to the SAME ChatGPT-plan codex backend reusing the oauth token seeded from
+	// ~/.codex/auth.json — same quota, no API key, no Cloudflare. Per-host
+	// config (~/.config/opencode + seeded ~/.local/share/opencode/auth.json)
+	// grants auto-approve so it runs autonomously like claude.
+	agentCmd := buildAgentCmd(agent, ovr)
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
 	sctx, scancel := context.WithTimeout(ctx, 40*time.Second)
@@ -2558,6 +2577,10 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 		Issue: n, Host: host.Name, Label: label, Pane: pane, Workspace: ws,
 		Target: tgt.Label, Repo: tgt.Repo,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
+		Overrides: ovr,
+	}
+	if ovr.Timeout > 0 {
+		j.Deadline = time.Now().Add(ovr.Timeout)
 	}
 	c.st.mu.Lock()
 	c.st.Jobs[n] = j
@@ -2569,8 +2592,11 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// idle with no task. injectGoal waits for the prompt, then confirms the
 	// send registered and retries.
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
+	if pre := ovr.goalPreamble(); pre != "" {
+		goal = pre + "\n" + goal
+	}
 	inject := goal
-	if agent == "codex" {
+	if agent == "codex" || agent == "opencode" {
 		// opencode (the codex launcher) will NOT submit a large multi-line pasted
 		// prompt on Enter — it pastes into the input box but never submits, leaving
 		// the agent idle with the goal stuck unsent. Short prompts submit fine. So
@@ -2613,6 +2639,24 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	}
 	if c.dry {
 		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
+		return
+	}
+
+	// Operator timeout (/swarm "timeout:"): past the deadline the run is torn
+	// down and the INBOX ISSUE IS CLOSED with an explanatory comment — leaving
+	// it open would make the deleted job respawn on the very next tick. Retry =
+	// file a fresh inbox issue (or /swarm comment) with a longer timeout.
+	if !j.Deadline.IsZero() && time.Now().After(j.Deadline) {
+		log.Printf("issue #%d: operator timeout (%s) exceeded — tearing down", n, j.Overrides.Timeout)
+		cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
+		_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
+			"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
+		ccancel()
+		c.teardown(ctx, n, j)
+		c.st.mu.Lock()
+		delete(c.st.Jobs, n)
+		c.st.mu.Unlock()
+		c.notify(fmt.Sprintf("issue #%d timed out (%s)", n, j.Overrides.Timeout))
 		return
 	}
 
