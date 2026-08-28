@@ -53,15 +53,6 @@ func (o Overrides) empty() bool {
 // real assignment is staged to .divybot-goal.md in the workdir before spawn.
 const runPointer = "Read the file .divybot-goal.md in your current directory, in full — it is your complete assignment for this session. Carry it out end to end: implement the change, commit, and open a PR exactly as it instructs. Do NOT commit .divybot-goal.md. Begin now."
 
-// Default models per harness when the /swarm block names none. Kept in sync
-// with the NetScript agentic toolchain defaults (WSL) and the current
-// OpenRouter catalog — refresh these as new flagships land.
-const (
-	defaultClaudeModel   = "opus"                     // Claude Opus 5 alias
-	defaultCodexModel    = "gpt-5.6-sol"              // codex CLI flagship
-	defaultOpencodeModel = "openrouter/z-ai/glm-5.3"  // OpenRouter flagship (2026-08)
-)
-
 var swarmKV = regexp.MustCompile(`^([a-z][a-z_-]*)\s*:\s*(.+?)\s*$`)
 
 // parseOverrides scans text for the FIRST "/swarm" line and consumes the
@@ -138,19 +129,18 @@ func buildAgentCmd(agent string, o Overrides) string {
 		// `agent prompt --wait` drives it — verified on this host 2026-08-28).
 		// First run in a workdir shows a directory-trust prompt that leaves the
 		// agent "blocked"; injectGoal clears it with an Enter and retries.
-		m := o.Model
-		if m == "" {
-			m = defaultCodexModel
+		cmd := "codex --dangerously-bypass-approvals-and-sandbox"
+		if o.Model != "" {
+			cmd += " -m " + shq(o.Model)
 		}
-		return "codex --dangerously-bypass-approvals-and-sandbox -m " + shq(m)
+		return cmd
 	case "codex-run":
 		// Non-interactive codex: `codex exec` with the pointer as argv. RunMode
 		// supervision (PR path + deadline) only.
-		m := o.Model
-		if m == "" {
-			m = defaultCodexModel
+		cmd := "codex exec --dangerously-bypass-approvals-and-sandbox"
+		if o.Model != "" {
+			cmd += " -m " + shq(o.Model)
 		}
-		cmd := "codex exec --dangerously-bypass-approvals-and-sandbox -m " + shq(m)
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`)
 	case "opencode":
@@ -158,20 +148,20 @@ func buildAgentCmd(agent string, o Overrides) string {
 		// injected via herdr's native `agent prompt --wait`, which confirms
 		// submission server-side; the full goal is staged to .divybot-goal.md
 		// before spawn.
-		if ocModel == "" {
-			ocModel = defaultOpencodeModel
+		if ocModel != "" {
+			return "opencode --model " + shq(ocModel)
 		}
-		return "opencode --model " + shq(ocModel)
+		return "opencode"
 	case "opencode-run":
 		// Explicit fallback: non-interactive `opencode run` with the pointer as
 		// argv — no TUI, no injection, invisible to herdr agent detection (job
 		// runs in RunMode: PR-path + deadline supervision only). The trailing
 		// sleep holds the pane open so the transcript stays readable until
 		// teardown closes the workspace.
-		if ocModel == "" {
-			ocModel = defaultOpencodeModel
+		cmd := "opencode run"
+		if ocModel != "" {
+			cmd += " --model " + shq(ocModel)
 		}
-		cmd := "opencode run --model " + shq(ocModel)
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`)
 	case "agy":
@@ -187,11 +177,11 @@ func buildAgentCmd(agent string, o Overrides) string {
 		}
 		return cmd
 	default: // claude
-		m := o.Model
-		if m == "" {
-			m = defaultClaudeModel
+		cmd := "claude --dangerously-skip-permissions"
+		if o.Model != "" {
+			cmd += " --model " + shq(o.Model)
 		}
-		return "claude --dangerously-skip-permissions --model " + shq(m)
+		return cmd
 	}
 }
 
