@@ -116,9 +116,6 @@ func parseOverrides(text string) Overrides {
 }
 
 // buildAgentCmd renders the launch command for a harness, applying overrides.
-// Every harness here must be herdr-drivable on Linux (see the codex note in
-// spawn: the codex rust TUI is not, so "codex" work runs through opencode
-// against the same ChatGPT-plan backend).
 func buildAgentCmd(agent string, o Overrides) string {
 	// opencode addresses models as provider/model; a "router:" key supplies the
 	// provider half when the model was given bare.
@@ -127,27 +124,40 @@ func buildAgentCmd(agent string, o Overrides) string {
 		ocModel = o.Router + "/" + ocModel
 	}
 	switch agent {
-	case "codex", "opencode":
+	case "codex":
+		// Real interactive codex TUI (herdr detects it as agent "codex" and
+		// `agent prompt --wait` drives it — verified on this host 2026-08-28).
+		// First run in a workdir shows a directory-trust prompt that leaves the
+		// agent "blocked"; injectGoal clears it with an Enter and retries.
+		cmd := "codex --dangerously-bypass-approvals-and-sandbox"
+		if o.Model != "" {
+			cmd += " -m " + shq(o.Model)
+		}
+		return cmd
+	case "codex-run":
+		// Non-interactive codex: `codex exec` with the pointer as argv. RunMode
+		// supervision (PR path + deadline) only.
+		cmd := "codex exec --dangerously-bypass-approvals-and-sandbox"
+		if o.Model != "" {
+			cmd += " -m " + shq(o.Model)
+		}
+		cmd += " " + shq(runPointer)
+		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`)
+	case "opencode":
 		// Interactive opencode TUI (herdr-supervised). The goal pointer is
 		// injected via herdr's native `agent prompt --wait`, which confirms
 		// submission server-side; the full goal is staged to .divybot-goal.md
 		// before spawn.
-		if agent == "codex" && ocModel == "" {
-			ocModel = "openai/gpt-5.5"
-		}
 		if ocModel != "" {
 			return "opencode --model " + shq(ocModel)
 		}
 		return "opencode"
-	case "codex-run", "opencode-run":
+	case "opencode-run":
 		// Explicit fallback: non-interactive `opencode run` with the pointer as
 		// argv — no TUI, no injection, invisible to herdr agent detection (job
 		// runs in RunMode: PR-path + deadline supervision only). The trailing
 		// sleep holds the pane open so the transcript stays readable until
 		// teardown closes the workspace.
-		if agent == "codex-run" && ocModel == "" {
-			ocModel = "openai/gpt-5.5"
-		}
 		cmd := "opencode run"
 		if ocModel != "" {
 			cmd += " --model " + shq(ocModel)

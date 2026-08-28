@@ -574,10 +574,15 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		st := h.agentStatusOf(ctx, target)
 		return st == "working" || st == "blocked"
 	}
-	// Wait for the TUI to render + be ready for input.
+	// Wait for the TUI to render + be ready for input. codex boots into a
+	// directory-trust prompt (status "blocked" with "Yes, continue" selected);
+	// an Enter accepts it and the agent flips to idle/done.
 	for i := 0; i < 30; i++ {
 		if ready() {
 			break
+		}
+		if h.agentStatusOf(ctx, target) == "blocked" {
+			h.herdr(ctx, "pane", "send-keys", target, "Enter")
 		}
 		select {
 		case <-ctx.Done():
@@ -598,6 +603,10 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 				return nil
 			}
 			lastErr = fmt.Errorf("native prompt: %v: %.160q", err, out)
+			if strings.Contains(out, "agent_blocked") {
+				// codex directory-trust (or similar) prompt: accept and retry.
+				h.herdr(ctx, "pane", "send-keys", target, "Enter")
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
