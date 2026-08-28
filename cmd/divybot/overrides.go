@@ -122,10 +122,17 @@ func buildAgentCmd(agent string, o Overrides) string {
 		}
 		return "opencode"
 	case "agy":
-		// Antigravity CLI. Model selection is untested through herdr — launch
-		// bare until a flag is verified; the goal preamble still states the
-		// requested model so the agent can switch itself if it supports it.
-		return "agy"
+		// Antigravity CLI (agy 1.1.22+): supports the same auto-approve flag as
+		// claude, plus real --model and --effort flags (agy models: gemini-3.x
+		// families with per-effort variants).
+		cmd := "agy --dangerously-skip-permissions"
+		if o.Model != "" {
+			cmd += " --model " + shq(o.Model)
+		}
+		if o.Effort != "" {
+			cmd += " --effort " + shq(o.Effort)
+		}
+		return cmd
 	default: // claude
 		cmd := "claude --dangerously-skip-permissions"
 		if o.Model != "" {
