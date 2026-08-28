@@ -526,7 +526,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 
 // send injects literal text then submits with Enter.
 func (h Host) send(ctx context.Context, target, text string) error {
-	if out, err := h.herdr(ctx, "agent", "send", target, text); err != nil {
+	if out, err := h.herdr(ctx, "agent", "prompt", target, text); err != nil {
 		return fmt.Errorf("send: %v: %.120q", err, out)
 	}
 	if out, err := h.herdr(ctx, "pane", "send-keys", target, "Enter"); err != nil {
