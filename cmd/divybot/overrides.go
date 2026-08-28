@@ -33,6 +33,11 @@ import (
 type Overrides struct {
 	Harness   string        `json:"harness,omitempty"`
 	Model     string        `json:"model,omitempty"`
+	// Router is the opencode provider prefix ("openai", "n5air", …). opencode
+	// models are addressed as provider/model; router lets an operator name the
+	// two halves separately (model: gpt-5.5 + router: openai). Ignored when the
+	// model already contains a slash, and by non-opencode harnesses.
+	Router string `json:"router,omitempty"`
 	Effort    string        `json:"effort,omitempty"`
 	MaxTokens string        `json:"max_tokens,omitempty"`
 	Profile   string        `json:"profile,omitempty"`
@@ -83,6 +88,8 @@ func parseOverrides(text string) Overrides {
 					o.Harness = strings.ToLower(val)
 				case "model":
 					o.Model = val
+				case "router", "provider":
+					o.Router = strings.ToLower(val)
 				case "effort":
 					o.Effort = strings.ToLower(val)
 				case "max-tokens":
@@ -109,16 +116,21 @@ func parseOverrides(text string) Overrides {
 // spawn: the codex rust TUI is not, so "codex" work runs through opencode
 // against the same ChatGPT-plan backend).
 func buildAgentCmd(agent string, o Overrides) string {
+	// opencode addresses models as provider/model; a "router:" key supplies the
+	// provider half when the model was given bare.
+	ocModel := o.Model
+	if ocModel != "" && o.Router != "" && !strings.Contains(ocModel, "/") {
+		ocModel = o.Router + "/" + ocModel
+	}
 	switch agent {
 	case "codex":
-		m := o.Model
-		if m == "" {
-			m = "openai/gpt-5.5"
+		if ocModel == "" {
+			ocModel = "openai/gpt-5.5"
 		}
-		return "opencode --model " + shq(m)
+		return "opencode --model " + shq(ocModel)
 	case "opencode":
-		if o.Model != "" {
-			return "opencode --model " + shq(o.Model)
+		if ocModel != "" {
+			return "opencode --model " + shq(ocModel)
 		}
 		return "opencode"
 	case "agy":
