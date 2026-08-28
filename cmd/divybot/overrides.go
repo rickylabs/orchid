@@ -49,6 +49,10 @@ func (o Overrides) empty() bool {
 	return o == Overrides{}
 }
 
+// runPointer is the argv prompt handed to non-interactive `opencode run`; the
+// real assignment is staged to .divybot-goal.md in the workdir before spawn.
+const runPointer = "Read the file .divybot-goal.md in your current directory, in full — it is your complete assignment for this session. Carry it out end to end: implement the change, commit, and open a PR exactly as it instructs. Do NOT commit .divybot-goal.md. Begin now."
+
 var swarmKV = regexp.MustCompile(`^([a-z][a-z_-]*)\s*:\s*(.+?)\s*$`)
 
 // parseOverrides scans text for the FIRST "/swarm" line and consumes the
@@ -123,16 +127,22 @@ func buildAgentCmd(agent string, o Overrides) string {
 		ocModel = o.Router + "/" + ocModel
 	}
 	switch agent {
-	case "codex":
-		if ocModel == "" {
+	case "codex", "opencode":
+		// Run-mode: opencode's interactive TUI won't reliably accept an injected
+		// prompt (paste lands but never submits), so opencode work runs through
+		// the non-interactive `opencode run` with the goal pointer as argv. The
+		// full goal is staged to .divybot-goal.md BEFORE spawn. The trailing
+		// sleep holds the pane open after the run exits so the transcript stays
+		// readable until teardown closes the workspace.
+		if agent == "codex" && ocModel == "" {
 			ocModel = "openai/gpt-5.5"
 		}
-		return "opencode --model " + shq(ocModel)
-	case "opencode":
+		cmd := "opencode run"
 		if ocModel != "" {
-			return "opencode --model " + shq(ocModel)
+			cmd += " --model " + shq(ocModel)
 		}
-		return "opencode"
+		cmd += " " + shq(runPointer)
+		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`)
 	case "agy":
 		// Antigravity CLI (agy 1.1.22+): supports the same auto-approve flag as
 		// claude, plus real --model and --effort flags (agy models: gemini-3.x

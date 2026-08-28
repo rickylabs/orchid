@@ -246,6 +246,10 @@ type Job struct {
 	Overrides Overrides `json:"overrides,omitempty"`
 	// Deadline (from a /swarm "timeout:" key) tears the job down when passed.
 	Deadline time.Time `json:"deadline,omitempty"`
+	// RunMode: the agent is a non-interactive `opencode run` process, invisible
+	// to herdr's agent detection — never declare it "gone"; supervise via the
+	// PR path and the deadline instead.
+	RunMode bool `json:"run_mode,omitempty"`
 	Track    tracker   `json:"track"`
 	// Misses counts consecutive ticks the agent was absent from a successful
 	// fleetStatus while its host was up. herdr's agent detection is screen-scrape
@@ -1958,6 +1962,10 @@ func (c *Coord) tick(ctx context.Context) {
 		if !up[j.Host] {
 			continue // host unreachable — transient, don't respawn
 		}
+		if j.RunMode {
+			continue // `opencode run` never shows in herdr agent detection — the
+			// deadline and the PR path supervise it, not liveness.
+		}
 		if _, stillOpen := allOpen[n]; !stillOpen {
 			continue // handled by the teardown pass
 		}
@@ -2539,11 +2547,26 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// config (~/.config/opencode + seeded ~/.local/share/opencode/auth.json)
 	// grants auto-approve so it runs autonomously like claude.
 	agentCmd := buildAgentCmd(agent, ovr)
-	if agent == "codex" || agent == "opencode" {
-		// opencode's OpenTUI extracts a render .so into $TMPDIR and dlopens it;
+	runMode := agent == "codex" || agent == "opencode"
+	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
+	if pre := ovr.goalPreamble(); pre != "" {
+		goal = pre + "\n" + goal
+	}
+	if runMode {
+		// opencode's bundled runtime extracts a .so into $TMPDIR and dlopens it;
 		// /ephemeral/tmp (the compose default TMPDIR) is a noexec tmpfs, so the
 		// map fails and opencode dies at startup. The container's /tmp is exec.
 		env["TMPDIR"] = "/tmp"
+		// `opencode run` reads its assignment pointer from argv at startup, so
+		// the full goal must be staged BEFORE the process spawns. The file lives
+		// inside the worktree (out-of-workspace reads trigger permission prompts)
+		// and is excluded so the worker never commits it.
+		goalFile := workdir + "/.divybot-goal.md"
+		if err := host.writeFile(ctx, goalFile, goal); err != nil {
+			log.Printf("issue #%d: stage opencode goal failed: %v — deferring", n, err)
+			return false
+		}
+		_, _ = host.runRemote(ctx, fmt.Sprintf("grep -qxF .divybot-goal.md %s/.git/info/exclude 2>/dev/null || echo .divybot-goal.md >> %s/.git/info/exclude", shq(workdir), shq(workdir)))
 	}
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
@@ -2579,10 +2602,14 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 		Issue: n, Host: host.Name, Label: label, Pane: pane, Workspace: ws,
 		Target: tgt.Label, Repo: tgt.Repo,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
-		Overrides: ovr,
+		Overrides: ovr, RunMode: runMode,
 	}
 	if ovr.Timeout > 0 {
 		j.Deadline = time.Now().Add(ovr.Timeout)
+	} else if runMode {
+		// Run-mode jobs have no liveness supervision — a hung `opencode run`
+		// would otherwise sit forever. Default deadline as the safety net.
+		j.Deadline = time.Now().Add(45 * time.Minute)
 	}
 	c.st.mu.Lock()
 	c.st.Jobs[n] = j
@@ -2593,37 +2620,17 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// send landed before then and was silently dropped, leaving the worker
 	// idle with no task. injectGoal waits for the prompt, then confirms the
 	// send registered and retries.
-	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
-	if pre := ovr.goalPreamble(); pre != "" {
-		goal = pre + "\n" + goal
-	}
-	inject := goal
-	if agent == "codex" || agent == "opencode" {
-		// opencode (the codex launcher) will NOT submit a large multi-line pasted
-		// prompt on Enter — it pastes into the input box but never submits, leaving
-		// the agent idle with the goal stuck unsent. Short prompts submit fine. So
-		// stage the full goal to a file and inject a SHORT pointer; opencode reads
-		// the file for the real assignment. The file lives INSIDE the worktree
-		// (reading /tmp triggers an out-of-workspace permission prompt that
-		// auto-approve doesn't cover) and is added to .git/info/exclude so the
-		// worker never commits it.
-		goalFile := workdir + "/.divybot-goal.md"
-		if err := host.writeFile(ctx, goalFile, goal); err != nil {
-			log.Printf("issue #%d: stage opencode goal failed: %v", n, err)
-		} else {
-			_, _ = host.runRemote(ctx, fmt.Sprintf("grep -qxF .divybot-goal.md %s/.git/info/exclude 2>/dev/null || echo .divybot-goal.md >> %s/.git/info/exclude", shq(workdir), shq(workdir)))
-			inject = "Read the file .divybot-goal.md in your current directory, in full — it is your complete assignment for this session. Carry it out end to end: implement the change, commit, and open a PR exactly as it instructs. Do NOT commit .divybot-goal.md. Begin now."
+	if !runMode {
+		target := pane
+		if target == "" {
+			target = label
 		}
+		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
+		if err := host.injectGoal(gctx, target, goal); err != nil {
+			log.Printf("issue #%d: goal inject failed: %v", n, err)
+		}
+		gcancel()
 	}
-	target := pane
-	if target == "" {
-		target = label
-	}
-	gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
-	if err := host.injectGoal(gctx, target, inject); err != nil {
-		log.Printf("issue #%d: goal inject failed: %v", n, err)
-	}
-	gcancel()
 	log.Printf("issue #%d: spawned %s on %s/%s (branch %s)", n, agent, host.Name, label, branch)
 	return true
 }
