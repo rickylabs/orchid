@@ -2294,15 +2294,11 @@ what remains in the PR description.
 
 ## Commit attribution
 
-When committing, your commit message MUST end with exactly this single
-co-author footer and NO other co-author or attribution lines:
-
-  Co-Authored-By: Divy Srivastava <me@littledivy.com>
-
-Do NOT add ` + "`Co-Authored-By: Claude …`" + `, ` + "`Co-Authored-By: Anthropic …`" + `,
-` + "`Generated with Claude Code`" + `, or any other AI/tool attribution. The
-Divy co-author footer is the only attribution Divy wants on commits in
-his repos.
+Do NOT add any co-author or attribution footer to commits: no
+` + "`Co-Authored-By: Claude …`" + `, ` + "`Co-Authored-By: Anthropic …`" + `,
+` + "`Generated with Claude Code`" + `, or any other AI/tool attribution line.
+Plain commit messages only — the git author/committer identity is already
+set for you.
 
 ## Open a PR early, then DON'T WAIT — pipeline for throughput
 
@@ -2543,6 +2539,12 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// config (~/.config/opencode + seeded ~/.local/share/opencode/auth.json)
 	// grants auto-approve so it runs autonomously like claude.
 	agentCmd := buildAgentCmd(agent, ovr)
+	if agent == "codex" || agent == "opencode" {
+		// opencode's OpenTUI extracts a render .so into $TMPDIR and dlopens it;
+		// /ephemeral/tmp (the compose default TMPDIR) is a noexec tmpfs, so the
+		// map fails and opencode dies at startup. The container's /tmp is exec.
+		env["TMPDIR"] = "/tmp"
+	}
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
 	sctx, scancel := context.WithTimeout(ctx, 40*time.Second)
