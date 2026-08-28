@@ -561,7 +561,7 @@ func agentBareIdle(pane string) bool {
 // an Enter that raced ahead of a long paste both leave the worker idle;
 // this retries (nudging Enter, then clearing and resending) until the goal
 // registers or the context expires.
-func (h Host) injectGoal(ctx context.Context, target, goal string) error {
+func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) error {
 	// Readiness/acceptance via herdr's native status — works for claude AND
 	// opencode. (The old "bypass permissions" pane scrape was claude-only and
 	// blind to opencode's TUI, so the wait loop never broke → it burned the whole
@@ -584,6 +584,27 @@ func (h Host) injectGoal(ctx context.Context, target, goal string) error {
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
+	}
+	if native {
+		// Short pointer prompts (opencode class): herdr's `agent prompt --wait`
+		// confirms submission and the post-submit state transition server-side —
+		// no manual Enter, no status polling race. Verified interactively: a
+		// prompt submitted this way flips opencode idle→working within seconds.
+		var lastErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			out, err := h.herdr(ctx, "agent", "prompt", target, goal,
+				"--wait", "--until", "working", "--until", "blocked", "--until", "done", "--timeout", "45000")
+			if err == nil {
+				return nil
+			}
+			lastErr = fmt.Errorf("native prompt: %v: %.160q", err, out)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+		}
+		return lastErr
 	}
 	// Send the goal, then poll for acceptance with a GENEROUS window: opencode
 	// (and codex-class models) can take 10-20s after receiving the prompt before
@@ -1277,7 +1298,7 @@ func accountKey(agent string) string {
 	switch agent {
 	case "", "claude":
 		return "claude"
-	case "opencode":
+	case "opencode", "opencode-run", "codex-run":
 		return "codex"
 	default:
 		return agent
@@ -2547,12 +2568,13 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// config (~/.config/opencode + seeded ~/.local/share/opencode/auth.json)
 	// grants auto-approve so it runs autonomously like claude.
 	agentCmd := buildAgentCmd(agent, ovr)
-	runMode := agent == "codex" || agent == "opencode"
+	runMode := strings.HasSuffix(agent, "-run")
+	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
 	if pre := ovr.goalPreamble(); pre != "" {
 		goal = pre + "\n" + goal
 	}
-	if runMode {
+	if opencodeClass {
 		// opencode's bundled runtime extracts a .so into $TMPDIR and dlopens it;
 		// /ephemeral/tmp (the compose default TMPDIR) is a noexec tmpfs, so the
 		// map fails and opencode dies at startup. The container's /tmp is exec.
@@ -2625,8 +2647,15 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 		if target == "" {
 			target = label
 		}
+		inject := goal
+		if opencodeClass {
+			// The full goal is already staged to .divybot-goal.md (pre-spawn);
+			// the TUI only gets the short pointer, submitted via herdr's native
+			// confirmed prompt.
+			inject = runPointer
+		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
-		if err := host.injectGoal(gctx, target, goal); err != nil {
+		if err := host.injectGoal(gctx, target, inject, opencodeClass); err != nil {
 			log.Printf("issue #%d: goal inject failed: %v", n, err)
 		}
 		gcancel()

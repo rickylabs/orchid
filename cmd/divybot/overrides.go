@@ -128,13 +128,24 @@ func buildAgentCmd(agent string, o Overrides) string {
 	}
 	switch agent {
 	case "codex", "opencode":
-		// Run-mode: opencode's interactive TUI won't reliably accept an injected
-		// prompt (paste lands but never submits), so opencode work runs through
-		// the non-interactive `opencode run` with the goal pointer as argv. The
-		// full goal is staged to .divybot-goal.md BEFORE spawn. The trailing
-		// sleep holds the pane open after the run exits so the transcript stays
-		// readable until teardown closes the workspace.
+		// Interactive opencode TUI (herdr-supervised). The goal pointer is
+		// injected via herdr's native `agent prompt --wait`, which confirms
+		// submission server-side; the full goal is staged to .divybot-goal.md
+		// before spawn.
 		if agent == "codex" && ocModel == "" {
+			ocModel = "openai/gpt-5.5"
+		}
+		if ocModel != "" {
+			return "opencode --model " + shq(ocModel)
+		}
+		return "opencode"
+	case "codex-run", "opencode-run":
+		// Explicit fallback: non-interactive `opencode run` with the pointer as
+		// argv — no TUI, no injection, invisible to herdr agent detection (job
+		// runs in RunMode: PR-path + deadline supervision only). The trailing
+		// sleep holds the pane open so the transcript stays readable until
+		// teardown closes the workspace.
+		if agent == "codex-run" && ocModel == "" {
 			ocModel = "openai/gpt-5.5"
 		}
 		cmd := "opencode run"
