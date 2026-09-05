@@ -325,6 +325,7 @@ func (s *State) save() {
 // ============================ exec helpers ============================
 
 func run(ctx context.Context, name string, args ...string) (string, error) {
+	defer children.hold()()
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -692,6 +693,7 @@ func resolveGHToken() string {
 	if t := strings.TrimSpace(os.Getenv("GH_TOKEN")); t != "" {
 		return t
 	}
+	defer children.hold()()
 	if out, err := exec.Command("gh", "auth", "token").Output(); err == nil {
 		return strings.TrimSpace(string(out))
 	}
@@ -824,6 +826,7 @@ if command -v jq >/dev/null 2>&1; then t=$(mktemp); jq '.includeCoAuthoredBy=fal
 // refreshLocal triggers a claude oauth refresh on the coordinator (cheap noop
 // call) so the canonical creds file is fresh before we push it.
 func (a *AuthStore) refreshLocal(ctx context.Context) {
+	defer children.hold()()
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "claude", "-p", "ok")
@@ -931,6 +934,7 @@ type Issue struct {
 }
 
 func ghJSON(ctx context.Context, out any, args ...string) error {
+	defer children.hold()()
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -3341,6 +3345,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// In the container divybot is pid 1, so every orphan in the namespace lands on it and nobody
+	// waits on them. See reaper.go.
+	startReaper(ctx.Done())
 
 	if *once {
 		c.tick(ctx)
