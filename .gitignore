@@ -73,4 +73,6 @@ orch.linux-*
 
 # herdr build artifact
 /orch-linux-herdr
-divybot
+# Anchored, because a bare `divybot` also matches the cmd/divybot/ *directory* — which silently
+# ignored every new file added there. The artifact this means is the binary at the repo root.
+/divybot
