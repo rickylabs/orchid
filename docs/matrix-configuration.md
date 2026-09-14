@@ -148,3 +148,22 @@ validates it, refuses an existing output file, then refuses the same legacy inpu
 its matrix block and names each required field. Additional tests reject ambiguous JSON,
 invalid authority and pins, and prove body changes cannot reuse a grant. Fixtures contain
 invented data only; no live source output or operator configuration is published.
+
+## Optional receipt ownership
+
+`matrix.receipt_owner_uid` and `matrix.receipt_owner_gid` are optional numeric Unix IDs.
+Set both in private configuration, or omit both to retain existing creator ownership.
+The builder preserves them and the validator rejects partial, negative or sentinel IDs.
+No owner is inferred from a host, repository or issue, and no IDs are shipped as defaults.
+
+With an owner configured, a reservation is renamed into a hidden staging name, every new
+file and reservation directory receives that owner, then the final `record` name is
+published. Directory modes stay 0700 and files stay 0600. Failed transfer publishes no
+record; an empty reservation fence remains to prevent automatic duplicate launches.
+Replacement `dispatch.json` snapshots receive the same owner before atomic publication;
+a failed transfer preserves the previous snapshot. No existing receipt is swept or migrated.
+
+The existing receipt root is never chowned by this setting. Deployment must provision the
+shared directory with mode 0700 and the intended reader owner, accessible to both processes.
+The writer needs permission to perform the configured transfer and continue updating files.
+Shared mounts and live configuration remain operator-owned deployment work.

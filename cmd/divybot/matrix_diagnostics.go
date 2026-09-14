@@ -12,6 +12,7 @@ import (
 // Only this fixed vocabulary crosses the public log/comment boundary. No native
 // error strings, configuration values, source output or issue prose are copied.
 var matrixReasons = map[string]struct{ field, hint string }{
+	"receipt-owner-invalid":        {"matrix.receipt_owner_uid/receipt_owner_gid", "Configure both nonnegative numeric owner IDs, or omit both."},
 	"source-missing":               {"matrix.source", "Configure an absolute clean NetScript checkout."},
 	"source-invalid":               {"matrix.source", "Verify the checkout is clean and HEAD equals matrix.revision."},
 	"revision-invalid":             {"matrix.revision", "Configure a full lowercase source commit."},
@@ -121,6 +122,7 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 }
 
 var matrixSites = map[string]bool{
+	"receipt.owner-stage": true, "receipt.owner-transfer": true, "receipt.owner-sync": true, "receipt.owner-publish": true, "dispatch.owner-transfer": true,
 	"source.arguments": true, "source.head-command": true, "source.revision-mismatch": true, "source.status-command": true, "source.dirty": true,
 	"decode.envelope":                      true,
 	"output.limit":                         true,
