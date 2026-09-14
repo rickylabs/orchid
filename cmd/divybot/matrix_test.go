@@ -75,7 +75,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					events = append(events, "persist")
 					return persistMatrixReceipt(root, key, command, r, binding)
 				},
-				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) bool {
+				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) error {
 					events = append(events, "launch")
 					if agent != "claude" || o.Model != route.Model || o.Effort != route.Effort || !r.claim(buildAgentCmd(agent, o)) {
 						t.Fatal("launch did not consume the selected durable receipt")
@@ -85,7 +85,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" {
 						t.Fatal("authoritative inbox issue was not bound before launch")
 					}
-					return true
+					return nil
 				},
 			}
 			switch name {
@@ -151,8 +151,8 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				if containsString(events, "persist") || containsString(events, "host") {
 					t.Fatal("evaluator refusal reached launch preparation")
 				}
-			} else if len(refusals) != 0 {
-				t.Fatal("unrelated failure mislabeled as missing observer")
+			} else if !success && (len(refusals) != 1 || !validMatrixRefusal(refusals[0]) || refusals[0] == evaluatorRefusal()) {
+				t.Fatal("refused dispatch must emit exactly one safe reason")
 			}
 			if ok != success {
 				t.Fatalf("unexpected admission for %s", name)
@@ -363,6 +363,10 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 				pass = true
 			}
 			route, e := resolveMatrix(context.Background(), cfg, req)
+			expectedReason := map[string]string{"missing-grant": "override-required", "privileged-without-authority": "authorization-required", "invalid-authorizer": "authorization-invalid", "missing-worklog": "override-invalid"}[name]
+			if expectedReason != "" && refusalFor(e).ReasonCode != expectedReason {
+				t.Fatal("bridge lost specific refusal reason")
+			}
 			if name == "evaluator" && !errors.Is(e, errEvaluatorEvidence) {
 				t.Fatal("bridge dropped inconclusive observer reason")
 			}
@@ -448,7 +452,7 @@ func TestRefusalLogContainsOnlyClosedEvidence(t *testing.T) {
 	previous := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)
-	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail"})
+	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail", ""})
 	if output.Len() != 0 {
 		t.Fatal("untrusted refusal data reached the log")
 	}

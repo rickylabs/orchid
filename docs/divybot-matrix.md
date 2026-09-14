@@ -129,3 +129,26 @@ and model family are not substitutes for router evidence. No transcript is match
 Per-run spend/tokens remain unavailable until an explicit native-session association exists;
 provider-wide headroom remains separately scoped governance evidence. Installation and the
 first live issue dispatch remain unevidenced; this draft does not claim alpha acceptance.
+
+## Refusal diagnostics
+
+Every refused common dispatch attempt reports a closed reason code, fixed field name and
+remediation in the operator log and an inbox comment. `matrix_diagnostics.go` is the vocabulary;
+private values and subprocess errors are never copied into either surface. For example, absent
+source configuration reports `reason=source-missing field=matrix.source`. Authorization,
+profile, quota, host placement and receipt persistence have separate reasons. Evaluator
+refusal remains `inconclusive` / `observer-unavailable`.
+
+Successful comments are deduplicated by issue identity, complete brief digest and reason in
+private dispatcher state. Failed comments retry on a subsequent poll. A crash after posting
+but before saving can duplicate a comment; it cannot authorize a launch. A corrected
+configuration can be reconsidered normally; a diagnostic is not a launch reservation.
+Dry runs log the explanation but do not post comments or persist notification state.
+
+The `cause` field names the originating Go refusal site (for example,
+`receipt.file-create` or `spawn.agent-start`). Every former bare `errMatrix` return
+in the matrix and spawn path has a distinct static identifier. Errors wrap the
+sentinel for `errors.Is`; propagation through the launch callback preserves the
+origin instead of reducing it to a boolean. The closed site inventory and a source
+AST check prevent unlabelled returns or duplicated site identifiers. Neither the
+wrapped error's private payload nor arbitrary cause text is published.

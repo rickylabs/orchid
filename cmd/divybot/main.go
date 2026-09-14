@@ -262,9 +262,10 @@ type Job struct {
 }
 
 type State struct {
-	LaunchBlocks map[int]launchBlock `json:"launch_blocks,omitempty"`
-	mu           sync.Mutex
-	Jobs         map[int]*Job `json:"jobs"`
+	MatrixNotices map[int]string      `json:"matrix_notices,omitempty"`
+	LaunchBlocks  map[int]launchBlock `json:"launch_blocks,omitempty"`
+	mu            sync.Mutex
+	Jobs          map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
 	Continued map[string]int `json:"continued"`
@@ -283,13 +284,15 @@ func loadState(path string) *State {
 	s := &State{Jobs: map[int]*Job{}, Continued: map[string]int{}, QuotaSamples: map[string][]QuotaSample{}, PrevCap: map[string]int{}, path: path}
 	if b, err := os.ReadFile(path); err == nil {
 		var raw struct {
-			Jobs         map[int]*Job             `json:"jobs"`
-			LaunchBlocks map[int]launchBlock      `json:"launch_blocks,omitempty"`
-			Continued    map[string]int           `json:"continued"`
-			QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
-			PrevCap      map[string]int           `json:"prev_cap"`
+			MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
+			Jobs          map[int]*Job             `json:"jobs"`
+			LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
+			Continued     map[string]int           `json:"continued"`
+			QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
+			PrevCap       map[string]int           `json:"prev_cap"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
+			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
 			if raw.Jobs != nil {
 				s.Jobs = raw.Jobs
@@ -317,12 +320,13 @@ func (s *State) save() error {
 // saveLocked commits launch fences before an external effect can occur.
 func (s *State) saveLocked() error {
 	b, err := json.MarshalIndent(struct {
-		Jobs         map[int]*Job             `json:"jobs"`
-		Continued    map[string]int           `json:"continued"`
-		QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
-		PrevCap      map[string]int           `json:"prev_cap"`
-		LaunchBlocks map[int]launchBlock      `json:"launch_blocks,omitempty"`
-	}{s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks}, "", "  ")
+		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
+		Jobs          map[int]*Job             `json:"jobs"`
+		Continued     map[string]int           `json:"continued"`
+		QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
+		PrevCap       map[string]int           `json:"prev_cap"`
+		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
+	}{s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -518,15 +522,15 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 // registers an interactive agent in that exact pane before accepting goal delivery.
 func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt) (pane, ws string, err error) {
 	if !receipt.claim(buildAgentCmd(agent, ovr)) {
-		return "", "", errMatrix
+		return "", "", matrixSite("spawn.receipt-claim", errMatrix)
 	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
-		return "", "", fmt.Errorf("workspace create: %v: %.120q", werr, wout)
+		return "", "", matrixSite("spawn.workspace-create", errMatrix)
 	}
 	wraw, e := herdrUnwrap(wout)
 	if e != nil {
-		return "", "", e
+		return "", "", matrixSite("spawn.workspace-envelope", errMatrix)
 	}
 	// workspace_id/root pane are NOT at result top-level — they're under
 	// .workspace / .root_pane.
@@ -546,11 +550,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	pane = wr.RootPane.PaneID
 	if ws == "" || pane == "" {
-		return "", "", fmt.Errorf("workspace create returned no id/pane: %.160q", wout)
+		return "", "", matrixSite("spawn.workspace-handles", errMatrix)
 	}
 	location := &dispatchLocation{PaneID: pane, WorkspaceID: ws}
-	if receipt.writeDispatch("launching", location) != nil {
-		return pane, ws, errMatrix
+	if e := receipt.writeDispatch("launching", location); e != nil {
+		return pane, ws, matrixSite("spawn.launching-binding", e)
 	}
 	defer func() {
 		if err != nil {
@@ -577,7 +581,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	if out, e := h.herdr(ctx, "pane", "run", pane, b.String()); e != nil {
 		_ = out // never expose environment-bearing command output
-		return pane, ws, errAgentRegistration
+		return pane, ws, matrixSite("spawn.environment", errAgentRegistration)
 	}
 	if !strings.HasSuffix(agent, "-run") {
 		kind, nativeArgs := interactiveAgentArgs(agent, ovr)
@@ -585,14 +589,14 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)
 		if e != nil {
-			return pane, ws, errAgentRegistration
+			return pane, ws, matrixSite("spawn.agent-start", errAgentRegistration)
 		}
 		if _, e = herdrUnwrap(out); e != nil {
-			return pane, ws, errAgentRegistration
+			return pane, ws, matrixSite("spawn.agent-envelope", errAgentRegistration)
 		}
 	}
-	if receipt.writeDispatch("dispatched", location) != nil {
-		return pane, ws, errMatrix
+	if e := receipt.writeDispatch("dispatched", location); e != nil {
+		return pane, ws, matrixSite("spawn.dispatched-binding", e)
 	}
 	return pane, ws, nil
 }
@@ -2165,13 +2169,12 @@ func (c *Coord) tick(ctx context.Context) {
 			continue // target paused: no NEW spawns (live jobs above keep running)
 		}
 		acct, launched := c.matrixAttempt(ctx, n, is, tgt, budget, matrixAttemptDeps{
-			read: readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
+			report: func(r matrixRefusal) { c.reportIssueMatrixRefusal(ctx, n, is, r, postMatrixComment) },
+			read:   readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
 			host: c.pickHost, launch: c.spawn,
 		})
 		if launched {
 			budget[acct]--
-		} else {
-			log.Printf("issue #%d: matrix-launch-refused", n)
 		}
 	}
 	c.st.save()
@@ -2537,10 +2540,10 @@ func renderGoal(inbox, targetRepo, label, title, body, workdir, branch, hint str
 	).Replace(workerPrompt)
 }
 
-func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) bool {
+func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
 	tgt, ok := c.targetFor(is)
 	if !ok {
-		return false
+		return matrixSite("launch.target", errMatrix)
 	}
 
 	// 1. Push fresh creds before the agent starts.
@@ -2548,7 +2551,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	if err := c.auth.syncToHost(actx, host); err != nil {
 		acancel()
 		log.Printf("issue #%d: launch-effect-failed", n)
-		return false
+		return matrixSite("launch.auth-sync", errMatrix)
 	}
 	acancel()
 
@@ -2571,7 +2574,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	if _, err := host.runRemote(pctx, prep); err != nil {
 		pcancel()
 		log.Printf("issue #%d: launch-effect-failed", n)
-		return false
+		return matrixSite("launch.worktree", errMatrix)
 	}
 	pcancel()
 
@@ -2635,7 +2638,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		goalFile := workdir + "/.divybot-goal.md"
 		if err := host.writeFile(ctx, goalFile, goal); err != nil {
 			log.Printf("issue #%d: launch-effect-failed", n)
-			return false
+			return matrixSite("launch.goal-file", errMatrix)
 		}
 		_, _ = host.runRemote(ctx, fmt.Sprintf("grep -qxF .divybot-goal.md %s/.git/info/exclude 2>/dev/null || echo .divybot-goal.md >> %s/.git/info/exclude", shq(workdir), shq(workdir)))
 	}
@@ -2644,7 +2647,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	sctx, scancel := context.WithTimeout(ctx, 40*time.Second)
 	if !c.st.reserveLaunch(n) {
 		scancel()
-		return false
+		return matrixSite("launch.fence", errMatrix)
 	}
 	pane, ws, err := host.spawnAgent(sctx, label, workdir, env, agent, ovr, receipt)
 	if err != nil {
@@ -2657,7 +2660,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			cancel()
 		}
 		c.reportBlockedLaunch(ctx, n)
-		return false
+		return matrixSite("launch.registration", err)
 	}
 	scancel()
 
@@ -2700,7 +2703,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		c.st.LaunchBlocks[n] = launchBlock{Reason: "registration_incomplete"}
 		c.st.mu.Unlock()
 		log.Printf("issue #%d: registered agent state could not be persisted; automatic launch fenced", n)
-		return false
+		return matrixSite("launch.state-save", errMatrix)
 	}
 	c.st.mu.Unlock()
 
@@ -2728,7 +2731,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		gcancel()
 	}
 	log.Printf("issue #%d: launch-started-observation-unproven", n)
-	return true
+	return nil
 }
 
 func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]agentRef) {
