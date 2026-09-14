@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +43,7 @@ func testCommand(t *testing.T, cwd, command string, args ...string) string {
 }
 
 func TestCommonMatrixAttempt(t *testing.T) {
-	cases := []string{"success", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "wrong-harness", "router-substitution", "dry-run"}
+	cases := []string{"success", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := privateTestRoot(t)
@@ -54,7 +56,9 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			route := syntheticRoute()
 			budget := map[string]int{"claude": 1}
 			events := []string{}
+			refusals := []matrixRefusal{}
 			deps := matrixAttemptDeps{
+				report: func(refusal matrixRefusal) { refusals = append(refusals, refusal) },
 				read: func(context.Context, string, string, string) (string, error) {
 					events = append(events, "profile")
 					return "| `routing` | matrix `implementation` row |", nil
@@ -116,6 +120,10 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				deps.persist = func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error) { return nil, errMatrix }
 			case "nil-receipt":
 				deps.persist = func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error) { return nil, nil }
+			case "evaluator-inconclusive":
+				deps.resolve = func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error) {
+					return matrixRoute{}, errEvaluatorEvidence
+				}
 			case "evaluator-refused":
 				route.Role = "implementation_evaluation"
 			case "wrong-harness":
@@ -127,6 +135,16 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			}
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
 			success := name == "success" || name == "dry-run"
+			if strings.HasPrefix(name, "evaluator-") {
+				if !reflect.DeepEqual(refusals, []matrixRefusal{evaluatorRefusal()}) {
+					t.Fatal("evaluator refusal became a silent skip")
+				}
+				if containsString(events, "persist") || containsString(events, "host") {
+					t.Fatal("evaluator refusal reached launch preparation")
+				}
+			} else if len(refusals) != 0 {
+				t.Fatal("unrelated failure mislabeled as missing observer")
+			}
 			if ok != success {
 				t.Fatalf("unexpected admission for %s", name)
 			}
@@ -144,7 +162,7 @@ func TestPinsAndAuthorityAreBoundConfiguration(t *testing.T) {
 	is := Issue{ID: "synthetic-node", Title: "Synthetic", Body: "/swarm\ntier: architecture\npin: chosen"}
 	cfg := MatrixConfig{Pins: map[string]MatrixPin{"chosen": {"replaceable-logical", "medium"}}, Grants: []MatrixGrant{{IssueID: is.ID, Repo: "example/project", BriefDigest: briefDigest(is), Authorization: &MatrixAuthority{"owner", "Synthetic rationale"}}}}
 	req, e := prepareMatrixRequest(cfg, is, "example/project", parseOverrides(is.Body))
-	if e != nil || req.Pin.Model != "replaceable-logical" || req.Authorization == nil {
+	if e != nil || req.PinName != "chosen" || req.Pin.Model != "replaceable-logical" || req.Authorization == nil {
 		t.Fatal("configured pin or authority was lost")
 	}
 	cfg.Pins["chosen"] = MatrixPin{"different-logical", "high"}
@@ -263,7 +281,7 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 	}
 	cfg := syntheticSource(t)
 	base := matrixRequest{Tier: "feature", Role: "implementation", Available: []string{"claude", "codex"}, ProfileText: "| `routing` | matrix `implementation` row; evaluator `implementation_evaluation` |"}
-	for _, name := range []string{"matrix", "profile-default", "configured-override", "missing-grant", "missing-worklog", "invalid-authorizer", "privileged-without-authority", "override-does-not-waive-privilege", "authorized-privilege", "unknown-effort", "unknown-model", "evaluator", "profile-restriction", "unavailable", "coordinator"} {
+	for _, name := range []string{"matrix", "profile-default", "configured-override", "named-pin", "wrong-pin-name", "missing-pin-name", "changed-pin-value", "missing-grant", "missing-worklog", "invalid-authorizer", "privileged-without-authority", "override-does-not-waive-privilege", "authorized-privilege", "unknown-effort", "unknown-model", "evaluator", "profile-restriction", "unavailable", "coordinator"} {
 		t.Run(name, func(t *testing.T) {
 			req := base
 			pass := false
@@ -279,6 +297,21 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 				req.Override = grant
 				req.WorklogText = "Synthetic exact owner grant"
 				pass = true
+			case "named-pin", "wrong-pin-name", "missing-pin-name", "changed-pin-value":
+				req.PinName = "chosen"
+				requested := grant.Route
+				req.Pin, req.Override, req.WorklogText = &requested, grant, "Synthetic exact owner grant"
+				grant.Pin = "chosen"
+				switch name {
+				case "named-pin":
+					pass = true
+				case "wrong-pin-name":
+					grant.Pin = "other"
+				case "missing-pin-name":
+					grant.Pin = ""
+				case "changed-pin-value":
+					requested.Model = "not-the-authorized-model"
+				}
 			case "missing-grant":
 				req.Pin = &grant.Route
 			case "missing-worklog":
@@ -321,6 +354,9 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 				pass = true
 			}
 			route, e := resolveMatrix(context.Background(), cfg, req)
+			if name == "evaluator" && !errors.Is(e, errEvaluatorEvidence) {
+				t.Fatal("bridge dropped inconclusive observer reason")
+			}
 			if (e == nil) != pass {
 				t.Fatalf("unexpected bridge verdict for %s", name)
 			}
@@ -376,5 +412,39 @@ func TestBridgeProcessFailuresRefuse(t *testing.T) {
 				t.Fatal("failed CLI accepted")
 			}
 		})
+	}
+}
+
+func TestEvaluatorRefusalVocabularyIsClosed(t *testing.T) {
+	for _, input := range []string{
+		`{"status":"inconclusive","reasonCode":"observer-unavailable"}`,
+		`{"status":"inconclusive","reasonCode":"invented"}`,
+		`{"status":"pass","reasonCode":"observer-unavailable"}`,
+		`{"status":"inconclusive","reasonCode":"observer-unavailable","detail":"private"}`,
+		`{"status":"inconclusive","status":"inconclusive","reasonCode":"observer-unavailable"}`,
+	} {
+		_, err := decodeMatrixResult([]byte(input))
+		if err == nil {
+			t.Fatal("refusal became successful resolution")
+		}
+		valid := input == `{"status":"inconclusive","reasonCode":"observer-unavailable"}`
+		if errors.Is(err, errEvaluatorEvidence) != valid {
+			t.Fatal("refusal vocabulary accepted malformed evidence")
+		}
+	}
+}
+
+func TestRefusalLogContainsOnlyClosedEvidence(t *testing.T) {
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail"})
+	if output.Len() != 0 {
+		t.Fatal("untrusted refusal data reached the log")
+	}
+	reportMatrixRefusal(evaluatorRefusal())
+	if !strings.Contains(output.String(), `{"status":"inconclusive","reasonCode":"observer-unavailable"}`) {
+		t.Fatal("refusal diagnostic was not recorded")
 	}
 }

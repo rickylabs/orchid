@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,7 @@ type MatrixAuthority struct {
 	Rationale  string `json:"rationale"`
 }
 type MatrixOverride struct {
+	Pin         string    `json:"pin,omitempty"`
 	Authorizer  string    `json:"authorizer"`
 	Rationale   string    `json:"rationale"`
 	WorklogPath string    `json:"worklogPath"`
@@ -58,6 +60,7 @@ type MatrixGrant struct {
 	Override      *MatrixOverride  `json:"ownerMatrixOverride,omitempty"`
 }
 type matrixRequest struct {
+	PinName       string           `json:"pinName,omitempty"`
 	Tier          string           `json:"tier"`
 	Role          string           `json:"role"`
 	ProfileText   string           `json:"profileText,omitempty"`
@@ -84,6 +87,35 @@ var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var profileStem = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var repositoryName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var errMatrix = errors.New("matrix-refused")
+var errEvaluatorEvidence = errors.New("inconclusive: observer-unavailable")
+
+// reasonCode reuses the closed unknown-observation vocabulary of the I1 route receipt.
+// This records a refusal, never a successful launch receipt or an observed session identity.
+type matrixRefusal struct {
+	Status     string `json:"status"`
+	ReasonCode string `json:"reasonCode"`
+}
+
+func evaluatorRefusal() matrixRefusal { return matrixRefusal{"inconclusive", "observer-unavailable"} }
+func reportMatrixRefusal(refusal matrixRefusal) {
+	// Only the closed, internally constructed record can reach the log. No caller data is echoed.
+	if refusal != evaluatorRefusal() {
+		return
+	}
+	encoded, _ := json.Marshal(refusal)
+	log.Printf("matrix launch refused: %s", encoded)
+}
+func decodeMatrixResult(out []byte) (matrixRoute, error) {
+	var refusal matrixRefusal
+	if strictJSON(out, &refusal) == nil && refusal == evaluatorRefusal() {
+		return matrixRoute{}, errEvaluatorEvidence
+	}
+	var route matrixRoute
+	if strictJSON(out, &route) != nil {
+		return route, errMatrix
+	}
+	return route, nil
+}
 
 //go:embed matrix-bridge.ts
 var matrixBridge string
@@ -160,8 +192,12 @@ func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest)
 		return route, errMatrix
 	}
 	out, e := matrixCommand(ctx, cfg.Source, "deno", input, "run", "--no-config", "--no-lock", "--no-prompt", "--allow-read="+cfg.Source, "--allow-run=deno", script.Name())
-	if e != nil || strictJSON(out, &route) != nil || !sourceClean(ctx, cfg) {
+	if e != nil || !sourceClean(ctx, cfg) {
 		return route, errMatrix
+	}
+	route, e = decodeMatrixResult(out)
+	if e != nil {
+		return route, e
 	}
 	for _, s := range []string{route.Model, route.LogicalModel, route.Effort, route.RequestedEffort, route.Transport, route.Family, route.Tier, route.Role} {
 		if !cleanText(s) {
@@ -281,7 +317,7 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 		if !ok || !cleanText(p.Model) || !cleanText(p.Effort) || o.Model != "" || o.Effort != "" {
 			return req, errMatrix
 		}
-		req.Pin = &p
+		req.PinName, req.Pin = o.Pin, &p
 	} else if o.Model != "" || o.Effort != "" {
 		req.Pin = &MatrixPin{Model: o.Model, Effort: o.Effort}
 	}
@@ -425,6 +461,7 @@ func syncDirectory(dir string) error {
 
 // The injection points exercise the common production attempt, not a parallel test-only path.
 type matrixAttemptDeps struct {
+	report  func(matrixRefusal)
 	read    func(context.Context, string, string, string) (string, error)
 	resolve func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error)
 	persist func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error)
@@ -473,7 +510,15 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	c.gov.mu.Unlock()
 	route, e := d.resolve(ctx, cfg, req)
-	if e != nil || strings.HasSuffix(route.Role, "_evaluation") {
+	if errors.Is(e, errEvaluatorEvidence) || (e == nil && strings.HasSuffix(route.Role, "_evaluation")) {
+		report := d.report
+		if report == nil {
+			report = reportMatrixRefusal
+		}
+		report(evaluatorRefusal())
+		return "", false
+	}
+	if e != nil {
 		return "", false
 	}
 	if !containsString(req.Available, route.Transport) {

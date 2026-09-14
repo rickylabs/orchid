@@ -32,7 +32,10 @@ async function main() {
     }
   }
   // Explicitly denied until an actual observed model/session contract is ratified.
-  requireValue(!role.endsWith("_evaluation"));
+  if (authority.DELEGATION_ROLES.includes(role) && role.endsWith("_evaluation")) {
+    console.log(JSON.stringify({ status: "inconclusive", reasonCode: "observer-unavailable" }));
+    return;
+  }
   requireValue(coordinator || (authority.WORKLOAD_TIERS.includes(tier) && authority.DELEGATION_ROLES.includes(role)));
   const auth = input.authorization;
   if (auth) requireValue(["owner", "milestone_coordinator"].includes(auth.authorizer) && nonblank(auth.rationale));
@@ -51,6 +54,7 @@ async function main() {
     requireValue(!coordinator && grant && pin && nonblank(grant.route?.model) && nonblank(grant.route?.effort));
     requireValue(Object.hasOwn(authority.MODEL_CATALOG, grant.route.model));
     requireValue(grant.route.effort === "provider_default" || contract.EFFORTS.includes(grant.route.effort));
+    requireValue(!input.pinName || grant.pin === input.pinName);
     authority.assertOwnerMatrixOverride(tier, role, grant);
     // Existing source contract requires an exact human-readable worklog entry.
     const entry = authority.ownerMatrixOverrideWorklogEntry(tier, role, grant);
