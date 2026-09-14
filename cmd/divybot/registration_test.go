@@ -71,7 +71,13 @@ else:print(json.dumps({'result':{}}))
 }
 
 func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
-	for _, kind := range []string{"codex", "claude", "opencode", "agy"} {
+	expectedArgs := map[string][]string{
+		"codex":    {"--dangerously-bypass-approvals-and-sandbox", "-m", "fixture model 'quoted'"},
+		"claude":   {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'"},
+		"opencode": {"--model", "fixture-provider/fixture model 'quoted'"},
+		"agy":      {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'", "--effort", "fixture-effort"},
+	}
+	for kind, configuredArgs := range expectedArgs {
 		t.Run(kind, func(t *testing.T) {
 			h, calls := registrationHost(t, "")
 			o := Overrides{Model: "fixture model 'quoted'", Effort: "fixture-effort", Router: "fixture-provider"}
@@ -86,8 +92,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			if strings.Contains(got[1][3], "exec ") || !strings.Contains(got[1][3], "export FIXTURE_ENV=") {
 				t.Fatal("environment preparation must leave the shell available")
 			}
-			k, args := interactiveAgentArgs(kind, o)
-			expected := append([]string{"agent", "start", "fixture-agent", "--kind", k, "--pane", "w1:p1", "--timeout", "30000", "--"}, args...)
+			expected := append([]string{"agent", "start", "fixture-agent", "--kind", kind, "--pane", "w1:p1", "--timeout", "30000", "--"}, configuredArgs...)
 			if !reflect.DeepEqual(got[2], expected) {
 				t.Fatalf("argv lost identity or quoting: %q", got[2])
 			}

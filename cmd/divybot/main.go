@@ -2039,8 +2039,8 @@ func (c *Coord) tick(ctx context.Context) {
 
 	status, up := c.fleetStatus(ctx)
 
-	// Respawn dead sessions: a tracked job whose host responded but whose agent
-	// is gone (issue still open) is stalled — drop it so it re-spawns fresh.
+	// A persistently absent agent is an abandoned launch, not permission to retry.
+	// Fence it durably before removing tracking so a restart cannot respawn it.
 	type deadJob struct {
 		n    int
 		host string
@@ -2085,10 +2085,8 @@ func (c *Coord) tick(ctx context.Context) {
 		delete(c.st.Jobs, n)
 	}
 	c.st.mu.Unlock()
-	// Close each dead job's workspace before it respawns. Without this every
-	// flap-induced respawn leaks an orphan "unknown" workspace in herdr (the
-	// agent already exited, but the empty pane lingers forever). Done outside
-	// the state lock since closeWorkspace is a network round-trip.
+	// Close only the abandoned job's recorded workspace. Done outside the state
+	// lock because closeWorkspace is a network round-trip. No automatic respawn follows.
 	for _, d := range dead {
 		c.st.blockLaunch(d.n, "agent_disappeared")
 		c.reportBlockedLaunch(ctx, d.n)
@@ -2615,10 +2613,8 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		ocancel()
 		env["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"] = memOverride
 	}
-	// Launch via a login shell so PATH resolves claude/codex (~/.local/bin etc.)
-	// — herdr spawns argv with a bare system PATH. exec replaces the shell so the
-	// agent is the foreground process herdr's integration detects. The --env vars
-	// (creds/token/git identity/memory override) survive into the login shell.
+	// Prepare the pane environment, then let herdr start the configured agent
+	// in that same shell and register it before goal delivery.
 	// /swarm block in the inbox issue body (written directly, or carried over
 	// by commentTick's mirror) parameterizes the run.
 	runMode := strings.HasSuffix(agent, "-run")
