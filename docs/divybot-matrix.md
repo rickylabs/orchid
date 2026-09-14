@@ -144,3 +144,11 @@ private dispatcher state. Failed comments retry on a subsequent poll. A crash af
 but before saving can duplicate a comment; it cannot authorize a launch. A corrected
 configuration can be reconsidered normally; a diagnostic is not a launch reservation.
 Dry runs log the explanation but do not post comments or persist notification state.
+
+The `cause` field names the originating Go refusal site (for example,
+`receipt.file-create` or `spawn.agent-start`). Every former bare `errMatrix` return
+in the matrix and spawn path has a distinct static identifier. Errors wrap the
+sentinel for `errors.Is`; propagation through the launch callback preserves the
+origin instead of reducing it to a boolean. The closed site inventory and a source
+AST check prevent unlabelled returns or duplicated site identifiers. Neither the
+wrapped error's private payload nor arbitrary cause text is published.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -105,7 +106,7 @@ func TestRegistrationRefusesBusyNotReadyAndMalformedResponses(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			h, calls := registrationHost(t, failure)
 			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{}, registrationReceipt(t, "codex", Overrides{}))
-			if err != errAgentRegistration {
+			if !errors.Is(err, errAgentRegistration) {
 				t.Fatal("failed registration was accepted")
 			}
 			if pane != "w1:p1" || ws != "w1" {

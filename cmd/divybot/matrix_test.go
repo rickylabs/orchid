@@ -75,7 +75,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					events = append(events, "persist")
 					return persistMatrixReceipt(root, key, command, r, binding)
 				},
-				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) bool {
+				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) error {
 					events = append(events, "launch")
 					if agent != "claude" || o.Model != route.Model || o.Effort != route.Effort || !r.claim(buildAgentCmd(agent, o)) {
 						t.Fatal("launch did not consume the selected durable receipt")
@@ -85,7 +85,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" {
 						t.Fatal("authoritative inbox issue was not bound before launch")
 					}
-					return true
+					return nil
 				},
 			}
 			switch name {
@@ -452,7 +452,7 @@ func TestRefusalLogContainsOnlyClosedEvidence(t *testing.T) {
 	previous := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)
-	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail"})
+	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail", ""})
 	if output.Len() != 0 {
 		t.Fatal("untrusted refusal data reached the log")
 	}

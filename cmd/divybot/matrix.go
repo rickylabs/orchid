@@ -95,9 +95,12 @@ var errEvaluatorEvidence = errors.New("inconclusive: observer-unavailable")
 type matrixRefusal struct {
 	Status     string `json:"status"`
 	ReasonCode string `json:"reasonCode"`
+	Cause      string `json:"cause,omitempty"`
 }
 
-func evaluatorRefusal() matrixRefusal { return matrixRefusal{"inconclusive", "observer-unavailable"} }
+func evaluatorRefusal() matrixRefusal {
+	return matrixRefusal{"inconclusive", "observer-unavailable", ""}
+}
 func reportMatrixRefusal(refusal matrixRefusal) {
 	// Only the closed, internally constructed record can reach the log. No caller data is echoed.
 	if !validMatrixRefusal(refusal) {
@@ -115,8 +118,8 @@ func decodeMatrixResult(out []byte) (matrixRoute, error) {
 		return matrixRoute{}, matrixReason(refusal.ReasonCode)
 	}
 	var route matrixRoute
-	if strictJSON(out, &route) != nil {
-		return route, errMatrix
+	if e := strictJSON(out, &route); e != nil {
+		return route, matrixSite("decode.envelope", e)
 	}
 	return route, nil
 }
@@ -138,7 +141,7 @@ type limitedOutput struct{ bytes.Buffer }
 
 func (b *limitedOutput) Write(p []byte) (int, error) {
 	if b.Len()+len(p) > 1024*1024 {
-		return 0, errMatrix
+		return 0, matrixSite("output.limit", errMatrix)
 	}
 	return b.Buffer.Write(p)
 }
@@ -159,45 +162,58 @@ func matrixCommand(ctx context.Context, cwd, command string, input []byte, args 
 	var out limitedOutput
 	cmd.Stdout = &out
 	if cmd.Run() != nil {
-		return nil, errMatrix
+		return nil, matrixSite("command.exit", errMatrix)
 	}
 	return out.Bytes(), nil
 }
-func sourceClean(ctx context.Context, cfg MatrixConfig) bool {
+func sourceClean(ctx context.Context, cfg MatrixConfig) bool { return sourceCheck(ctx, cfg) == nil }
+func sourceCheck(ctx context.Context, cfg MatrixConfig) error {
 	if !filepath.IsAbs(cfg.Source) || !sourceRevision.MatchString(cfg.Revision) {
-		return false
+		return matrixSite("source.arguments", matrixReason("source-invalid"))
 	}
 	head, e := matrixCommand(ctx, cfg.Source, "git", nil, "rev-parse", "HEAD")
-	if e != nil || strings.TrimSpace(string(head)) != cfg.Revision {
-		return false
+	if e != nil {
+		return matrixSite("source.head-command", matrixReason("source-invalid"))
+	}
+	if strings.TrimSpace(string(head)) != cfg.Revision {
+		return matrixSite("source.revision-mismatch", matrixReason("source-invalid"))
 	}
 	status, e := matrixCommand(ctx, cfg.Source, "git", nil, "status", "--porcelain", "--untracked-files=all")
-	return e == nil && len(status) == 0
+	if e != nil {
+		return matrixSite("source.status-command", matrixReason("source-invalid"))
+	}
+	if len(status) != 0 {
+		return matrixSite("source.dirty", matrixReason("source-invalid"))
+	}
+	return nil
 }
 func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest) (matrixRoute, error) {
 	var route matrixRoute
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if !sourceClean(ctx, cfg) {
-		return route, matrixReason("source-invalid")
+	if e := sourceCheck(ctx, cfg); e != nil {
+		return route, e
 	}
 	script, e := os.CreateTemp("", "matrix-*.ts")
 	if e != nil {
-		return route, errMatrix
+		return route, matrixSite("resolve.temp-create", errMatrix)
 	}
 	defer os.Remove(script.Name())
 	_, e = script.WriteString(matrixBridge)
 	closeErr := script.Close()
 	if e != nil || closeErr != nil {
-		return route, errMatrix
+		return route, matrixSite("resolve.temp-write-close", errMatrix)
 	}
 	input, e := json.Marshal(request)
 	if e != nil {
-		return route, errMatrix
+		return route, matrixSite("resolve.encode-request", errMatrix)
 	}
 	out, e := matrixCommand(ctx, cfg.Source, "deno", input, "run", "--no-config", "--no-lock", "--no-prompt", "--allow-read="+cfg.Source, "--allow-run=deno", script.Name())
-	if e != nil || !sourceClean(ctx, cfg) {
-		return route, errMatrix
+	if e != nil {
+		return route, matrixSite("resolve.command", e)
+	}
+	if e := sourceCheck(ctx, cfg); e != nil {
+		return route, matrixSite("resolve.source-changed", e)
 	}
 	route, e = decodeMatrixResult(out)
 	if e != nil {
@@ -205,11 +221,11 @@ func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest)
 	}
 	for _, s := range []string{route.Provider, route.Model, route.LogicalModel, route.Effort, route.RequestedEffort, route.Transport, route.Family, route.Tier, route.Role} {
 		if !cleanText(s) {
-			return matrixRoute{}, errMatrix
+			return matrixRoute{}, matrixSite("resolve.route-field", errMatrix)
 		}
 	}
 	if !digestPattern.MatchString(route.Digest) {
-		return matrixRoute{}, errMatrix
+		return matrixRoute{}, matrixSite("resolve.route-digest", errMatrix)
 	}
 	return route, nil
 }
@@ -234,7 +250,7 @@ func strictJSON(b []byte, out any) error {
 					}
 					key, ok := k.(string)
 					if !ok || seen[key] {
-						return errMatrix
+						return matrixSite("json.duplicate-key", errMatrix)
 					}
 					seen[key] = true
 					if e := value(); e != nil {
@@ -248,23 +264,23 @@ func strictJSON(b []byte, out any) error {
 					}
 				}
 			default:
-				return errMatrix
+				return matrixSite("json.delimiter", errMatrix)
 			}
 			_, e = tokens.Token()
 			return e
 		}
 		return nil
 	}
-	if value() != nil {
-		return errMatrix
+	if e := value(); e != nil {
+		return matrixSite("json.value", e)
 	}
 	if _, e := tokens.Token(); e != io.EOF {
-		return errMatrix
+		return matrixSite("json.trailing", errMatrix)
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if d.Decode(out) != nil {
-		return errMatrix
+		return matrixSite("json.decode", errMatrix)
 	}
 	return nil
 }
@@ -272,7 +288,7 @@ func strictJSON(b []byte, out any) error {
 // readRoutingFile reads only a pinned target revision; content and private filenames never reach logs.
 func readRoutingFile(ctx context.Context, repo, revision, name string) (string, error) {
 	if !repositoryName.MatchString(repo) || !sourceRevision.MatchString(revision) || filepath.IsAbs(name) || strings.Contains(name, "\\") || filepath.ToSlash(filepath.Clean(name)) != name || strings.HasPrefix(name, "../") {
-		return "", errMatrix
+		return "", matrixSite("routing-file.arguments", errMatrix)
 	}
 	data, e := matrixCommand(ctx, "", "gh", nil, "api", "repos/"+repo+"/contents/"+name+"?ref="+revision)
 	var file struct {
@@ -280,12 +296,15 @@ func readRoutingFile(ctx context.Context, repo, revision, name string) (string, 
 		Encoding string `json:"encoding"`
 		Type     string `json:"type"`
 	}
-	if e != nil || json.Unmarshal(data, &file) != nil || file.Encoding != "base64" || file.Type != "file" {
-		return "", errMatrix
+	if e != nil {
+		return "", matrixSite("routing-file.command", e)
+	}
+	if json.Unmarshal(data, &file) != nil || file.Encoding != "base64" || file.Type != "file" {
+		return "", matrixSite("routing-file.response", errMatrix)
 	}
 	decoded, e := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
 	if e != nil || len(decoded) > 256*1024 {
-		return "", errMatrix
+		return "", matrixSite("routing-file.base64", errMatrix)
 	}
 	return string(decoded), nil
 }
@@ -442,43 +461,43 @@ func privateReceiptRoot(root string) bool {
 }
 func persistMatrixReceipt(root, key, command string, receipt matrixReceipt, binding any) (*durableMatrixReceipt, error) {
 	if !privateReceiptRoot(root) || !digestPattern.MatchString(key) {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.root-or-key", errMatrix)
 	}
 	dir, e := os.MkdirTemp(root, ".pending-")
 	if e != nil {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.temp-directory", errMatrix)
 	}
 	defer os.RemoveAll(dir)
 	body, e := json.Marshal(receipt)
 	if e != nil {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.encode", errMatrix)
 	}
 	metadata, e := json.Marshal(binding)
 	if e != nil {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.binding-encode", errMatrix)
 	}
 	for name, data := range map[string][]byte{"receipt.json": body, "binding.json": metadata} {
 		f, e := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if e != nil {
-			return nil, errMatrix
+			return nil, matrixSite("receipt.file-create", errMatrix)
 		}
 		_, w := f.Write(data)
 		syncErr := f.Sync()
 		closeErr := f.Close()
 		if w != nil || syncErr != nil || closeErr != nil {
-			return nil, errMatrix
+			return nil, matrixSite("receipt.file-write-sync-close", errMatrix)
 		}
 	}
 	if syncDirectory(dir) != nil {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.directory-sync", errMatrix)
 	}
 	target := filepath.Join(root, key)
 	// mkdir is the cross-process exclusion primitive. Its presence fences every later attempt.
 	if os.Mkdir(target, 0700) != nil {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.reservation-exists-or-create", errMatrix)
 	}
 	if os.Rename(dir, filepath.Join(target, "record")) != nil || syncDirectory(target) != nil || syncDirectory(root) != nil {
-		return nil, errMatrix
+		return nil, matrixSite("receipt.publish-sync", errMatrix)
 	}
 	return &durableMatrixReceipt{file: filepath.Join(target, "record", "receipt.json"), digest: shaText(body), command: command}, nil
 }
@@ -486,33 +505,33 @@ func persistMatrixReceipt(root, key, command string, receipt matrixReceipt, bind
 // Atomic snapshots use the existing reservation as their durable ownership boundary.
 func (r *durableMatrixReceipt) writeDispatch(state string, location *dispatchLocation) error {
 	if r == nil {
-		return errMatrix
+		return matrixSite("dispatch.nil-receipt", errMatrix)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.dispatch == nil {
-		return errMatrix
+		return matrixSite("dispatch.nil-binding", errMatrix)
 	}
 	next := *r.dispatch
 	next.State, next.Location = state, location
 	data, e := json.Marshal(next)
 	if e != nil {
-		return errMatrix
+		return matrixSite("dispatch.encode", errMatrix)
 	}
 	dir := filepath.Dir(r.file)
 	f, e := os.CreateTemp(dir, ".dispatch-")
 	if e != nil {
-		return errMatrix
+		return matrixSite("dispatch.temp-create", errMatrix)
 	}
 	defer os.Remove(f.Name())
 	_, written := f.Write(data)
 	synced := f.Sync()
 	closed := f.Close()
 	if written != nil || synced != nil || closed != nil {
-		return errMatrix
+		return matrixSite("dispatch.write-sync-close", errMatrix)
 	}
 	if os.Rename(f.Name(), filepath.Join(dir, "dispatch.json")) != nil || syncDirectory(dir) != nil {
-		return errMatrix
+		return matrixSite("dispatch.publish-sync", errMatrix)
 	}
 	r.dispatch = &next
 	return nil
@@ -521,7 +540,7 @@ func (r *durableMatrixReceipt) writeDispatch(state string, location *dispatchLoc
 func syncDirectory(dir string) error {
 	f, e := os.Open(dir)
 	if e != nil {
-		return errMatrix
+		return matrixSite("directory.open", errMatrix)
 	}
 	defer f.Close()
 	return f.Sync()
@@ -533,7 +552,7 @@ type matrixAttemptDeps struct {
 	read    func(context.Context, string, string, string) (string, error)
 	resolve func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error)
 	persist func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error)
-	launch  func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) bool
+	launch  func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) error
 	host    func(Target, string) (Host, bool)
 }
 
@@ -575,12 +594,14 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	req.ProfileText, e = d.read(ctx, target.Repo, revision, "profiles/"+o.Profile+".md")
 	if e != nil || req.ProfileText == "" {
-		return refuse("profile-unavailable")
+		report(refusalWithReason(matrixSite("attempt.profile-read", e), "profile-unavailable"))
+		return "", false
 	}
 	if req.Override != nil {
 		req.WorklogText, e = d.read(ctx, target.Repo, revision, req.Override.WorklogPath)
 		if e != nil {
-			return refuse("override-worklog-unavailable")
+			report(refusalWithReason(e, "override-worklog-unavailable"))
+			return "", false
 		}
 	}
 	now := time.Now()
@@ -634,17 +655,24 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
 	handle, e := d.persist(cfg.ReceiptRoot, key, buildAgentCmd(agent, o), receiptFor(cfg, route), binding)
-	if e != nil || handle == nil {
-		return refuse("receipt-persistence-failed")
+	if e != nil {
+		report(refusalWithReason(e, "receipt-persistence-failed"))
+		return "", false
+	}
+	if handle == nil {
+		report(refusalWithReason(matrixSite("attempt.nil-receipt", errMatrix), "receipt-persistence-failed"))
+		return "", false
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
 		Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort}
-	if handle.writeDispatch("reserved", nil) != nil {
-		return refuse("dispatch-persistence-failed")
+	if e := handle.writeDispatch("reserved", nil); e != nil {
+		report(refusalWithReason(e, "dispatch-persistence-failed"))
+		return "", false
 	}
-	if !d.launch(ctx, n, is, host, agent, o, handle) {
-		return refuse("launch-failed")
+	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
+		report(refusalWithReason(e, "launch-failed"))
+		return "", false
 	}
 	return route.Transport, true
 }

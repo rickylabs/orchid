@@ -48,7 +48,7 @@ func (e matrixReason) Error() string { return string(e) }
 func (e matrixReason) Unwrap() error { return errMatrix }
 func validMatrixRefusal(r matrixRefusal) bool {
 	_, ok := matrixReasons[r.ReasonCode]
-	return ok && ((r.ReasonCode == "observer-unavailable" && r.Status == "inconclusive") || (r.ReasonCode != "observer-unavailable" && r.Status == "refused"))
+	return ok && (r.Cause == "" || matrixSites[r.Cause]) && ((r.ReasonCode == "observer-unavailable" && r.Status == "inconclusive") || (r.ReasonCode != "observer-unavailable" && r.Status == "refused"))
 }
 func refusalFor(err error) matrixRefusal {
 	if errors.Is(err, errEvaluatorEvidence) {
@@ -56,12 +56,12 @@ func refusalFor(err error) matrixRefusal {
 	}
 	var reason matrixReason
 	if errors.As(err, &reason) {
-		r := matrixRefusal{"refused", string(reason)}
+		r := matrixRefusal{"refused", string(reason), matrixCause(err)}
 		if validMatrixRefusal(r) {
 			return r
 		}
 	}
-	return matrixRefusal{"refused", "resolution-failed"}
+	return matrixRefusal{"refused", "resolution-failed", matrixCause(err)}
 }
 
 func postMatrixComment(ctx context.Context, repo string, n int, body string) error {
@@ -84,11 +84,11 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 		r = refusalFor(errMatrix)
 	}
 	detail := matrixReasons[r.ReasonCode]
-	log.Printf("issue #%d: matrix-launch-refused status=%s reason=%s field=%s; %s", n, r.Status, r.ReasonCode, detail.field, detail.hint)
+	log.Printf("issue #%d: matrix-launch-refused status=%s reason=%s field=%s cause=%s; %s", n, r.Status, r.ReasonCode, detail.field, r.Cause, detail.hint)
 	if c.dry {
 		return
 	}
-	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode))
+	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode + "\x00" + r.Cause))
 	c.st.mu.Lock()
 	notified := c.st.MatrixNotices[n] == key
 	c.st.mu.Unlock()
@@ -98,6 +98,9 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	body := fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s No agent was launched by this refused attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
 	if r.ReasonCode == "launch-failed" || r.ReasonCode == "dispatch-persistence-failed" {
 		body = fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s Launch outcome requires inspection; this notice does not authorize another attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
+	}
+	if r.Cause != "" {
+		body += " Cause: `" + r.Cause + "`."
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -115,4 +118,92 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 		log.Printf("issue #%d: matrix refusal notification persistence failed", n)
 	}
 	// A crash between comment and state write may duplicate a comment, never a launch.
+}
+
+var matrixSites = map[string]bool{
+	"source.arguments": true, "source.head-command": true, "source.revision-mismatch": true, "source.status-command": true, "source.dirty": true,
+	"decode.envelope":                      true,
+	"output.limit":                         true,
+	"command.exit":                         true,
+	"resolve.temp-create":                  true,
+	"resolve.temp-write-close":             true,
+	"resolve.encode-request":               true,
+	"resolve.command-or-source":            true,
+	"resolve.route-field":                  true,
+	"resolve.route-digest":                 true,
+	"json.duplicate-key":                   true,
+	"json.delimiter":                       true,
+	"json.value":                           true,
+	"json.trailing":                        true,
+	"json.decode":                          true,
+	"routing-file.arguments":               true,
+	"routing-file.response":                true,
+	"routing-file.base64":                  true,
+	"receipt.root-or-key":                  true,
+	"receipt.temp-directory":               true,
+	"receipt.encode":                       true,
+	"receipt.binding-encode":               true,
+	"receipt.file-create":                  true,
+	"receipt.file-write-sync-close":        true,
+	"receipt.directory-sync":               true,
+	"receipt.reservation-exists-or-create": true,
+	"receipt.publish-sync":                 true,
+	"dispatch.nil-receipt":                 true,
+	"dispatch.nil-binding":                 true,
+	"dispatch.encode":                      true,
+	"dispatch.temp-create":                 true,
+	"dispatch.write-sync-close":            true,
+	"dispatch.publish-sync":                true,
+	"directory.open":                       true,
+	"resolve.command":                      true,
+	"resolve.source-changed":               true,
+	"routing-file.command":                 true,
+	"attempt.nil-receipt":                  true,
+	"attempt.profile-read":                 true,
+	"spawn.receipt-claim":                  true,
+	"spawn.launching-binding":              true,
+	"spawn.dispatched-binding":             true,
+	"spawn.environment":                    true,
+	"spawn.agent-start":                    true,
+	"spawn.agent-envelope":                 true,
+	"spawn.workspace-create":               true,
+	"spawn.workspace-envelope":             true,
+	"spawn.workspace-handles":              true,
+	"launch.target":                        true,
+	"launch.auth-sync":                     true,
+	"launch.worktree":                      true,
+	"launch.goal-file":                     true,
+	"launch.fence":                         true,
+	"launch.registration":                  true,
+	"launch.state-save":                    true,
+}
+
+type matrixSiteError struct {
+	site  string
+	cause error
+}
+
+func (e *matrixSiteError) Error() string { return "matrix-refused: " + e.site }
+func (e *matrixSiteError) Unwrap() error { return e.cause }
+func matrixSite(site string, cause error) error {
+	if cause == nil {
+		cause = errMatrix
+	}
+	return &matrixSiteError{site, cause}
+}
+func matrixCause(err error) string {
+	// Preserve the innermost named cause: wrappers cannot erase the originating site.
+	site := ""
+	for err != nil {
+		if e, ok := err.(*matrixSiteError); ok && matrixSites[e.site] {
+			site = e.site
+		}
+		err = errors.Unwrap(err)
+	}
+	return site
+}
+func refusalWithReason(err error, code string) matrixRefusal {
+	r := refusalFor(matrixReason(code))
+	r.Cause = matrixCause(err)
+	return r
 }
