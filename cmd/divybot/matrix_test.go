@@ -223,11 +223,11 @@ func TestReceiptPersistenceAndEffectBoundary(t *testing.T) {
 	if _, e := persistMatrixReceipt(root, key, "synthetic-command", r, nil); e == nil {
 		t.Fatal("restart replay was admitted")
 	}
-	if _, _, e := (Host{}).spawnAgent(context.Background(), "", "", nil, "", nil); e == nil {
+	if _, _, e := (Host{}).spawnAgent(context.Background(), "", "", nil, "", Overrides{}, nil); e == nil {
 		t.Fatal("bare effect bypass accepted")
 	}
 	forged := &durableMatrixReceipt{}
-	if _, _, e := (Host{}).spawnAgent(context.Background(), "", "", nil, "", forged); e == nil {
+	if _, _, e := (Host{}).spawnAgent(context.Background(), "", "", nil, "", Overrides{}, forged); e == nil {
 		t.Fatal("unpersisted effect bypass accepted")
 	}
 	writeFixture(t, filepath.Join(root, ".git"), "synthetic marker")
@@ -464,7 +464,7 @@ func TestSpawnDispatchBindingAtEffect(t *testing.T) {
 		t.Run(map[bool]string{false: "acknowledged", true: "ambiguous"}[fail], func(t *testing.T) {
 			root := privateTestRoot(t)
 			key := strings.Repeat("a", 64)
-			r, err := persistMatrixReceipt(root, key, "synthetic-command", receiptFor(MatrixConfig{}, syntheticRoute()), nil)
+			r, err := persistMatrixReceipt(root, key, buildAgentCmd("claude", Overrides{}), receiptFor(MatrixConfig{}, syntheticRoute()), nil)
 			if err != nil {
 				t.Fatal("reservation failed")
 			}
@@ -483,7 +483,7 @@ if [ "$1" = workspace ]; then
  printf '%s\n' '{"result":{"workspace":{"workspace_id":"fixture-workspace"},"root_pane":{"pane_id":"fixture-pane"}}}'
  exit 0
 fi
-if [ "$1" = pane ]; then
+if [ "$1" = pane ] || [ "$1" = agent ]; then
  grep -q '"state":"launching"' "$FIXTURE_DISPATCH_FILE" || exit 8
  grep -q '"paneId":"fixture-pane"' "$FIXTURE_DISPATCH_FILE" || exit 9
  [ "$FIXTURE_FAIL" != yes ] || exit 7
@@ -498,7 +498,7 @@ exit 6
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("FIXTURE_DISPATCH_FILE", file)
 			t.Setenv("FIXTURE_FAIL", map[bool]string{false: "no", true: "yes"}[fail])
-			pane, workspace, err := (Host{Home: root}).spawnAgent(context.Background(), "fixture", root, nil, "synthetic-command", r)
+			pane, workspace, err := (Host{Home: root}).spawnAgent(context.Background(), "fixture", root, nil, "claude", Overrides{}, r)
 			if (err != nil) != fail {
 				t.Fatal("effect result changed")
 			}
@@ -514,7 +514,7 @@ exit 6
 			if err != nil || st.Mode().Perm() != 0600 {
 				t.Fatal("binding is not private")
 			}
-			if r.claim("synthetic-command") {
+			if r.claim(buildAgentCmd("claude", Overrides{})) {
 				t.Fatal("effect was replayable")
 			}
 		})

@@ -262,8 +262,9 @@ type Job struct {
 }
 
 type State struct {
-	mu   sync.Mutex
-	Jobs map[int]*Job `json:"jobs"`
+	LaunchBlocks map[int]launchBlock `json:"launch_blocks,omitempty"`
+	mu           sync.Mutex
+	Jobs         map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
 	Continued map[string]int `json:"continued"`
@@ -283,11 +284,13 @@ func loadState(path string) *State {
 	if b, err := os.ReadFile(path); err == nil {
 		var raw struct {
 			Jobs         map[int]*Job             `json:"jobs"`
+			LaunchBlocks map[int]launchBlock      `json:"launch_blocks,omitempty"`
 			Continued    map[string]int           `json:"continued"`
 			QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
 			PrevCap      map[string]int           `json:"prev_cap"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
+			s.LaunchBlocks = raw.LaunchBlocks
 			if raw.Jobs != nil {
 				s.Jobs = raw.Jobs
 			}
@@ -305,22 +308,48 @@ func loadState(path string) *State {
 	return s
 }
 
-func (s *State) save() {
+func (s *State) save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveLocked()
+}
+
+// saveLocked commits launch fences before an external effect can occur.
+func (s *State) saveLocked() error {
 	b, err := json.MarshalIndent(struct {
 		Jobs         map[int]*Job             `json:"jobs"`
 		Continued    map[string]int           `json:"continued"`
 		QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
 		PrevCap      map[string]int           `json:"prev_cap"`
-	}{s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap}, "", "  ")
+		LaunchBlocks map[int]launchBlock      `json:"launch_blocks,omitempty"`
+	}{s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks}, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	tmp := s.path + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, s.path)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
 	}
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err = os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(s.path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // ============================ exec helpers ============================
@@ -485,14 +514,10 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 	return r.Agent.AgentStatus
 }
 
-// spawnAgent creates a DEDICATED single-pane workspace and launches a BARE agent
-// in its root pane (no clawpatrol). Each agent gets its own workspace — earlier,
-// `agent start` without an isolated workspace piled every agent into one (10+
-// unrelated sessions crammed together). We run the agent IN the root pane via
-// `pane run` (env exported inline + exec) so the workspace stays exactly 1 pane,
-// rather than `agent start` adding a second pane beside an idle shell.
-func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agentCmd string, receipt *durableMatrixReceipt) (pane, ws string, err error) {
-	if !receipt.claim(agentCmd) {
+// spawnAgent creates an isolated workspace, prepares its shell environment, then
+// registers an interactive agent in that exact pane before accepting goal delivery.
+func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt) (pane, ws string, err error) {
+	if !receipt.claim(buildAgentCmd(agent, ovr)) {
 		return "", "", errMatrix
 	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
@@ -523,28 +548,51 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if ws == "" || pane == "" {
 		return "", "", fmt.Errorf("workspace create returned no id/pane: %.160q", wout)
 	}
-	// Persist exact workspace-create results BEFORE the execution effect. A failed/ambiguous
-	// pane-run stays visible as uncertain and never causes a second automatic launch.
 	location := &dispatchLocation{PaneID: pane, WorkspaceID: ws}
 	if receipt.writeDispatch("launching", location) != nil {
-		return "", "", errMatrix
+		return pane, ws, errMatrix
 	}
-	// Build the launch command: PATH guard, export env, then exec the agent.
+	defer func() {
+		if err != nil {
+			_ = receipt.writeDispatch("uncertain", location)
+		}
+	}()
+	// Environment setup leaves the shell alive. Never exec an interactive agent here:
+	// pane run does not register it with herdr's agent lifecycle.
 	var b strings.Builder
 	b.WriteString(`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; `)
-	for k, v := range env {
-		if v != "" {
-			fmt.Fprintf(&b, "export %s=%s; ", k, shq(v))
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if env[k] != "" {
+			fmt.Fprintf(&b, "export %s=%s; ", k, shq(env[k]))
 		}
 	}
-	b.WriteString("exec ")
-	b.WriteString(agentCmd)
-	if _, err := h.herdr(ctx, "pane", "run", pane, b.String()); err != nil {
-		_ = receipt.writeDispatch("uncertain", location)
-		return "", "", errMatrix
+	if strings.HasSuffix(agent, "-run") {
+		// Existing non-interactive jobs use PR/deadline supervision, not agent registration.
+		b.WriteString("exec " + buildAgentCmd(agent, ovr))
+	}
+	if out, e := h.herdr(ctx, "pane", "run", pane, b.String()); e != nil {
+		_ = out // never expose environment-bearing command output
+		return pane, ws, errAgentRegistration
+	}
+	if !strings.HasSuffix(agent, "-run") {
+		kind, nativeArgs := interactiveAgentArgs(agent, ovr)
+		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", "30000", "--"}
+		args = append(args, nativeArgs...)
+		out, e := h.herdr(ctx, args...)
+		if e != nil {
+			return pane, ws, errAgentRegistration
+		}
+		if _, e = herdrUnwrap(out); e != nil {
+			return pane, ws, errAgentRegistration
+		}
 	}
 	if receipt.writeDispatch("dispatched", location) != nil {
-		return "", "", errMatrix
+		return pane, ws, errMatrix
 	}
 	return pane, ws, nil
 }
@@ -2026,6 +2074,13 @@ func (c *Coord) tick(ctx context.Context) {
 		if j.Misses < deadMissThreshold {
 			continue
 		}
+		if c.st.LaunchBlocks == nil {
+			c.st.LaunchBlocks = map[int]launchBlock{}
+		}
+		c.st.LaunchBlocks[n] = launchBlock{Reason: "agent_disappeared"}
+		if c.st.saveLocked() != nil {
+			continue
+		}
 		dead = append(dead, deadJob{n: n, host: j.Host, ws: j.Workspace})
 		delete(c.st.Jobs, n)
 	}
@@ -2035,7 +2090,9 @@ func (c *Coord) tick(ctx context.Context) {
 	// agent already exited, but the empty pane lingers forever). Done outside
 	// the state lock since closeWorkspace is a network round-trip.
 	for _, d := range dead {
-		log.Printf("issue #%d: agent gone on %s (host up) — dropping for respawn", d.n, d.host)
+		c.st.blockLaunch(d.n, "agent_disappeared")
+		c.reportBlockedLaunch(ctx, d.n)
+		log.Printf("issue #%d: agent absent after supervision threshold; automatic relaunch abandoned", d.n)
 		if d.ws == "" {
 			continue
 		}
@@ -2092,6 +2149,9 @@ func (c *Coord) tick(ctx context.Context) {
 		c.st.mu.Unlock()
 		if live {
 			c.supervise(ctx, n, j, status)
+			continue
+		}
+		if c.reportBlockedLaunch(ctx, n) {
 			continue
 		}
 		// Adopt a live session before spawning (cutover / restart migration).
@@ -2561,7 +2621,6 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	// (creds/token/git identity/memory override) survive into the login shell.
 	// /swarm block in the inbox issue body (written directly, or carried over
 	// by commentTick's mirror) parameterizes the run.
-	agentCmd := buildAgentCmd(agent, ovr)
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
@@ -2587,10 +2646,21 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
 	sctx, scancel := context.WithTimeout(ctx, 40*time.Second)
-	pane, ws, err := host.spawnAgent(sctx, label, workdir, env, agentCmd, receipt)
+	if !c.st.reserveLaunch(n) {
+		scancel()
+		return false
+	}
+	pane, ws, err := host.spawnAgent(sctx, label, workdir, env, agent, ovr, receipt)
 	if err != nil {
 		scancel()
-		log.Printf("issue #%d: launch-effect-failed", n)
+		log.Printf("issue #%d: agent registration failed; automatic launch abandoned", n)
+		c.st.blockLaunch(n, "registration_failed")
+		if ws != "" {
+			cleanup, cancel := context.WithTimeout(ctx, 12*time.Second)
+			_ = host.closeWorkspace(cleanup, ws)
+			cancel()
+		}
+		c.reportBlockedLaunch(ctx, n)
 		return false
 	}
 	scancel()
@@ -2629,6 +2699,13 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	}
 	c.st.mu.Lock()
 	c.st.Jobs[n] = j
+	delete(c.st.LaunchBlocks, n)
+	if err := c.st.saveLocked(); err != nil {
+		c.st.LaunchBlocks[n] = launchBlock{Reason: "registration_incomplete"}
+		c.st.mu.Unlock()
+		log.Printf("issue #%d: registered agent state could not be persisted; automatic launch fenced", n)
+		return false
+	}
 	c.st.mu.Unlock()
 
 	// 4. Inject the goal — gated on TUI readiness. A freshly-spawned claude
