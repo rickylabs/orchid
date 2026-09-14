@@ -688,11 +688,17 @@ func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
 	if ceiling <= 0 || ceiling > 100 {
 		return false
 	}
-	// Missing/expired buckets are unknown, not entitlement. Both subscription windows must be known.
+	// A zero reset means the meter did not publish this window. Every published
+	// window must be fresh and under ceiling; an empty meter grants no headroom.
+	published := 0
 	for _, r := range []RateLimit{q.five, q.seven} {
+		if r.ResetsAt == 0 {
+			continue
+		}
+		published++
 		if r.ResetsAt <= now.Unix() || r.UsedPct < 0 || r.UsedPct >= ceiling {
 			return false
 		}
 	}
-	return true
+	return published > 0
 }
