@@ -3380,6 +3380,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "matrix" {
+		os.Exit(matrixConfigCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	cfgPath := flag.String("config", "divybot.json", "path to config json")
 	once := flag.Bool("once", false, "run a single tick and exit (for testing)")
 	dry := flag.Bool("dryrun", false, "log spawn/adopt decisions, take no spawning/poking action")

@@ -9,6 +9,9 @@ Start with `cmd/divybot/matrix.go` and its tests. `matrix-bridge.ts` imports the
 NetScript routing policy and runs its existing JSON CLI in place. There is no copied fleet
 matrix, provider adapter, NetScript source extraction or Harness build dependency.
 
+See [Build and validate matrix configuration](matrix-configuration.md) for the placeholder
+example and operator commands.
+
 ## Configuration and brief
 
 The operator's private `matrix` configuration supplies:
