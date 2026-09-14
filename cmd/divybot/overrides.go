@@ -140,25 +140,49 @@ func parseOverrides(text string) Overrides {
 	return o
 }
 
-// buildAgentCmd renders the launch command for a harness, applying overrides.
+// interactiveAgentArgs is the single argv source for command rendering and herdr registration.
+func interactiveAgentArgs(agent string, o Overrides) (string, []string) {
+	kind := agent
+	var args []string
+	switch agent {
+	case "codex":
+		args = []string{"--dangerously-bypass-approvals-and-sandbox"}
+		if o.Model != "" {
+			args = append(args, "-m", o.Model)
+		}
+	case "opencode":
+		model := o.Model
+		if model != "" && o.Router != "" && !strings.Contains(model, "/") {
+			model = o.Router + "/" + model
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+	case "agy":
+		args = []string{"--dangerously-skip-permissions"}
+		if o.Model != "" {
+			args = append(args, "--model", o.Model)
+		}
+		if o.Effort != "" {
+			args = append(args, "--effort", o.Effort)
+		}
+	default:
+		kind = "claude"
+		args = []string{"--dangerously-skip-permissions"}
+		if o.Model != "" {
+			args = append(args, "--model", o.Model)
+		}
+	}
+	return kind, args
+}
+
+// buildAgentCmd renders the same configured argv used by interactive registration.
 func buildAgentCmd(agent string, o Overrides) string {
-	// opencode addresses models as provider/model; a "router:" key supplies the
-	// provider half when the model was given bare.
 	ocModel := o.Model
 	if ocModel != "" && o.Router != "" && !strings.Contains(ocModel, "/") {
 		ocModel = o.Router + "/" + ocModel
 	}
 	switch agent {
-	case "codex":
-		// Real interactive codex TUI (herdr detects it as agent "codex" and
-		// `agent prompt --wait` drives it — verified on this host 2026-08-28).
-		// First run in a workdir shows a directory-trust prompt that leaves the
-		// agent "blocked"; injectGoal clears it with an Enter and retries.
-		cmd := "codex --dangerously-bypass-approvals-and-sandbox"
-		if o.Model != "" {
-			cmd += " -m " + shq(o.Model)
-		}
-		return cmd
 	case "codex-run":
 		// Non-interactive codex: `codex exec` with the pointer as argv. RunMode
 		// supervision (PR path + deadline) only.
@@ -168,15 +192,6 @@ func buildAgentCmd(agent string, o Overrides) string {
 		}
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`)
-	case "opencode":
-		// Interactive opencode TUI (herdr-supervised). The goal pointer is
-		// injected via herdr's native `agent prompt --wait`, which confirms
-		// submission server-side; the full goal is staged to .divybot-goal.md
-		// before spawn.
-		if ocModel != "" {
-			return "opencode --model " + shq(ocModel)
-		}
-		return "opencode"
 	case "opencode-run":
 		// Explicit fallback: non-interactive `opencode run` with the pointer as
 		// argv — no TUI, no injection, invisible to herdr agent detection (job
@@ -189,24 +204,12 @@ func buildAgentCmd(agent string, o Overrides) string {
 		}
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`)
-	case "agy":
-		// Antigravity CLI (agy 1.1.22+): supports the same auto-approve flag as
-		// claude, plus real --model and --effort flags (agy models: gemini-3.x
-		// families with per-effort variants).
-		cmd := "agy --dangerously-skip-permissions"
-		if o.Model != "" {
-			cmd += " --model " + shq(o.Model)
+	default:
+		kind, args := interactiveAgentArgs(agent, o)
+		for _, arg := range args {
+			kind += " " + shq(arg)
 		}
-		if o.Effort != "" {
-			cmd += " --effort " + shq(o.Effort)
-		}
-		return cmd
-	default: // claude
-		cmd := "claude --dangerously-skip-permissions"
-		if o.Model != "" {
-			cmd += " --model " + shq(o.Model)
-		}
-		return cmd
+		return kind
 	}
 }
 
