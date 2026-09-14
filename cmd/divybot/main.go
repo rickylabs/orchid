@@ -523,6 +523,12 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if ws == "" || pane == "" {
 		return "", "", fmt.Errorf("workspace create returned no id/pane: %.160q", wout)
 	}
+	// Persist exact workspace-create results BEFORE the execution effect. A failed/ambiguous
+	// pane-run stays visible as uncertain and never causes a second automatic launch.
+	location := &dispatchLocation{PaneID: pane, WorkspaceID: ws}
+	if receipt.writeDispatch("launching", location) != nil {
+		return "", "", errMatrix
+	}
 	// Build the launch command: PATH guard, export env, then exec the agent.
 	var b strings.Builder
 	b.WriteString(`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; `)
@@ -533,8 +539,12 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	b.WriteString("exec ")
 	b.WriteString(agentCmd)
-	if out, err := h.herdr(ctx, "pane", "run", pane, b.String()); err != nil {
-		return "", "", fmt.Errorf("pane run: %v: %.160q", err, out)
+	if _, err := h.herdr(ctx, "pane", "run", pane, b.String()); err != nil {
+		_ = receipt.writeDispatch("uncertain", location)
+		return "", "", errMatrix
+	}
+	if receipt.writeDispatch("dispatched", location) != nil {
+		return "", "", errMatrix
 	}
 	return pane, ws, nil
 }

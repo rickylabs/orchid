@@ -71,6 +71,7 @@ type matrixRequest struct {
 	Available     []string         `json:"availableTransports"`
 }
 type matrixRoute struct {
+	Provider        string `json:"provider"`
 	Model           string `json:"model"`
 	LogicalModel    string `json:"logicalModel"`
 	Effort          string `json:"effort"`
@@ -199,7 +200,7 @@ func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest)
 	if e != nil {
 		return route, e
 	}
-	for _, s := range []string{route.Model, route.LogicalModel, route.Effort, route.RequestedEffort, route.Transport, route.Family, route.Tier, route.Role} {
+	for _, s := range []string{route.Provider, route.Model, route.LogicalModel, route.Effort, route.RequestedEffort, route.Transport, route.Family, route.Tier, route.Role} {
 		if !cleanText(s) {
 			return matrixRoute{}, errMatrix
 		}
@@ -360,12 +361,37 @@ func receiptFor(cfg MatrixConfig, route matrixRoute) matrixReceipt {
 
 // A private, durable reservation is single-use, command-bound and survives process restarts.
 // A failed/uncertain launch remains reserved; no automatic retry can duplicate its effect.
+// This is dispatch context, separate from both the matrix policy receipt and native session identity.
+// It stays in the existing private reservation directory and is read by dsh-telemetry.
+type dispatchIssue struct {
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+}
+type dispatchLocation struct {
+	PaneID      string `json:"paneId"`
+	WorkspaceID string `json:"workspaceId"`
+}
+type dispatchBinding struct {
+	Provider      string            `json:"provider"`
+	SchemaVersion int               `json:"schemaVersion"`
+	RunID         string            `json:"runId"`
+	Issue         dispatchIssue     `json:"issue"`
+	ParentRunID   *string           `json:"parentRunId"`
+	Source        string            `json:"source"`
+	Profile       string            `json:"profile"`
+	Model         string            `json:"model"`
+	Effort        string            `json:"effort"`
+	State         string            `json:"state"`
+	Location      *dispatchLocation `json:"location"`
+}
+
 type durableMatrixReceipt struct {
-	mu      sync.Mutex
-	file    string
-	digest  string
-	command string
-	claimed bool
+	mu       sync.Mutex
+	file     string
+	digest   string
+	command  string
+	claimed  bool
+	dispatch *dispatchBinding
 }
 
 func (r *durableMatrixReceipt) claim(command string) bool {
@@ -450,6 +476,42 @@ func persistMatrixReceipt(root, key, command string, receipt matrixReceipt, bind
 	}
 	return &durableMatrixReceipt{file: filepath.Join(target, "record", "receipt.json"), digest: shaText(body), command: command}, nil
 }
+
+// Atomic snapshots use the existing reservation as their durable ownership boundary.
+func (r *durableMatrixReceipt) writeDispatch(state string, location *dispatchLocation) error {
+	if r == nil {
+		return errMatrix
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dispatch == nil {
+		return errMatrix
+	}
+	next := *r.dispatch
+	next.State, next.Location = state, location
+	data, e := json.Marshal(next)
+	if e != nil {
+		return errMatrix
+	}
+	dir := filepath.Dir(r.file)
+	f, e := os.CreateTemp(dir, ".dispatch-")
+	if e != nil {
+		return errMatrix
+	}
+	defer os.Remove(f.Name())
+	_, written := f.Write(data)
+	synced := f.Sync()
+	closed := f.Close()
+	if written != nil || synced != nil || closed != nil {
+		return errMatrix
+	}
+	if os.Rename(f.Name(), filepath.Join(dir, "dispatch.json")) != nil || syncDirectory(dir) != nil {
+		return errMatrix
+	}
+	r.dispatch = &next
+	return nil
+}
+
 func syncDirectory(dir string) error {
 	f, e := os.Open(dir)
 	if e != nil {
@@ -471,7 +533,7 @@ type matrixAttemptDeps struct {
 
 func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Target, budget map[string]int, d matrixAttemptDeps) (string, bool) {
 	cfg := c.cfg.Matrix
-	if !sourceRevision.MatchString(cfg.Revision) || !privateReceiptRoot(cfg.ReceiptRoot) || cfg.Source == "" {
+	if !sourceRevision.MatchString(cfg.Revision) || !privateReceiptRoot(cfg.ReceiptRoot) || cfg.Source == "" || !repositoryName.MatchString(c.cfg.Inbox) || n < 1 || is.Number != n {
 		return "", false
 	}
 	o := parseOverrides(is.Body)
@@ -552,6 +614,12 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
 	handle, e := d.persist(cfg.ReceiptRoot, key, buildAgentCmd(agent, o), receiptFor(cfg, route), binding)
 	if e != nil || handle == nil {
+		return "", false
+	}
+	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
+		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
+		Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort}
+	if handle.writeDispatch("reserved", nil) != nil {
 		return "", false
 	}
 	return route.Transport, d.launch(ctx, n, is, host, agent, o, handle)

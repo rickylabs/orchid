@@ -65,9 +65,10 @@ async function main() {
   // The upstream override path omits the role restriction; it never waives this profile gate.
   requireValue(coordinator || authority.isTransportAllowedForRole(role, selected.transport, selected.family));
   requireValue(input.availableTransports.includes(selected.transport));
-  for (const key of ["model", "logicalModel", "effort", "requestedEffort", "transport", "family"])
+  for (const key of ["provider", "model", "logicalModel", "effort", "requestedEffort", "transport", "family"])
     requireValue(nonblank(selected[key]));
   requireValue(contract.EFFORTS.includes(selected.effort));
+  requireValue(contract.PROVIDER_KINDS.includes(selected.provider));
 
   const args = ["run", "--no-config", "--no-lock", ".llm/tools/agentic/runtime/cli/delegation-matrix-table.ts"];
   if (!coordinator) args.push("--tier", tier, "--role", role);
@@ -96,7 +97,7 @@ async function main() {
   requireValue(Array.isArray(routes));
   if (!selected.ownerMatrixOverride) requireValue(routes.some((x: any) => x.model === selected.logicalModel && x.effort === selected.requestedEffort));
   const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", raw)), (x) => x.toString(16).padStart(2, "0")).join("");
-  console.log(JSON.stringify({ model: selected.model, logicalModel: selected.logicalModel,
+  console.log(JSON.stringify({ provider: selected.provider, model: selected.model, logicalModel: selected.logicalModel,
     effort: selected.effort, requestedEffort: selected.requestedEffort, transport: selected.transport,
     family: selected.family, tier, role, digest }));
 }

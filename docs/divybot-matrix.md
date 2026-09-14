@@ -80,8 +80,8 @@ The receipt and its private binding are synced before a single-use, command-boun
 reach `Host.spawnAgent`. A durable reservation fences the same issue/repository/brief across
 restarts. Any failed or ambiguous launch remains fenced; an operator must reconcile actual
 effects before explicitly authorizing a distinct attempt. Automatic retry cannot erase that
-record. No post-launch observation write is attempted, so no observation update can falsely
-turn this receipt green. Existing job persistence is not a substitute for the receipt fence.
+record. No native observation is asserted, so a dispatch acknowledgement cannot turn the
+matrix receipt green. Existing job persistence is not a substitute for the receipt fence.
 
 ## Gates and rollout
 
@@ -105,3 +105,27 @@ The owner explicitly assigned this upstream spawn hook to the Harness lane and c
 stays draft and must not be merged by this lane: the coordinator's merge authorization excludes
 Orchid. Harness PRs also remain drafts until owner sign-off. The separate mailbox pilot remains
 open for its planned issue/RFC brainstorm; it is not an approval dependency for this work.
+
+## Per-issue dispatch read
+
+The existing private reservation also holds `record/dispatch.json`. It records schema version,
+coordinator run identity, the **inbox** repository and issue number, selected profile/provider/model/effort,
+native CLI source and a null parent for an inbox root dispatch. Target repository and inbox issue
+numbers must never be paired. The exact pane and workspace returned by workspace creation are
+synced before the execution effect. States are `reserved`, `launching`, `dispatched`, or `uncertain`;
+acknowledged dispatch does not claim the agent is currently running. An ambiguous launch stays
+reserved against automatic replay and retains its exact location.
+
+Harness's existing `dsh-telemetry runs --json` reads these records when its private
+`DSH_TELEMETRY_DISPATCH_ROOT` configuration names the same receipt root. It emits additive
+`dispatches` rows with issue, parentRunId, location and dispatchState alongside canonical route
+evidence. The directory and native handles remain operational data, never publication artifacts.
+No extra collector or daemon is introduced.
+
+This binds requested provider/model/effort and issue/pane context. Provider is preserved from
+NetScript ResolvedDelegationRoute, not inferred by Orchid. Native session identity and observed
+route are still unavailable from this launch interface. Transport
+and model family are not substitutes for router evidence. No transcript is matched by cwd.
+Per-run spend/tokens remain unavailable until an explicit native-session association exists;
+provider-wide headroom remains separately scoped governance evidence. Installation and the
+first live issue dispatch remain unevidenced; this draft does not claim alpha acceptance.

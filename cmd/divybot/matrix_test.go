@@ -17,7 +17,7 @@ import (
 
 // All identities in this suite are invented; no fixture is an operational receipt.
 func syntheticRoute() matrixRoute {
-	return matrixRoute{Model: "synthetic-physical", LogicalModel: "synthetic-logical", Effort: "medium", RequestedEffort: "medium", Transport: "claude", Family: "synthetic-family", Tier: "feature", Role: "implementation", Digest: strings.Repeat("a", 64)}
+	return matrixRoute{Provider: "synthetic-router", Model: "synthetic-physical", LogicalModel: "synthetic-logical", Effort: "medium", RequestedEffort: "medium", Transport: "claude", Family: "synthetic-family", Tier: "feature", Role: "implementation", Digest: strings.Repeat("a", 64)}
 }
 func privateTestRoot(t *testing.T) string {
 	t.Helper()
@@ -43,11 +43,11 @@ func testCommand(t *testing.T, cwd, command string, args ...string) string {
 }
 
 func TestCommonMatrixAttempt(t *testing.T) {
-	cases := []string{"success", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
+	cases := []string{"success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := privateTestRoot(t)
-			cfg := &Config{Matrix: MatrixConfig{Source: root, ReceiptRoot: root, Revision: strings.Repeat("b", 40), TargetRevisions: map[string]string{"example/project": strings.Repeat("c", 40)}}, Governor: Gov{WeeklyCeiling: 92}}
+			cfg := &Config{Inbox: "example/inbox", Matrix: MatrixConfig{Source: root, ReceiptRoot: root, Revision: strings.Repeat("b", 40), TargetRevisions: map[string]string{"example/project": strings.Repeat("c", 40)}}, Governor: Gov{WeeklyCeiling: 92}}
 			c := &Coord{cfg: cfg}
 			now := time.Now()
 			q := quota{ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: now.Add(time.Hour).Unix()}, seven: RateLimit{UsedPct: 20, ResetsAt: now.Add(2 * time.Hour).Unix()}}
@@ -80,10 +80,19 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					if agent != "claude" || o.Model != route.Model || o.Effort != route.Effort || !r.claim(buildAgentCmd(agent, o)) {
 						t.Fatal("launch did not consume the selected durable receipt")
 					}
+					data, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
+					var binding dispatchBinding
+					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" {
+						t.Fatal("authoritative inbox issue was not bound before launch")
+					}
 					return true
 				},
 			}
 			switch name {
+			case "wrong-issue":
+				is.Number = 2
+			case "invalid-inbox":
+				cfg.Inbox = ""
 			case "missing-config":
 				cfg.Matrix.Revision = ""
 			case "missing-identity":
@@ -240,7 +249,7 @@ func syntheticSource(t *testing.T) MatrixConfig {
 	t.Helper()
 	root := privateTestRoot(t)
 	runtime := filepath.Join(root, ".llm", "tools", "agentic", "runtime")
-	writeFixture(t, filepath.Join(runtime, "contract.ts"), `export const EFFORTS=["medium","high"];`)
+	writeFixture(t, filepath.Join(runtime, "contract.ts"), `export const EFFORTS=["medium","high"]; export const PROVIDER_KINDS=["invented-router"];`)
 	writeFixture(t, filepath.Join(runtime, "delegation-matrix.ts"), `
 export const WORKLOAD_TIERS=["feature","architecture"];
 export const DELEGATION_ROLES=["implementation","deep_research","plan_evaluation","implementation_evaluation","vision_evaluation"];
@@ -258,7 +267,7 @@ export function resolveWorkloadRoute(r){
  const transport=r.role==="deep_research"?"codex":"claude";
  if(r.unavailableTransports.includes(transport))throw Error();
  const route=r.ownerMatrixOverride?.route||{model:"invented-primary",effort:"medium"};
- return {model:route.model+"-physical",logicalModel:route.model,effort:route.effort,requestedEffort:route.effort,transport,family:"invented-family",...(r.ownerMatrixOverride?{ownerMatrixOverride:r.ownerMatrixOverride}:{})};
+ return {provider:"invented-router",model:route.model+"-physical",logicalModel:route.model,effort:route.effort,requestedEffort:route.effort,transport,family:"invented-family",...(r.ownerMatrixOverride?{ownerMatrixOverride:r.ownerMatrixOverride}:{})};
 }
 export const resolveCoordinatorRoute=resolveWorkloadRoute;
 `)
@@ -360,7 +369,7 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 			if (e == nil) != pass {
 				t.Fatalf("unexpected bridge verdict for %s", name)
 			}
-			if pass && (!strings.HasPrefix(route.Model, "invented-") || !digestPattern.MatchString(route.Digest)) {
+			if pass && (route.Provider != "invented-router" || !strings.HasPrefix(route.Model, "invented-") || !digestPattern.MatchString(route.Digest)) {
 				t.Fatal("bridge lost configured identity or CLI evidence")
 			}
 		})
@@ -446,5 +455,68 @@ func TestRefusalLogContainsOnlyClosedEvidence(t *testing.T) {
 	reportMatrixRefusal(evaluatorRefusal())
 	if !strings.Contains(output.String(), `{"status":"inconclusive","reasonCode":"observer-unavailable"}`) {
 		t.Fatal("refusal diagnostic was not recorded")
+	}
+}
+
+// Exercises Host.spawnAgent itself with a synthetic herdr executable. No native agent runs.
+func TestSpawnDispatchBindingAtEffect(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "acknowledged", true: "ambiguous"}[fail], func(t *testing.T) {
+			root := privateTestRoot(t)
+			key := strings.Repeat("a", 64)
+			r, err := persistMatrixReceipt(root, key, "synthetic-command", receiptFor(MatrixConfig{}, syntheticRoute()), nil)
+			if err != nil {
+				t.Fatal("reservation failed")
+			}
+			r.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
+				Issue: dispatchIssue{Repo: "example/inbox", Number: 42}, Source: "claude", Model: "synthetic-model", Effort: "medium", Profile: "leaf"}
+			if r.writeDispatch("reserved", nil) != nil {
+				t.Fatal("binding failed")
+			}
+			file := filepath.Join(filepath.Dir(r.file), "dispatch.json")
+			bin := filepath.Join(root, "bin")
+			if os.Mkdir(bin, 0700) != nil {
+				t.Fatal("fixture setup failed")
+			}
+			script := `#!/bin/sh
+if [ "$1" = workspace ]; then
+ printf '%s\n' '{"result":{"workspace":{"workspace_id":"fixture-workspace"},"root_pane":{"pane_id":"fixture-pane"}}}'
+ exit 0
+fi
+if [ "$1" = pane ]; then
+ grep -q '"state":"launching"' "$FIXTURE_DISPATCH_FILE" || exit 8
+ grep -q '"paneId":"fixture-pane"' "$FIXTURE_DISPATCH_FILE" || exit 9
+ [ "$FIXTURE_FAIL" != yes ] || exit 7
+ printf '%s\n' '{"result":{}}'
+ exit 0
+fi
+exit 6
+`
+			if os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0700) != nil {
+				t.Fatal("fixture setup failed")
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FIXTURE_DISPATCH_FILE", file)
+			t.Setenv("FIXTURE_FAIL", map[bool]string{false: "no", true: "yes"}[fail])
+			pane, workspace, err := (Host{Home: root}).spawnAgent(context.Background(), "fixture", root, nil, "synthetic-command", r)
+			if (err != nil) != fail {
+				t.Fatal("effect result changed")
+			}
+			if !fail && (pane != "fixture-pane" || workspace != "fixture-workspace") {
+				t.Fatal("exact location lost")
+			}
+			data, err := os.ReadFile(file)
+			var binding dispatchBinding
+			if err != nil || json.Unmarshal(data, &binding) != nil || binding.Location == nil || binding.Location.PaneID != "fixture-pane" || binding.State != map[bool]string{false: "dispatched", true: "uncertain"}[fail] {
+				t.Fatal("effect state not durable")
+			}
+			st, err := os.Stat(file)
+			if err != nil || st.Mode().Perm() != 0600 {
+				t.Fatal("binding is not private")
+			}
+			if r.claim("synthetic-command") {
+				t.Fatal("effect was replayable")
+			}
+		})
 	}
 }
