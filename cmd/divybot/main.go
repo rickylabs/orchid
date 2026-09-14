@@ -262,9 +262,10 @@ type Job struct {
 }
 
 type State struct {
-	LaunchBlocks map[int]launchBlock `json:"launch_blocks,omitempty"`
-	mu           sync.Mutex
-	Jobs         map[int]*Job `json:"jobs"`
+	MatrixNotices map[int]string      `json:"matrix_notices,omitempty"`
+	LaunchBlocks  map[int]launchBlock `json:"launch_blocks,omitempty"`
+	mu            sync.Mutex
+	Jobs          map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
 	Continued map[string]int `json:"continued"`
@@ -283,13 +284,15 @@ func loadState(path string) *State {
 	s := &State{Jobs: map[int]*Job{}, Continued: map[string]int{}, QuotaSamples: map[string][]QuotaSample{}, PrevCap: map[string]int{}, path: path}
 	if b, err := os.ReadFile(path); err == nil {
 		var raw struct {
-			Jobs         map[int]*Job             `json:"jobs"`
-			LaunchBlocks map[int]launchBlock      `json:"launch_blocks,omitempty"`
-			Continued    map[string]int           `json:"continued"`
-			QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
-			PrevCap      map[string]int           `json:"prev_cap"`
+			MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
+			Jobs          map[int]*Job             `json:"jobs"`
+			LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
+			Continued     map[string]int           `json:"continued"`
+			QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
+			PrevCap       map[string]int           `json:"prev_cap"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
+			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
 			if raw.Jobs != nil {
 				s.Jobs = raw.Jobs
@@ -317,12 +320,13 @@ func (s *State) save() error {
 // saveLocked commits launch fences before an external effect can occur.
 func (s *State) saveLocked() error {
 	b, err := json.MarshalIndent(struct {
-		Jobs         map[int]*Job             `json:"jobs"`
-		Continued    map[string]int           `json:"continued"`
-		QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
-		PrevCap      map[string]int           `json:"prev_cap"`
-		LaunchBlocks map[int]launchBlock      `json:"launch_blocks,omitempty"`
-	}{s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks}, "", "  ")
+		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
+		Jobs          map[int]*Job             `json:"jobs"`
+		Continued     map[string]int           `json:"continued"`
+		QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
+		PrevCap       map[string]int           `json:"prev_cap"`
+		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
+	}{s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -2165,13 +2169,12 @@ func (c *Coord) tick(ctx context.Context) {
 			continue // target paused: no NEW spawns (live jobs above keep running)
 		}
 		acct, launched := c.matrixAttempt(ctx, n, is, tgt, budget, matrixAttemptDeps{
-			read: readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
+			report: func(r matrixRefusal) { c.reportIssueMatrixRefusal(ctx, n, is, r, postMatrixComment) },
+			read:   readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
 			host: c.pickHost, launch: c.spawn,
 		})
 		if launched {
 			budget[acct]--
-		} else {
-			log.Printf("issue #%d: matrix-launch-refused", n)
 		}
 	}
 	c.st.save()

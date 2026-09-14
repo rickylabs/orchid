@@ -151,8 +151,8 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				if containsString(events, "persist") || containsString(events, "host") {
 					t.Fatal("evaluator refusal reached launch preparation")
 				}
-			} else if len(refusals) != 0 {
-				t.Fatal("unrelated failure mislabeled as missing observer")
+			} else if !success && (len(refusals) != 1 || !validMatrixRefusal(refusals[0]) || refusals[0] == evaluatorRefusal()) {
+				t.Fatal("refused dispatch must emit exactly one safe reason")
 			}
 			if ok != success {
 				t.Fatalf("unexpected admission for %s", name)
@@ -363,6 +363,10 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 				pass = true
 			}
 			route, e := resolveMatrix(context.Background(), cfg, req)
+			expectedReason := map[string]string{"missing-grant": "override-required", "privileged-without-authority": "authorization-required", "invalid-authorizer": "authorization-invalid", "missing-worklog": "override-invalid"}[name]
+			if expectedReason != "" && refusalFor(e).ReasonCode != expectedReason {
+				t.Fatal("bridge lost specific refusal reason")
+			}
 			if name == "evaluator" && !errors.Is(e, errEvaluatorEvidence) {
 				t.Fatal("bridge dropped inconclusive observer reason")
 			}

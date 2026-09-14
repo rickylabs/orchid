@@ -4,6 +4,7 @@ const nonblank = (v: unknown): v is string => typeof v === "string" &&
   v.trim() === v && v.length > 0 && !/[\p{Cc}\u2028\u2029]/u.test(v);
 const requireValue = (ok: unknown) => { if (!ok) throw new Error("matrix-refused"); };
 
+let failure = "resolution-failed";
 async function main() {
   const input = JSON.parse(await new Response(Deno.stdin.readable).text());
   const base = new URL(`file://${Deno.cwd()}/`);
@@ -13,6 +14,7 @@ async function main() {
   let role = input.role?.replaceAll("-", "_") || "";
   let tier = input.tier || "";
   let coordinator = false;
+  failure = "profile-invalid";
   if (input.profileText) {
     const rows = input.profileText.split("\n").filter((line: string) => /^\|\s*`routing`\s*\|/.test(line));
     requireValue(rows.length === 1);
@@ -36,10 +38,14 @@ async function main() {
     console.log(JSON.stringify({ status: "inconclusive", reasonCode: "observer-unavailable" }));
     return;
   }
+  failure = "routing-invalid";
   requireValue(coordinator || (authority.WORKLOAD_TIERS.includes(tier) && authority.DELEGATION_ROLES.includes(role)));
+  failure = "authorization-invalid";
   const auth = input.authorization;
   if (auth) requireValue(["owner", "milestone_coordinator"].includes(auth.authorizer) && nonblank(auth.rationale));
+  if (!auth) failure = "authorization-required";
   if (!coordinator) authority.assertPrivilegedTierAuthorization(tier, auth);
+  failure = "resolution-failed";
   const unavailableTransports = authority.MODEL_TRANSPORTS.filter((x: string) => !input.availableTransports.includes(x));
   // worktree is only echoed by this resolver; host placement binds the actual directory later.
   const request = { tier, role, worktree: ".", unavailableTransports, privilegedTierAuthorization: auth };
@@ -50,8 +56,10 @@ async function main() {
   const matches = (route: any) => route && (!pin?.model || [route.logicalModel, route.model].includes(pin.model)) &&
     (!pin?.effort || [route.requestedEffort, route.effort].includes(pin.effort));
   if (!selected || !matches(selected)) {
+    failure = !selected && !pin ? "route-unavailable" : "override-required";
     const grant = input.ownerMatrixOverride;
     requireValue(!coordinator && grant && pin && nonblank(grant.route?.model) && nonblank(grant.route?.effort));
+    failure = "override-invalid";
     requireValue(Object.hasOwn(authority.MODEL_CATALOG, grant.route.model));
     requireValue(grant.route.effort === "provider_default" || contract.EFFORTS.includes(grant.route.effort));
     requireValue(!input.pinName || grant.pin === input.pinName);
@@ -62,6 +70,7 @@ async function main() {
     selected = resolve({ ...request, ownerMatrixOverride: grant });
     requireValue(matches(selected));
   }
+  failure = "resolution-failed";
   // The upstream override path omits the role restriction; it never waives this profile gate.
   requireValue(coordinator || authority.isTransportAllowedForRole(role, selected.transport, selected.family));
   requireValue(input.availableTransports.includes(selected.transport));
@@ -102,4 +111,4 @@ async function main() {
     family: selected.family, tier, role, digest }));
 }
 
-try { await main(); } catch { Deno.exit(1); }
+try { await main(); } catch { console.log(JSON.stringify({ status: "refused", reasonCode: failure })); }

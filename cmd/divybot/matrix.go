@@ -100,7 +100,7 @@ type matrixRefusal struct {
 func evaluatorRefusal() matrixRefusal { return matrixRefusal{"inconclusive", "observer-unavailable"} }
 func reportMatrixRefusal(refusal matrixRefusal) {
 	// Only the closed, internally constructed record can reach the log. No caller data is echoed.
-	if refusal != evaluatorRefusal() {
+	if !validMatrixRefusal(refusal) {
 		return
 	}
 	encoded, _ := json.Marshal(refusal)
@@ -110,6 +110,9 @@ func decodeMatrixResult(out []byte) (matrixRoute, error) {
 	var refusal matrixRefusal
 	if strictJSON(out, &refusal) == nil && refusal == evaluatorRefusal() {
 		return matrixRoute{}, errEvaluatorEvidence
+	}
+	if strictJSON(out, &refusal) == nil && validMatrixRefusal(refusal) {
+		return matrixRoute{}, matrixReason(refusal.ReasonCode)
 	}
 	var route matrixRoute
 	if strictJSON(out, &route) != nil {
@@ -176,7 +179,7 @@ func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if !sourceClean(ctx, cfg) {
-		return route, errMatrix
+		return route, matrixReason("source-invalid")
 	}
 	script, e := os.CreateTemp("", "matrix-*.ts")
 	if e != nil {
@@ -289,8 +292,11 @@ func readRoutingFile(ctx context.Context, repo, revision, name string) (string, 
 
 func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) (matrixRequest, error) {
 	req := matrixRequest{Tier: o.Tier, Role: o.Role}
-	if is.ID == "" || o.RoutingInvalid {
-		return req, errMatrix
+	if is.ID == "" {
+		return req, matrixReason("issue-identity-missing")
+	}
+	if o.RoutingInvalid {
+		return req, matrixReason("brief-routing-invalid")
 	}
 	count := 0
 	for _, grant := range cfg.Grants {
@@ -303,7 +309,7 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 		}
 		count++
 		if count != 1 || (o.Tier != "" && grant.Tier != "" && o.Tier != grant.Tier) || (o.Role != "" && grant.Role != "" && o.Role != grant.Role) {
-			return req, errMatrix
+			return req, matrixReason("grant-conflict")
 		}
 		if req.Tier == "" {
 			req.Tier = grant.Tier
@@ -316,7 +322,7 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 	if o.Pin != "" {
 		p, ok := cfg.Pins[o.Pin]
 		if !ok || !cleanText(p.Model) || !cleanText(p.Effort) || o.Model != "" || o.Effort != "" {
-			return req, errMatrix
+			return req, matrixReason("pin-invalid")
 		}
 		req.PinName, req.Pin = o.Pin, &p
 	} else if o.Model != "" || o.Effort != "" {
@@ -532,34 +538,49 @@ type matrixAttemptDeps struct {
 }
 
 func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Target, budget map[string]int, d matrixAttemptDeps) (string, bool) {
+	report := d.report
+	if report == nil {
+		report = reportMatrixRefusal
+	}
+	refuse := func(code string) (string, bool) { report(refusalFor(matrixReason(code))); return "", false }
 	cfg := c.cfg.Matrix
-	if !sourceRevision.MatchString(cfg.Revision) || !privateReceiptRoot(cfg.ReceiptRoot) || cfg.Source == "" || !repositoryName.MatchString(c.cfg.Inbox) || n < 1 || is.Number != n {
-		return "", false
+	if cfg.Source == "" {
+		return refuse("source-missing")
+	}
+	if !sourceRevision.MatchString(cfg.Revision) {
+		return refuse("revision-invalid")
+	}
+	if !privateReceiptRoot(cfg.ReceiptRoot) {
+		return refuse("receipt-root-invalid")
+	}
+	if !repositoryName.MatchString(c.cfg.Inbox) || n < 1 || is.Number != n {
+		return refuse("issue-invalid")
 	}
 	o := parseOverrides(is.Body)
 	req, e := prepareMatrixRequest(cfg, is, target.Repo, o)
 	if e != nil {
+		report(refusalFor(e))
 		return "", false
 	}
 	revision := cfg.TargetRevisions[target.Repo]
 	if !sourceRevision.MatchString(revision) {
-		return "", false
+		return refuse("target-revision-invalid")
 	}
 	// leaf.md itself declares the unnamed-profile default; its routing still comes from Markdown.
 	if o.Profile == "" {
 		o.Profile = "leaf"
 	}
 	if !profileStem.MatchString(o.Profile) {
-		return "", false
+		return refuse("profile-invalid")
 	}
 	req.ProfileText, e = d.read(ctx, target.Repo, revision, "profiles/"+o.Profile+".md")
 	if e != nil || req.ProfileText == "" {
-		return "", false
+		return refuse("profile-unavailable")
 	}
 	if req.Override != nil {
 		req.WorklogText, e = d.read(ctx, target.Repo, revision, req.Override.WorklogPath)
 		if e != nil {
-			return "", false
+			return refuse("override-worklog-unavailable")
 		}
 	}
 	now := time.Now()
@@ -573,34 +594,34 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	c.gov.mu.Unlock()
 	route, e := d.resolve(ctx, cfg, req)
 	if errors.Is(e, errEvaluatorEvidence) || (e == nil && strings.HasSuffix(route.Role, "_evaluation")) {
-		report := d.report
-		if report == nil {
-			report = reportMatrixRefusal
-		}
 		report(evaluatorRefusal())
 		return "", false
 	}
 	if e != nil {
+		if len(req.Available) == 0 && (refusalFor(e).ReasonCode == "resolution-failed" || refusalFor(e).ReasonCode == "route-unavailable") {
+			return refuse("quota-unavailable")
+		}
+		report(refusalFor(e))
 		return "", false
 	}
 	if !containsString(req.Available, route.Transport) {
-		return "", false
+		return refuse("quota-unavailable")
 	}
 	agent := route.Transport
 	if o.Harness != "" && o.Harness != agent {
 		if o.Harness == "codex-run" && agent == "codex" {
 			agent = o.Harness
 		} else {
-			return "", false
+			return refuse("harness-conflict")
 		}
 	}
 	if o.Router != "" {
-		return "", false
+		return refuse("router-unsupported")
 	} // no gateway adapter or native router substitution
 	o.Model, o.Effort, o.Harness, o.Tier, o.Role = route.Model, route.Effort, agent, route.Tier, route.Role
 	host, ok := d.host(target, route.Transport)
 	if !ok {
-		return "", false
+		return refuse("host-unavailable")
 	}
 	if c.dry {
 		return route.Transport, true
@@ -614,15 +635,18 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
 	handle, e := d.persist(cfg.ReceiptRoot, key, buildAgentCmd(agent, o), receiptFor(cfg, route), binding)
 	if e != nil || handle == nil {
-		return "", false
+		return refuse("receipt-persistence-failed")
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
 		Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort}
 	if handle.writeDispatch("reserved", nil) != nil {
-		return "", false
+		return refuse("dispatch-persistence-failed")
 	}
-	return route.Transport, d.launch(ctx, n, is, host, agent, o, handle)
+	if !d.launch(ctx, n, is, host, agent, o, handle) {
+		return refuse("launch-failed")
+	}
+	return route.Transport, true
 }
 func containsString(xs []string, value string) bool {
 	for _, x := range xs {
