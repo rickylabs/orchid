@@ -27,7 +27,7 @@ removes durable reservation persistence. Exit 1 is the expected negative verdict
     FAIL
     FAIL	orch/cmd/divybot	1.710s
     FAIL
-    
+
     skip-durable-reservation
     command: go test ./cmd/divybot -run ^TestRegistrationFenceSurvivesRestartAndRefusesRepeatedAttempts$ -count=1
     exit: 1
@@ -36,17 +36,17 @@ removes durable reservation persistence. Exit 1 is the expected negative verdict
     FAIL
     FAIL	orch/cmd/divybot	0.003s
     FAIL
-    
+
     restored source
     command: go test -race ./... -count=1
     exit: 0
     ok  	orch/cmd/divybot	5.567s
-    
+
     restored source
     command: go vet ./...
     exit: 0
     <no output>
-    
+
     restored source
     command: go build -o $BUILD_ARTIFACT ./cmd/divybot
     exit: 0
