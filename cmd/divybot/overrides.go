@@ -31,13 +31,17 @@ import (
 )
 
 type Overrides struct {
-	Harness   string        `json:"harness,omitempty"`
-	Model     string        `json:"model,omitempty"`
+	Tier           string `json:"tier,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Pin            string `json:"pin,omitempty"`
+	RoutingInvalid bool   `json:"-"`
+	Harness        string `json:"harness,omitempty"`
+	Model          string `json:"model,omitempty"`
 	// Router is the opencode provider prefix ("openai", "n5air", …). opencode
 	// models are addressed as provider/model; router lets an operator name the
 	// two halves separately (model: gpt-5.5 + router: openai). Ignored when the
 	// model already contains a slash, and by non-opencode harnesses.
-	Router string `json:"router,omitempty"`
+	Router    string        `json:"router,omitempty"`
 	Effort    string        `json:"effort,omitempty"`
 	MaxTokens string        `json:"max_tokens,omitempty"`
 	Profile   string        `json:"profile,omitempty"`
@@ -73,6 +77,7 @@ func parseOverrides(text string) Overrides {
 	if start < 0 {
 		return o
 	}
+	seenRouting := map[string]bool{}
 	var prompt []string
 	inKV := true
 	for _, l := range lines[start:] {
@@ -87,7 +92,27 @@ func parseOverrides(text string) Overrides {
 			if m := swarmKV.FindStringSubmatch(t); m != nil {
 				key := strings.ReplaceAll(m[1], "_", "-")
 				val := strings.TrimSpace(strings.SplitN(m[2], "#", 2)[0]) // strip trailing comment
+				canonical := key
+				if key == "agent" {
+					canonical = "harness"
+				}
+				if key == "provider" {
+					canonical = "router"
+				}
+				switch canonical {
+				case "tier", "role", "pin", "profile", "model", "effort", "harness", "router":
+					if seenRouting[canonical] || val == "" {
+						o.RoutingInvalid = true
+					}
+					seenRouting[canonical] = true
+				}
 				switch key {
+				case "tier":
+					o.Tier = val
+				case "role":
+					o.Role = strings.ReplaceAll(val, "-", "_")
+				case "pin":
+					o.Pin = val
 				case "harness", "agent":
 					o.Harness = strings.ToLower(val)
 				case "model":

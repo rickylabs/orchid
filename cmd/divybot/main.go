@@ -39,17 +39,18 @@ import (
 // ============================ config ============================
 
 type Config struct {
-	Inbox        string   `json:"inbox"`         // e.g. "denoland/divybot"
-	BotLogin     string   `json:"bot_login"`     // PR author login (for review attribution)
-	BotEmail     string   `json:"bot_email"`     // git committer email
-	PollInterval string   `json:"poll_interval"` // e.g. "30s"
-	BranchPrefix string   `json:"branch_prefix"` // e.g. "orch/divybot-"
-	StateFile    string   `json:"state_file"`    // e.g. "/root/divybot/state.json"
-	NtfyTopic    string   `json:"ntfy_topic"`    // ntfy.sh topic for escalation (optional)
-	Hosts        []Host   `json:"hosts"`
-	Targets      []Target `json:"targets"`
-	Governor     Gov      `json:"governor"`
-	Memory       Mem      `json:"memory"`
+	Matrix       MatrixConfig `json:"matrix"`
+	Inbox        string       `json:"inbox"`         // e.g. "denoland/divybot"
+	BotLogin     string       `json:"bot_login"`     // PR author login (for review attribution)
+	BotEmail     string       `json:"bot_email"`     // git committer email
+	PollInterval string       `json:"poll_interval"` // e.g. "30s"
+	BranchPrefix string       `json:"branch_prefix"` // e.g. "orch/divybot-"
+	StateFile    string       `json:"state_file"`    // private state location
+	NtfyTopic    string       `json:"ntfy_topic"`    // ntfy.sh topic for escalation (optional)
+	Hosts        []Host       `json:"hosts"`
+	Targets      []Target     `json:"targets"`
+	Governor     Gov          `json:"governor"`
+	Memory       Mem          `json:"memory"`
 }
 
 // Mem configures the git-backed shared memory. Reuses the inbox repo
@@ -249,8 +250,8 @@ type Job struct {
 	// RunMode: the agent is a non-interactive `opencode run` process, invisible
 	// to herdr's agent detection — never declare it "gone"; supervise via the
 	// PR path and the deadline instead.
-	RunMode bool `json:"run_mode,omitempty"`
-	Track    tracker   `json:"track"`
+	RunMode bool    `json:"run_mode,omitempty"`
+	Track   tracker `json:"track"`
 	// Misses counts consecutive ticks the agent was absent from a successful
 	// fleetStatus while its host was up. herdr's agent detection is screen-scrape
 	// based, so a live agent can transiently drop out of the list (mid-render,
@@ -490,7 +491,10 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 // unrelated sessions crammed together). We run the agent IN the root pane via
 // `pane run` (env exported inline + exec) so the workspace stays exactly 1 pane,
 // rather than `agent start` adding a second pane beside an idle shell.
-func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agentCmd string) (pane, ws string, err error) {
+func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agentCmd string, receipt *durableMatrixReceipt) (pane, ws string, err error) {
+	if !receipt.claim(agentCmd) {
+		return "", "", errMatrix
+	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", fmt.Errorf("workspace create: %v: %.120q", werr, wout)
@@ -924,6 +928,7 @@ git push origin HEAD:%s >/dev/null 2>&1 || true
 // ============================ gh helpers ============================
 
 type Issue struct {
+	ID     string   `json:"id"`
 	Number int      `json:"number"`
 	Title  string   `json:"title"`
 	Body   string   `json:"body"`
@@ -943,6 +948,7 @@ func ghJSON(ctx context.Context, out any, args ...string) error {
 
 func ghIssues(ctx context.Context, inbox, label string) ([]Issue, error) {
 	var raw []struct {
+		ID     string `json:"id"`
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		Body   string `json:"body"`
@@ -951,12 +957,12 @@ func ghIssues(ctx context.Context, inbox, label string) ([]Issue, error) {
 		} `json:"labels"`
 	}
 	if err := ghJSON(ctx, &raw, "issue", "list", "--repo", inbox, "--label", label,
-		"--state", "open", "--limit", "100", "--json", "number,title,body,labels"); err != nil {
+		"--state", "open", "--limit", "100", "--json", "id,number,title,body,labels"); err != nil {
 		return nil, err
 	}
 	out := make([]Issue, 0, len(raw))
 	for _, r := range raw {
-		is := Issue{Number: r.Number, Title: r.Title, Body: r.Body}
+		is := Issue{ID: r.ID, Number: r.Number, Title: r.Title, Body: r.Body}
 		for _, l := range r.Labels {
 			is.Labels = append(is.Labels, l.Name)
 		}
@@ -2090,27 +2096,14 @@ func (c *Coord) tick(ctx context.Context) {
 		if tgt.Disabled {
 			continue // target paused: no NEW spawns (live jobs above keep running)
 		}
-		// Pick the first agent in the target's overflow preference with budget —
-		// claude work spills to codex automatically when claude is throttled.
-		// A /swarm "harness:" override pins the agent instead: honor it if that
-		// account still has budget, or unconditionally when the governor doesn't
-		// meter it at all (e.g. agy has no budget entry).
-		var acct string
-		if ovr := parseOverrides(is.Body); ovr.Harness != "" {
-			acct = accountKey(ovr.Harness) // spawn re-reads the override for the exact CLI
-			if rem, metered := budget[acct]; metered && rem <= 0 {
-				continue // pinned account exhausted this tick
-			}
-		} else if acct, ok = pickAgent(tgt, budget); !ok {
-			continue // every candidate account exhausted this tick
-		}
-		if c.dry {
-			log.Printf("issue #%d: would spawn %s (dry-run)", n, acct)
+		acct, launched := c.matrixAttempt(ctx, n, is, tgt, budget, matrixAttemptDeps{
+			read: readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
+			host: c.pickHost, launch: c.spawn,
+		})
+		if launched {
 			budget[acct]--
-			continue
-		}
-		if c.spawn(ctx, n, is, acct) {
-			budget[acct]--
+		} else {
+			log.Printf("issue #%d: matrix-launch-refused", n)
 		}
 	}
 	c.st.save()
@@ -2476,15 +2469,9 @@ func renderGoal(inbox, targetRepo, label, title, body, workdir, branch, hint str
 	).Replace(workerPrompt)
 }
 
-func (c *Coord) spawn(ctx context.Context, n int, is Issue, agent string) bool {
+func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) bool {
 	tgt, ok := c.targetFor(is)
 	if !ok {
-		return false
-	}
-	agent = accountKey(agent)
-	host, ok := c.pickHost(tgt, agent)
-	if !ok {
-		log.Printf("issue #%d: no host with free capacity for agent %s — deferring", n, agent)
 		return false
 	}
 
@@ -2492,7 +2479,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, agent string) bool {
 	actx, acancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := c.auth.syncToHost(actx, host); err != nil {
 		acancel()
-		log.Printf("issue #%d: authsync to %s failed, deferring: %v", n, host.Name, err)
+		log.Printf("issue #%d: launch-effect-failed", n)
 		return false
 	}
 	acancel()
@@ -2510,12 +2497,12 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, agent string) bool {
 	prep := fmt.Sprintf(`set -e
 mkdir -p %s; cd %s
 if [ ! -d .git ]; then find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true; git clone --depth=1 https://github.com/%s . ; fi
-git fetch --depth=1 origin %s >/dev/null 2>&1 || true
-git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; git clean -fdx >/dev/null 2>&1 || true; git checkout -B %s; }`,
-		shq(workdir), shq(workdir), tgt.Repo, shq(branch), shq(branch), shq(branch))
-	if out, err := host.runRemote(pctx, prep); err != nil {
+git fetch --depth=1 origin %s >/dev/null 2>&1
+git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
+		shq(workdir), shq(workdir), tgt.Repo, shq(c.cfg.Matrix.TargetRevisions[tgt.Repo]), shq(branch))
+	if _, err := host.runRemote(pctx, prep); err != nil {
 		pcancel()
-		log.Printf("issue #%d: worktree prep on %s failed: %v: %.120q", n, host.Name, err, out)
+		log.Printf("issue #%d: launch-effect-failed", n)
 		return false
 	}
 	pcancel()
@@ -2525,7 +2512,7 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	if c.cfg.Memory.Enabled {
 		mctx, mcancel := context.WithTimeout(ctx, 60*time.Second)
 		if err := host.ensureMemory(mctx, c.cfg.Memory, c.cfg.BotLogin, c.cfg.BotEmail); err != nil {
-			log.Printf("issue #%d: memory setup on %s: %v", n, host.Name, err)
+			log.Printf("issue #%d: launch-effect-failed", n)
 		}
 		mcancel()
 	}
@@ -2564,18 +2551,6 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 	// (creds/token/git identity/memory override) survive into the login shell.
 	// /swarm block in the inbox issue body (written directly, or carried over
 	// by commentTick's mirror) parameterizes the run.
-	ovr := parseOverrides(is.Body)
-	if ovr.Harness != "" {
-		agent = ovr.Harness
-	}
-	// Note on "codex": those agents run via OPENCODE, not the codex binary.
-	// codex's rust TUI is undriveable through herdr on Linux (herdr can't read
-	// or write its pane — confirmed on gcp+vultr; only macOS works). opencode's
-	// Go TUI IS herdr-drivable, and the opencode-openai-codex-auth plugin talks
-	// to the SAME ChatGPT-plan codex backend reusing the oauth token seeded from
-	// ~/.codex/auth.json — same quota, no API key, no Cloudflare. Per-host
-	// config (~/.config/opencode + seeded ~/.local/share/opencode/auth.json)
-	// grants auto-approve so it runs autonomously like claude.
 	agentCmd := buildAgentCmd(agent, ovr)
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
@@ -2594,7 +2569,7 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 		// and is excluded so the worker never commits it.
 		goalFile := workdir + "/.divybot-goal.md"
 		if err := host.writeFile(ctx, goalFile, goal); err != nil {
-			log.Printf("issue #%d: stage opencode goal failed: %v — deferring", n, err)
+			log.Printf("issue #%d: launch-effect-failed", n)
 			return false
 		}
 		_, _ = host.runRemote(ctx, fmt.Sprintf("grep -qxF .divybot-goal.md %s/.git/info/exclude 2>/dev/null || echo .divybot-goal.md >> %s/.git/info/exclude", shq(workdir), shq(workdir)))
@@ -2602,10 +2577,10 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
 	sctx, scancel := context.WithTimeout(ctx, 40*time.Second)
-	pane, ws, err := host.spawnAgent(sctx, label, workdir, env, agentCmd)
+	pane, ws, err := host.spawnAgent(sctx, label, workdir, env, agentCmd, receipt)
 	if err != nil {
 		scancel()
-		log.Printf("issue #%d: spawn on %s failed: %v", n, host.Name, err)
+		log.Printf("issue #%d: launch-effect-failed", n)
 		return false
 	}
 	scancel()
@@ -2665,11 +2640,11 @@ git checkout -fB %s 2>/dev/null || { git reset --hard >/dev/null 2>&1 || true; g
 		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
 		if err := host.injectGoal(gctx, target, inject, opencodeClass); err != nil {
-			log.Printf("issue #%d: goal inject failed: %v", n, err)
+			log.Printf("issue #%d: launch-effect-failed", n)
 		}
 		gcancel()
 	}
-	log.Printf("issue #%d: spawned %s on %s/%s (branch %s)", n, agent, host.Name, label, branch)
+	log.Printf("issue #%d: launch-started-observation-unproven", n)
 	return true
 }
 
