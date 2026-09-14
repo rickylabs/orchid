@@ -1,4 +1,14 @@
 {
+  "matrix": {
+    "source": "<ABSOLUTE_CLEAN_NETSCRIPT_CHECKOUT>",
+    "revision": "<FULL_NETSCRIPT_COMMIT>",
+    "receipt_root": "<ABSOLUTE_PRIVATE_RECEIPT_DIRECTORY>",
+    "target_revisions": {
+      "<TARGET_OWNER>/<TARGET_REPOSITORY>": "<FULL_TARGET_COMMIT>"
+    },
+    "pins": {},
+    "grants": []
+  },
   "inbox": "denoland/divybot",
   "bot_login": "divybot",
   "bot_email": "divybot@users.noreply.github.com",
