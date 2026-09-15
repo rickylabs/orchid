@@ -14,7 +14,7 @@ import (
 func registrationReceipt(t *testing.T, agent string, o Overrides) *durableMatrixReceipt {
 	t.Helper()
 	key := strings.Repeat("d", 64)
-	r, err := persistMatrixReceipt(privateTestRoot(t), key, buildAgentCmd(agent, o), receiptFor(MatrixConfig{}, syntheticRoute()), nil)
+	r, err := persistMatrixReceipt(privateTestRoot(t), key, mustBuildAgentCmd(t, agent, o), receiptFor(MatrixConfig{}, syntheticRoute()), nil)
 	if err != nil {
 		t.Fatal("fixture matrix receipt failed")
 	}
@@ -73,7 +73,7 @@ else:print(json.dumps({'result':{}}))
 
 func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 	expectedArgs := map[string][]string{
-		"codex":    {"--dangerously-bypass-approvals-and-sandbox", "-m", "fixture model 'quoted'"},
+		"codex":    {"--dangerously-bypass-approvals-and-sandbox", "-m", "fixture model 'quoted'", "-c", `model_reasoning_effort="high"`},
 		"claude":   {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'"},
 		"opencode": {"--model", "fixture-provider/fixture model 'quoted'"},
 		"agy":      {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'", "--effort", "fixture-effort"},
@@ -82,6 +82,9 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			h, calls := registrationHost(t, "")
 			o := Overrides{Model: "fixture model 'quoted'", Effort: "fixture-effort", Router: "fixture-provider"}
+			if kind == "codex" {
+				o.Effort = "high"
+			}
 			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), map[string]string{"FIXTURE_ENV": "fixture-value"}, kind, o, registrationReceipt(t, kind, o))
 			if err != nil || pane != "w1:p1" || ws != "w1" {
 				t.Fatal("registration did not return the created handles")
