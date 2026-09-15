@@ -43,7 +43,7 @@ func testCommand(t *testing.T, cwd, command string, args ...string) string {
 }
 
 func TestCommonMatrixAttempt(t *testing.T) {
-	cases := []string{"success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
+	cases := []string{"invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := privateTestRoot(t)
@@ -77,7 +77,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				},
 				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) error {
 					events = append(events, "launch")
-					if agent != "claude" || o.Model != route.Model || o.Effort != route.Effort || !r.claim(buildAgentCmd(agent, o)) {
+					if agent != "claude" || o.Model != route.Model || o.Effort != route.Effort || !r.claim(mustBuildAgentCmd(t, agent, o)) {
 						t.Fatal("launch did not consume the selected durable receipt")
 					}
 					data, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
@@ -89,6 +89,10 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				},
 			}
 			switch name {
+			case "invalid-codex-effort":
+				route.Transport, route.Effort = "codex", "invalid"
+				c.gov.q["codex"] = q
+				budget["codex"] = 1
 			case "wrong-issue":
 				is.Number = 2
 			case "invalid-inbox":
@@ -147,6 +151,9 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				c.dry = true
 			}
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
+			if name == "invalid-codex-effort" && (len(refusals) != 1 || refusals[0].ReasonCode != "codex-effort-invalid" || containsString(events, "host") || containsString(events, "persist")) {
+				t.Fatal("invalid Codex effort must refuse before host selection and persistence")
+			}
 			success := name == "success" || name == "dry-run"
 			if strings.HasPrefix(name, "evaluator-") {
 				if !reflect.DeepEqual(refusals, []matrixRefusal{evaluatorRefusal()}) {
@@ -472,7 +479,7 @@ func TestSpawnDispatchBindingAtEffect(t *testing.T) {
 		t.Run(map[bool]string{false: "acknowledged", true: "ambiguous"}[fail], func(t *testing.T) {
 			root := privateTestRoot(t)
 			key := strings.Repeat("a", 64)
-			r, err := persistMatrixReceipt(root, key, buildAgentCmd("claude", Overrides{}), receiptFor(MatrixConfig{}, syntheticRoute()), nil)
+			r, err := persistMatrixReceipt(root, key, mustBuildAgentCmd(t, "claude", Overrides{}), receiptFor(MatrixConfig{}, syntheticRoute()), nil)
 			if err != nil {
 				t.Fatal("reservation failed")
 			}
@@ -522,7 +529,7 @@ exit 6
 			if err != nil || st.Mode().Perm() != 0600 {
 				t.Fatal("binding is not private")
 			}
-			if r.claim(buildAgentCmd("claude", Overrides{})) {
+			if r.claim(mustBuildAgentCmd(t, "claude", Overrides{})) {
 				t.Fatal("effect was replayable")
 			}
 		})

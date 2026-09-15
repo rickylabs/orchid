@@ -407,7 +407,7 @@ type dispatchBinding struct {
 	Source        string            `json:"source"`
 	Profile       string            `json:"profile"`
 	Model         string            `json:"model"`
-	Effort        string            `json:"effort"`
+	Effort        string            `json:"effort,omitempty"`
 	State         string            `json:"state"`
 	Location      *dispatchLocation `json:"location"`
 }
@@ -675,6 +675,11 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return refuse("router-unsupported")
 	} // no gateway adapter or native router substitution
 	o.Model, o.Effort, o.Harness, o.Tier, o.Role = route.Model, route.Effort, agent, route.Tier, route.Role
+	command, renderErr := buildAgentCmd(agent, o)
+	if renderErr != nil {
+		report(refusalFor(matrixSite("attempt.command-render", renderErr)))
+		return "", false
+	}
 	host, ok := d.host(target, route.Transport)
 	if !ok {
 		return refuse("host-unavailable")
@@ -689,7 +694,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}{is.ID, target.Repo, briefDigest(is), revision, shaText([]byte(req.ProfileText)), req, route}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
-	handle, e := d.persist(cfg.ReceiptRoot, key, buildAgentCmd(agent, o), receiptFor(cfg, route), binding, owner)
+	handle, e := d.persist(cfg.ReceiptRoot, key, command, receiptFor(cfg, route), binding, owner)
 	if e != nil {
 		report(refusalWithReason(e, "receipt-persistence-failed"))
 		return "", false
