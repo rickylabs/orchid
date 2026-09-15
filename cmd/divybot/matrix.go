@@ -148,6 +148,7 @@ func (b *limitedOutput) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 func matrixCommand(ctx context.Context, cwd, command string, input []byte, args ...string) ([]byte, error) {
+	defer children.hold()()
 	cmd := exec.CommandContext(ctx, command, args...)
 	// Matrix subprocesses may themselves invoke the CLI. Cancel the entire group,
 	// otherwise a timed-out bridge could leave a child behind after the next poll.
