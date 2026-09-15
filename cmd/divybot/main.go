@@ -521,7 +521,11 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 // spawnAgent creates an isolated workspace, prepares its shell environment, then
 // registers an interactive agent in that exact pane before accepting goal delivery.
 func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt) (pane, ws string, err error) {
-	if !receipt.claim(buildAgentCmd(agent, ovr)) {
+	command, renderErr := buildAgentCmd(agent, ovr)
+	if renderErr != nil {
+		return "", "", matrixSite("spawn.command-render", renderErr)
+	}
+	if !receipt.claim(command) {
 		return "", "", matrixSite("spawn.receipt-claim", errMatrix)
 	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
@@ -577,14 +581,17 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	if strings.HasSuffix(agent, "-run") {
 		// Existing non-interactive jobs use PR/deadline supervision, not agent registration.
-		b.WriteString("exec " + buildAgentCmd(agent, ovr))
+		b.WriteString("exec " + command)
 	}
 	if out, e := h.herdr(ctx, "pane", "run", pane, b.String()); e != nil {
 		_ = out // never expose environment-bearing command output
 		return pane, ws, matrixSite("spawn.environment", errAgentRegistration)
 	}
 	if !strings.HasSuffix(agent, "-run") {
-		kind, nativeArgs := interactiveAgentArgs(agent, ovr)
+		kind, nativeArgs, renderErr := interactiveAgentArgs(agent, ovr)
+		if renderErr != nil {
+			return pane, ws, matrixSite("spawn.registration-render", renderErr)
+		}
 		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", "30000", "--"}
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)

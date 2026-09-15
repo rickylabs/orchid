@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -140,15 +141,36 @@ func parseOverrides(text string) Overrides {
 	return o
 }
 
+var errCodexEffort = matrixReason("codex-effort-invalid")
+
+// The matrix input vocabulary is NetScript runtime/contract.ts EFFORTS.
+// This validates input, not model capability: independent observation still
+// owns the runtime verdict. Contract source:
+// https://github.com/rickylabs/netscript/blob/f3324909e0896cedc9729005bac5f508e122d6c6/.llm/tools/agentic/runtime/contract.ts
+func validCodexEffort(effort string) bool {
+	switch effort {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
 // interactiveAgentArgs is the single argv source for command rendering and herdr registration.
-func interactiveAgentArgs(agent string, o Overrides) (string, []string) {
+func interactiveAgentArgs(agent string, o Overrides) (string, []string, error) {
 	kind := agent
 	var args []string
 	switch agent {
 	case "codex":
+		if !validCodexEffort(o.Effort) {
+			return "", nil, errCodexEffort
+		}
 		args = []string{"--dangerously-bypass-approvals-and-sandbox"}
 		if o.Model != "" {
 			args = append(args, "-m", o.Model)
+		}
+		if o.Effort != "" {
+			args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(o.Effort))
 		}
 	case "opencode":
 		model := o.Model
@@ -173,11 +195,11 @@ func interactiveAgentArgs(agent string, o Overrides) (string, []string) {
 			args = append(args, "--model", o.Model)
 		}
 	}
-	return kind, args
+	return kind, args, nil
 }
 
 // buildAgentCmd renders the same configured argv used by interactive registration.
-func buildAgentCmd(agent string, o Overrides) string {
+func buildAgentCmd(agent string, o Overrides) (string, error) {
 	ocModel := o.Model
 	if ocModel != "" && o.Router != "" && !strings.Contains(ocModel, "/") {
 		ocModel = o.Router + "/" + ocModel
@@ -191,7 +213,7 @@ func buildAgentCmd(agent string, o Overrides) string {
 			cmd += " -m " + shq(o.Model)
 		}
 		cmd += " " + shq(runPointer)
-		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`)
+		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`), nil
 	case "opencode-run":
 		// Explicit fallback: non-interactive `opencode run` with the pointer as
 		// argv — no TUI, no injection, invisible to herdr agent detection (job
@@ -203,13 +225,16 @@ func buildAgentCmd(agent string, o Overrides) string {
 			cmd += " --model " + shq(ocModel)
 		}
 		cmd += " " + shq(runPointer)
-		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`)
+		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`), nil
 	default:
-		kind, args := interactiveAgentArgs(agent, o)
+		kind, args, err := interactiveAgentArgs(agent, o)
+		if err != nil {
+			return "", err
+		}
 		for _, arg := range args {
 			kind += " " + shq(arg)
 		}
-		return kind
+		return kind, nil
 	}
 }
 
