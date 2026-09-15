@@ -587,6 +587,8 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		_ = out // never expose environment-bearing command output
 		return pane, ws, matrixSite("spawn.environment", errAgentRegistration)
 	}
+	var identity *string
+	identityReason := nativeUnsupported
 	if !strings.HasSuffix(agent, "-run") {
 		kind, nativeArgs, renderErr := interactiveAgentArgs(agent, ovr)
 		if renderErr != nil {
@@ -598,12 +600,33 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if e != nil {
 			return pane, ws, matrixSite("spawn.agent-start", errAgentRegistration)
 		}
-		if _, e = herdrUnwrap(out); e != nil {
+		raw, e := herdrUnwrap(out)
+		if e != nil {
 			return pane, ws, matrixSite("spawn.agent-envelope", errAgentRegistration)
+		}
+		var nativeID string
+		nativeID, identityReason = nativeSessionFromStart(raw, kind, label, location)
+		if identityReason == nativeUnavailable {
+			// One exact-occupant read can catch a completed hook report; never list or guess.
+			if read, readErr := h.herdr(ctx, "agent", "get", pane); readErr == nil {
+				if body, unwrapErr := herdrUnwrap(read); unwrapErr == nil {
+					nativeID, identityReason = nativeSessionFromResponse(body, "agent_info", kind, label, location)
+				}
+			}
+		}
+		if identityReason == "" {
+			identity = &nativeID
 		}
 	}
 	if e := receipt.writeDispatch("dispatched", location); e != nil {
 		return pane, ws, matrixSite("spawn.dispatched-binding", e)
+	}
+	if identity != nil {
+		if receipt.writeNativeIdentity(identity) != nil {
+			return pane, ws, matrixSite("spawn.native-binding", errMatrix)
+		}
+	} else {
+		log.Printf("issue #%d: native identity INCONCLUSIVE reason=%s", receipt.dispatch.Issue.Number, identityReason)
 	}
 	return pane, ws, nil
 }
