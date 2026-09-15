@@ -124,6 +124,7 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 
 var matrixSites = map[string]bool{
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-render": true,
+	"spawn.native-binding": true, "dispatch.native-clear": true,
 	"receipt.owner-stage": true, "receipt.owner-transfer": true, "receipt.owner-sync": true, "receipt.owner-publish": true, "dispatch.owner-transfer": true,
 	"source.arguments": true, "source.head-command": true, "source.revision-mismatch": true, "source.status-command": true, "source.dirty": true,
 	"decode.envelope":                      true,

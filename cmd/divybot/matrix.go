@@ -539,6 +539,11 @@ func (r *durableMatrixReceipt) writeDispatch(state string, location *dispatchLoc
 	if r.dispatch == nil {
 		return matrixSite("dispatch.nil-binding", errMatrix)
 	}
+	if state != "dispatched" {
+		if r.writeNativeIdentityLocked(nil) != nil {
+			return matrixSite("dispatch.native-clear", errMatrix)
+		}
+	}
 	next := *r.dispatch
 	next.State, next.Location = state, location
 	data, e := json.Marshal(next)
@@ -711,6 +716,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return "", false
 	}
 	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
+		_ = handle.writeDispatch("uncertain", handle.dispatch.Location)
 		report(refusalWithReason(e, "launch-failed"))
 		return "", false
 	}
