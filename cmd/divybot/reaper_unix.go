@@ -20,11 +20,13 @@ const reaperSweep = 30 * time.Second
 //
 // Call it only through childGate.reapOrphans, which is what keeps it off the children os/exec is
 // waiting on.
-func waitAllExited() int {
+func waitAllExited() int { return collectExited(syscall.Wait4) }
+
+func collectExited(wait func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error)) int {
 	n := 0
 	for {
 		var ws syscall.WaitStatus
-		pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+		pid, err := wait(-1, &ws, syscall.WNOHANG, nil)
 		if err == syscall.EINTR {
 			continue
 		}
@@ -40,7 +42,7 @@ func waitAllExited() int {
 // unless divybot is pid 1 — off pid 1 (a laptop run, a test, a container started with an init)
 // orphans go to a real init and there is nothing here to collect.
 func startReaper(stop <-chan struct{}) {
-	if os.Getpid() != 1 {
+	if !reaperEnabled(os.Getpid()) {
 		return
 	}
 	log.Printf("reaper: divybot is pid 1 — collecting orphaned processes every %s", reaperSweep)
@@ -52,16 +54,21 @@ func startReaper(stop <-chan struct{}) {
 		defer signal.Stop(sigs)
 		tick := time.NewTicker(reaperSweep)
 		defer tick.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-sigs:
-			case <-tick.C:
-			}
-			if n := children.reapOrphans(); n > 0 {
-				log.Printf("reaper: collected %d orphaned process(es)", n)
-			}
-		}
+		reapUntilStopped(stop, sigs, tick.C, children.reapOrphans)
 	}()
+}
+
+// Signals coalesce; a skipped sweep must also be retried by the backstop.
+func reapUntilStopped(stop <-chan struct{}, sigs <-chan os.Signal, ticks <-chan time.Time, reap func() int) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-sigs:
+		case <-ticks:
+		}
+		if n := reap(); n > 0 {
+			log.Printf("reaper: collected %d orphaned process(es)", n)
+		}
+	}
 }

@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// The property under test is not "zombies get reaped" — wait4 does that, and a test cannot fake a
-// pid namespace. It is the gate: the reaper must never call wait4 while os/exec is waiting on a
+// These tests pin the gate; Linux subprocess tests separately exercise kernel adoption and wait4.
+// The gate ensures the reaper must never call wait4 while os/exec is waiting on a
 // child of ours, because wait4(-1) would collect that child and leave the Wait to fail with
 // ECHILD. That failure mode looks like gh randomly dying, so it is the part worth pinning down.
 
@@ -60,6 +60,10 @@ func TestNoSpawnStartsWhileCollecting(t *testing.T) {
 	blocked := make(chan struct{})
 
 	g.reapWith(func() int {
+		if g.mu.TryLock() {
+			g.mu.Unlock()
+			t.Error("collector ran without excluding new spawns")
+		}
 		go func() {
 			close(blocked)
 			release := g.hold()
@@ -102,5 +106,13 @@ func TestHoldCountIsRaceFree(t *testing.T) {
 
 	if n := g.reapWith(func() int { return 42 }); n != 42 {
 		t.Fatalf("gate did not settle back to open after balanced holds (count=%d)", g.count)
+	}
+}
+
+func TestReaperOnlyEnabledAtPIDOne(t *testing.T) {
+	for _, pid := range []int{-1, 0, 1, 2, 42} {
+		if reaperEnabled(pid) != (pid == 1) {
+			t.Fatal("reaper activation must be confined to namespace init")
+		}
 	}
 }

@@ -26,18 +26,23 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type Overrides struct {
-	Harness   string        `json:"harness,omitempty"`
-	Model     string        `json:"model,omitempty"`
+	Tier           string `json:"tier,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Pin            string `json:"pin,omitempty"`
+	RoutingInvalid bool   `json:"-"`
+	Harness        string `json:"harness,omitempty"`
+	Model          string `json:"model,omitempty"`
 	// Router is the opencode provider prefix ("openai", "n5air", …). opencode
 	// models are addressed as provider/model; router lets an operator name the
 	// two halves separately (model: gpt-5.5 + router: openai). Ignored when the
 	// model already contains a slash, and by non-opencode harnesses.
-	Router string `json:"router,omitempty"`
+	Router    string        `json:"router,omitempty"`
 	Effort    string        `json:"effort,omitempty"`
 	MaxTokens string        `json:"max_tokens,omitempty"`
 	Profile   string        `json:"profile,omitempty"`
@@ -73,6 +78,7 @@ func parseOverrides(text string) Overrides {
 	if start < 0 {
 		return o
 	}
+	seenRouting := map[string]bool{}
 	var prompt []string
 	inKV := true
 	for _, l := range lines[start:] {
@@ -87,7 +93,27 @@ func parseOverrides(text string) Overrides {
 			if m := swarmKV.FindStringSubmatch(t); m != nil {
 				key := strings.ReplaceAll(m[1], "_", "-")
 				val := strings.TrimSpace(strings.SplitN(m[2], "#", 2)[0]) // strip trailing comment
+				canonical := key
+				if key == "agent" {
+					canonical = "harness"
+				}
+				if key == "provider" {
+					canonical = "router"
+				}
+				switch canonical {
+				case "tier", "role", "pin", "profile", "model", "effort", "harness", "router":
+					if seenRouting[canonical] || val == "" {
+						o.RoutingInvalid = true
+					}
+					seenRouting[canonical] = true
+				}
 				switch key {
+				case "tier":
+					o.Tier = val
+				case "role":
+					o.Role = strings.ReplaceAll(val, "-", "_")
+				case "pin":
+					o.Pin = val
 				case "harness", "agent":
 					o.Harness = strings.ToLower(val)
 				case "model":
@@ -115,25 +141,70 @@ func parseOverrides(text string) Overrides {
 	return o
 }
 
-// buildAgentCmd renders the launch command for a harness, applying overrides.
-func buildAgentCmd(agent string, o Overrides) string {
-	// opencode addresses models as provider/model; a "router:" key supplies the
-	// provider half when the model was given bare.
+var errCodexEffort = matrixReason("codex-effort-invalid")
+
+// The matrix input vocabulary is NetScript runtime/contract.ts EFFORTS.
+// This validates input, not model capability: independent observation still
+// owns the runtime verdict. Contract source:
+// https://github.com/rickylabs/netscript/blob/f3324909e0896cedc9729005bac5f508e122d6c6/.llm/tools/agentic/runtime/contract.ts
+func validCodexEffort(effort string) bool {
+	switch effort {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
+// interactiveAgentArgs is the single argv source for command rendering and herdr registration.
+func interactiveAgentArgs(agent string, o Overrides) (string, []string, error) {
+	kind := agent
+	var args []string
+	switch agent {
+	case "codex":
+		if !validCodexEffort(o.Effort) {
+			return "", nil, errCodexEffort
+		}
+		args = []string{"--dangerously-bypass-approvals-and-sandbox"}
+		if o.Model != "" {
+			args = append(args, "-m", o.Model)
+		}
+		if o.Effort != "" {
+			args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(o.Effort))
+		}
+	case "opencode":
+		model := o.Model
+		if model != "" && o.Router != "" && !strings.Contains(model, "/") {
+			model = o.Router + "/" + model
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+	case "agy":
+		args = []string{"--dangerously-skip-permissions"}
+		if o.Model != "" {
+			args = append(args, "--model", o.Model)
+		}
+		if o.Effort != "" {
+			args = append(args, "--effort", o.Effort)
+		}
+	default:
+		kind = "claude"
+		args = []string{"--dangerously-skip-permissions"}
+		if o.Model != "" {
+			args = append(args, "--model", o.Model)
+		}
+	}
+	return kind, args, nil
+}
+
+// buildAgentCmd renders the same configured argv used by interactive registration.
+func buildAgentCmd(agent string, o Overrides) (string, error) {
 	ocModel := o.Model
 	if ocModel != "" && o.Router != "" && !strings.Contains(ocModel, "/") {
 		ocModel = o.Router + "/" + ocModel
 	}
 	switch agent {
-	case "codex":
-		// Real interactive codex TUI (herdr detects it as agent "codex" and
-		// `agent prompt --wait` drives it — verified on this host 2026-08-28).
-		// First run in a workdir shows a directory-trust prompt that leaves the
-		// agent "blocked"; injectGoal clears it with an Enter and retries.
-		cmd := "codex --dangerously-bypass-approvals-and-sandbox"
-		if o.Model != "" {
-			cmd += " -m " + shq(o.Model)
-		}
-		return cmd
 	case "codex-run":
 		// Non-interactive codex: `codex exec` with the pointer as argv. RunMode
 		// supervision (PR path + deadline) only.
@@ -142,16 +213,7 @@ func buildAgentCmd(agent string, o Overrides) string {
 			cmd += " -m " + shq(o.Model)
 		}
 		cmd += " " + shq(runPointer)
-		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`)
-	case "opencode":
-		// Interactive opencode TUI (herdr-supervised). The goal pointer is
-		// injected via herdr's native `agent prompt --wait`, which confirms
-		// submission server-side; the full goal is staged to .divybot-goal.md
-		// before spawn.
-		if ocModel != "" {
-			return "opencode --model " + shq(ocModel)
-		}
-		return "opencode"
+		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`), nil
 	case "opencode-run":
 		// Explicit fallback: non-interactive `opencode run` with the pointer as
 		// argv — no TUI, no injection, invisible to herdr agent detection (job
@@ -163,25 +225,16 @@ func buildAgentCmd(agent string, o Overrides) string {
 			cmd += " --model " + shq(ocModel)
 		}
 		cmd += " " + shq(runPointer)
-		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`)
-	case "agy":
-		// Antigravity CLI (agy 1.1.22+): supports the same auto-approve flag as
-		// claude, plus real --model and --effort flags (agy models: gemini-3.x
-		// families with per-effort variants).
-		cmd := "agy --dangerously-skip-permissions"
-		if o.Model != "" {
-			cmd += " --model " + shq(o.Model)
+		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`), nil
+	default:
+		kind, args, err := interactiveAgentArgs(agent, o)
+		if err != nil {
+			return "", err
 		}
-		if o.Effort != "" {
-			cmd += " --effort " + shq(o.Effort)
+		for _, arg := range args {
+			kind += " " + shq(arg)
 		}
-		return cmd
-	default: // claude
-		cmd := "claude --dangerously-skip-permissions"
-		if o.Model != "" {
-			cmd += " --model " + shq(o.Model)
-		}
-		return cmd
+		return kind, nil
 	}
 }
 

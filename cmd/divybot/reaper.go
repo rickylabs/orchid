@@ -7,8 +7,7 @@ import "sync"
 // re-parents the orphan onto us. Go collects only the children it started itself — every
 // (*exec.Cmd).Run, .Output and .CombinedOutput waits on its own child — so a re-parented orphan is
 // waited on by nobody and stays in the process table as a zombie for the life of the daemon,
-// holding a pid slot each. On the live coordinator 371 of them accumulated over two days (370 gh,
-// one git), every one with PPid 1. That is what this file exists to stop.
+// holding a pid slot each.
 //
 // The hazard is stealing an exit status. wait4(-1) collects *any* child, so a reaper firing while
 // os/exec sits in Wait can take that child first and leave the Wait to fail with ECHILD — turning
@@ -61,3 +60,6 @@ func (g *childGate) reapWith(collect func() int) int {
 	}
 	return collect()
 }
+
+// Only the namespace init inherits otherwise-unowned processes in production.
+func reaperEnabled(pid int) bool { return pid == 1 }
