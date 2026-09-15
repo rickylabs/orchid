@@ -42,7 +42,7 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 		checks := []struct {
 			name  string
 			value any
-		}{{"source", &cfg.Matrix.Source}, {"revision", &cfg.Matrix.Revision}, {"receipt_root", &cfg.Matrix.ReceiptRoot}, {"target_revisions", &cfg.Matrix.TargetRevisions}, {"pins", &cfg.Matrix.Pins}, {"grants", &cfg.Matrix.Grants}}
+		}{{"source", &cfg.Matrix.Source}, {"revision", &cfg.Matrix.Revision}, {"receipt_root", &cfg.Matrix.ReceiptRoot}, {"receipt_owner_uid", &cfg.Matrix.ReceiptOwnerUID}, {"receipt_owner_gid", &cfg.Matrix.ReceiptOwnerGID}, {"target_revisions", &cfg.Matrix.TargetRevisions}, {"pins", &cfg.Matrix.Pins}, {"grants", &cfg.Matrix.Grants}}
 		for _, check := range checks {
 			if value, ok := fields[check.name]; ok && json.Unmarshal(value, check.value) != nil {
 				return nil, nil, configProblem("matrix."+check.name, "invalid-field-type")
@@ -65,6 +65,9 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 	var out []matrixConfigProblem
 	bad := func(field, reason string) { out = append(out, matrixConfigProblem{field, reason}) }
 	m := cfg.Matrix
+	if _, err := configuredReceiptOwner(m); err != nil {
+		bad("matrix.receipt_owner_uid/receipt_owner_gid", "both-valid-numeric-ids-required")
+	}
 	if !filepath.IsAbs(m.Source) {
 		bad("matrix.source", "absolute-checkout-required")
 	}

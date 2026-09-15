@@ -26,6 +26,8 @@ import (
 type MatrixConfig struct {
 	Source          string               `json:"source"`
 	Revision        string               `json:"revision"`
+	ReceiptOwnerUID *int                 `json:"receipt_owner_uid,omitempty"`
+	ReceiptOwnerGID *int                 `json:"receipt_owner_gid,omitempty"`
 	ReceiptRoot     string               `json:"receipt_root"`
 	TargetRevisions map[string]string    `json:"target_revisions"`
 	Pins            map[string]MatrixPin `json:"pins"`
@@ -416,6 +418,7 @@ type durableMatrixReceipt struct {
 	digest   string
 	command  string
 	claimed  bool
+	owner    *receiptOwner
 	dispatch *dispatchBinding
 }
 
@@ -459,7 +462,11 @@ func privateReceiptRoot(root string) bool {
 	}
 	return true
 }
-func persistMatrixReceipt(root, key, command string, receipt matrixReceipt, binding any) (*durableMatrixReceipt, error) {
+func persistMatrixReceipt(root, key, command string, receipt matrixReceipt, binding any, owners ...*receiptOwner) (*durableMatrixReceipt, error) {
+	var owner *receiptOwner
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	if !privateReceiptRoot(root) || !digestPattern.MatchString(key) {
 		return nil, matrixSite("receipt.root-or-key", errMatrix)
 	}
@@ -496,10 +503,30 @@ func persistMatrixReceipt(root, key, command string, receipt matrixReceipt, bind
 	if os.Mkdir(target, 0700) != nil {
 		return nil, matrixSite("receipt.reservation-exists-or-create", errMatrix)
 	}
-	if os.Rename(dir, filepath.Join(target, "record")) != nil || syncDirectory(target) != nil || syncDirectory(root) != nil {
-		return nil, matrixSite("receipt.publish-sync", errMatrix)
+	if owner == nil {
+		// Preserve the existing publication path when no owner is configured.
+		if os.Rename(dir, filepath.Join(target, "record")) != nil || syncDirectory(target) != nil || syncDirectory(root) != nil {
+			return nil, matrixSite("receipt.publish-sync", errMatrix)
+		}
+	} else {
+		// Rename into a hidden staging name first. The final record name is never
+		// visible until every file and both reservation directories have their owner.
+		staged := filepath.Join(target, ".pending-record")
+		if os.Rename(dir, staged) != nil {
+			return nil, matrixSite("receipt.owner-stage", errMatrix)
+		}
+		defer os.RemoveAll(staged)
+		if transferReceiptOwner(owner, filepath.Join(staged, "receipt.json"), filepath.Join(staged, "binding.json"), staged, target) != nil {
+			return nil, matrixSite("receipt.owner-transfer", errMatrix)
+		}
+		if syncDirectory(staged) != nil || syncDirectory(target) != nil {
+			return nil, matrixSite("receipt.owner-sync", errMatrix)
+		}
+		if os.Rename(staged, filepath.Join(target, "record")) != nil || syncDirectory(target) != nil || syncDirectory(root) != nil {
+			return nil, matrixSite("receipt.owner-publish", errMatrix)
+		}
 	}
-	return &durableMatrixReceipt{file: filepath.Join(target, "record", "receipt.json"), digest: shaText(body), command: command}, nil
+	return &durableMatrixReceipt{file: filepath.Join(target, "record", "receipt.json"), digest: shaText(body), command: command, owner: owner}, nil
 }
 
 // Atomic snapshots use the existing reservation as their durable ownership boundary.
@@ -525,6 +552,10 @@ func (r *durableMatrixReceipt) writeDispatch(state string, location *dispatchLoc
 	}
 	defer os.Remove(f.Name())
 	_, written := f.Write(data)
+	if e := transferReceiptOwner(r.owner, f.Name()); e != nil {
+		f.Close()
+		return matrixSite("dispatch.owner-transfer", errMatrix)
+	}
 	synced := f.Sync()
 	closed := f.Close()
 	if written != nil || synced != nil || closed != nil {
@@ -551,7 +582,7 @@ type matrixAttemptDeps struct {
 	report  func(matrixRefusal)
 	read    func(context.Context, string, string, string) (string, error)
 	resolve func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error)
-	persist func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error)
+	persist func(string, string, string, matrixReceipt, any, ...*receiptOwner) (*durableMatrixReceipt, error)
 	launch  func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) error
 	host    func(Target, string) (Host, bool)
 }
@@ -563,6 +594,10 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	refuse := func(code string) (string, bool) { report(refusalFor(matrixReason(code))); return "", false }
 	cfg := c.cfg.Matrix
+	owner, ownerError := configuredReceiptOwner(cfg)
+	if ownerError != nil {
+		return refuse("receipt-owner-invalid")
+	}
 	if cfg.Source == "" {
 		return refuse("source-missing")
 	}
@@ -654,7 +689,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}{is.ID, target.Repo, briefDigest(is), revision, shaText([]byte(req.ProfileText)), req, route}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
-	handle, e := d.persist(cfg.ReceiptRoot, key, buildAgentCmd(agent, o), receiptFor(cfg, route), binding)
+	handle, e := d.persist(cfg.ReceiptRoot, key, buildAgentCmd(agent, o), receiptFor(cfg, route), binding, owner)
 	if e != nil {
 		report(refusalWithReason(e, "receipt-persistence-failed"))
 		return "", false

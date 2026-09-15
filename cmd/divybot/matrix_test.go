@@ -71,9 +71,9 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					return route, nil
 				},
 				host: func(Target, string) (Host, bool) { events = append(events, "host"); return Host{}, true },
-				persist: func(root, key, command string, r matrixReceipt, binding any) (*durableMatrixReceipt, error) {
+				persist: func(root, key, command string, r matrixReceipt, binding any, owners ...*receiptOwner) (*durableMatrixReceipt, error) {
 					events = append(events, "persist")
-					return persistMatrixReceipt(root, key, command, r, binding)
+					return persistMatrixReceipt(root, key, command, r, binding, owners...)
 				},
 				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) error {
 					events = append(events, "launch")
@@ -126,9 +126,13 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			case "profile-failure":
 				deps.read = func(context.Context, string, string, string) (string, error) { return "", errMatrix }
 			case "persist-failure":
-				deps.persist = func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error) { return nil, errMatrix }
+				deps.persist = func(string, string, string, matrixReceipt, any, ...*receiptOwner) (*durableMatrixReceipt, error) {
+					return nil, errMatrix
+				}
 			case "nil-receipt":
-				deps.persist = func(string, string, string, matrixReceipt, any) (*durableMatrixReceipt, error) { return nil, nil }
+				deps.persist = func(string, string, string, matrixReceipt, any, ...*receiptOwner) (*durableMatrixReceipt, error) {
+					return nil, nil
+				}
 			case "evaluator-inconclusive":
 				deps.resolve = func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error) {
 					return matrixRoute{}, errEvaluatorEvidence
