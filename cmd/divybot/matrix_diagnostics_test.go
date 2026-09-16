@@ -49,7 +49,7 @@ func TestMatrixRefusalNotification(t *testing.T) {
 		t.Fatal("changed brief was not reported")
 	}
 	c.dry = true
-	c.reportIssueMatrixRefusal(context.Background(), 1, is, matrixRefusal{"refused", "synthetic-private-canary", ""}, post)
+	c.reportIssueMatrixRefusal(context.Background(), 1, is, matrixRefusal{"refused", "synthetic-private-canary", "", ""}, post)
 	if posts != 3 || strings.Contains(logs.String(), "synthetic-private-canary") {
 		t.Fatal("dry run posted or private error leaked")
 	}
@@ -94,7 +94,7 @@ func TestMatrixSiteSurvivesToPublicDiagnostic(t *testing.T) {
 			t.Fatal("originating cause lost in log")
 		}
 	}
-	if validMatrixRefusal(matrixRefusal{"refused", "launch-failed", "synthetic-private-canary"}) {
+	if validMatrixRefusal(matrixRefusal{"refused", "launch-failed", "synthetic-private-canary", ""}) {
 		t.Fatal("untrusted site accepted")
 	}
 }

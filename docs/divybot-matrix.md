@@ -155,3 +155,12 @@ sentinel for `errors.Is`; propagation through the launch callback preserves the
 origin instead of reducing it to a boolean. The closed site inventory and a source
 AST check prevent unlabelled returns or duplicated site identifiers. Neither the
 wrapped error's private payload nor arbitrary cause text is published.
+
+Quota refusals retain the stable machine-readable reason code `quota-unavailable`
+while attributing the failure per transport in the `detail` field across operator
+logs and inbox comments. The closed condition vocabulary names the first failed
+gate requirement without revealing spend percentages or timestamps: `blocked by capacity`
+(admission budget exhausted), `absent` (meter missing, unverified or without published
+windows), `stale` (sample timestamp expired or skewed), `expired` (published window
+reset elapsed), or `over ceiling` (usage at or over weekly ceiling).
+

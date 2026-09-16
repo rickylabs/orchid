@@ -98,10 +98,11 @@ type matrixRefusal struct {
 	Status     string `json:"status"`
 	ReasonCode string `json:"reasonCode"`
 	Cause      string `json:"cause,omitempty"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 func evaluatorRefusal() matrixRefusal {
-	return matrixRefusal{"inconclusive", "observer-unavailable", ""}
+	return matrixRefusal{"inconclusive", "observer-unavailable", "", ""}
 }
 func reportMatrixRefusal(refusal matrixRefusal) {
 	// Only the closed, internally constructed record can reach the log. No caller data is echoed.
@@ -599,6 +600,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		report = reportMatrixRefusal
 	}
 	refuse := func(code string) (string, bool) { report(refusalFor(matrixReason(code))); return "", false }
+	refuseQuota := func(detail string) (string, bool) { report(refusalForQuota(detail)); return "", false }
 	cfg := c.cfg.Matrix
 	owner, ownerError := configuredReceiptOwner(cfg)
 	if ownerError != nil {
@@ -646,14 +648,19 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		}
 	}
 	now := time.Now()
+	var quotaConditions []string
 	c.gov.mu.Lock()
 	for _, transport := range []string{"claude", "codex", "agy"} {
 		q := c.gov.q[transport]
-		if budget[transport] > 0 && q.ok && !q.at.After(now) && now.Sub(q.at) <= 3*c.cfg.Governor.sampleIntervalDur() && quotaHasHeadroom(q, now, c.cfg.Governor.WeeklyCeiling) {
+		cond := transportQuotaCondition(budget[transport], q, now, c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling)
+		if cond == "" {
 			req.Available = append(req.Available, transport)
+		} else {
+			quotaConditions = append(quotaConditions, transport+": "+cond)
 		}
 	}
 	c.gov.mu.Unlock()
+	quotaDetail := strings.Join(quotaConditions, ", ")
 	route, e := d.resolve(ctx, cfg, req)
 	if errors.Is(e, errEvaluatorEvidence) || (e == nil && strings.HasSuffix(route.Role, "_evaluation")) {
 		report(evaluatorRefusal())
@@ -661,13 +668,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	if e != nil {
 		if len(req.Available) == 0 && (refusalFor(e).ReasonCode == "resolution-failed" || refusalFor(e).ReasonCode == "route-unavailable") {
-			return refuse("quota-unavailable")
+			return refuseQuota(quotaDetail)
 		}
 		report(refusalFor(e))
 		return "", false
 	}
 	if !containsString(req.Available, route.Transport) {
-		return refuse("quota-unavailable")
+		return refuseQuota(quotaDetail)
 	}
 	agent := route.Transport
 	if o.Harness != "" && o.Harness != agent {
@@ -738,9 +745,9 @@ func containsString(xs []string, value string) bool {
 	}
 	return false
 }
-func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
+func quotaHeadroomCondition(q quota, now time.Time, ceiling float64) string {
 	if ceiling <= 0 || ceiling > 100 {
-		return false
+		return "over ceiling"
 	}
 	// A zero reset means the meter did not publish this window. Every published
 	// window must be fresh and under ceiling; an empty meter grants no headroom.
@@ -750,9 +757,32 @@ func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
 			continue
 		}
 		published++
-		if r.ResetsAt <= now.Unix() || r.UsedPct < 0 || r.UsedPct >= ceiling {
-			return false
+		if r.ResetsAt <= now.Unix() {
+			return "expired"
+		}
+		if r.UsedPct < 0 || r.UsedPct >= ceiling {
+			return "over ceiling"
 		}
 	}
-	return published > 0
+	if published == 0 {
+		return "absent"
+	}
+	return ""
+}
+
+func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
+	return quotaHeadroomCondition(q, now, ceiling) == ""
+}
+
+func transportQuotaCondition(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
+	if budget <= 0 {
+		return "blocked by capacity"
+	}
+	if !q.ok {
+		return "absent"
+	}
+	if q.at.After(now) || now.Sub(q.at) > 3*sampleInterval {
+		return "stale"
+	}
+	return quotaHeadroomCondition(q, now, ceiling)
 }

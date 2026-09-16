@@ -482,7 +482,7 @@ func TestRefusalLogContainsOnlyClosedEvidence(t *testing.T) {
 	previous := log.Writer()
 	log.SetOutput(&output)
 	defer log.SetOutput(previous)
-	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail", ""})
+	reportMatrixRefusal(matrixRefusal{"inconclusive", "synthetic-private-detail", "", ""})
 	if output.Len() != 0 {
 		t.Fatal("untrusted refusal data reached the log")
 	}
