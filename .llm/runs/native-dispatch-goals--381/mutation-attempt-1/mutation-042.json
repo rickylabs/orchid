@@ -1,0 +1,23 @@
+{
+  "id": 42,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "transitionGoal",
+  "condition": "e != nil",
+  "replacement": "!(e != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.221s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalWrappedTransition (2.20s)\n    --- FAIL: TestNativeGoalWrappedTransition/success (0.76s)\n        native_goal_transport_test.go:163: verified transition not retained\n    --- FAIL: TestNativeGoalWrappedTransition/binding-invalid (1.19s)\n        native_goal_transport_test.go:170: failed transition lost refusal or claimed success\n    --- FAIL: TestNativeGoalWrappedTransition/host-unavailable (0.11s)\n        native_goal_transport_test.go:170: failed transition lost refusal or claimed success\n    --- FAIL: TestNativeGoalWrappedTransition/daemon-refused (0.15s)\n        native_goal_transport_test.go:170: failed transition lost refusal or claimed success\nFAIL\nFAIL\torch/cmd/divybot\t2.207s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.415s\n"
+  }
+}

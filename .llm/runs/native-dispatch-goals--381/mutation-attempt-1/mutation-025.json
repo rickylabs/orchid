@@ -1,0 +1,23 @@
+{
+  "id": 25,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "transitionDispatchGoal",
+  "condition": "status != \"complete\" && status != \"blocked\" && status != \"paused\"",
+  "replacement": "!(status != \"complete\" && status != \"blocked\" && status != \"paused\")",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.004s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalTransition (0.00s)\n    native_goal_test.go:260: valid lifecycle transition refused goal-transition-refused\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.005s\n"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "mode": "role",
+  "role": "plan_evaluation",
+  "tiers": [
+    {
+      "tier": "feature",
+      "description": "Workhorse for real implementations, features, fixes, and long-running work; low temperature and medium-high complexity.",
+      "routes": [
+        {
+          "model": "glm_5_3",
+          "effort": "provider_default"
+        },
+        {
+          "model": "fable_5_1",
+          "effort": "low"
+        }
+      ],
+      "policy": {
+        "maxRounds": 2,
+        "repairInFlightAt": 2,
+        "reSteerSameSession": true
+      }
+    }
+  ]
+}

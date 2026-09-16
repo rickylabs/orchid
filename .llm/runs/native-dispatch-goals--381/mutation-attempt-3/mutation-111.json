@@ -1,0 +1,23 @@
+{
+  "id": 111,
+  "file": "cmd/divybot/main.go",
+  "function": "spawn-intent-preflight",
+  "condition": "if e != nil {\n\t\t\treturn matrixReason(closedGoalReason(e))",
+  "replacement": "if e == nil {\n\t\t\treturn matrixReason(closedGoalReason(e))",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalDispatchPreflight)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalDispatchPreflight)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalDispatchPreflight (0.00s)\n    native_goal_wiring_test.go:19: Codex budget preflight skipped\nFAIL\nFAIL\torch/cmd/divybot\t0.002s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalDispatchPreflight)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  }
+}

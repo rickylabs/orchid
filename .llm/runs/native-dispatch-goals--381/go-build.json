@@ -1,0 +1,5 @@
+{
+  "command": "go build -o <private-artifact> ./cmd/divybot",
+  "exit_code": 0,
+  "output": ""
+}

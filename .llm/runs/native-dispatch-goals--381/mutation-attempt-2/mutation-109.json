@@ -1,0 +1,23 @@
+{
+  "id": 109,
+  "file": "cmd/divybot/matrix_diagnostics.go",
+  "function": "uncertain-launch-comment",
+  "condition": " || r.ReasonCode == \"goal-prompt-delivery-failed\"",
+  "replacement": "",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRefusalDoesNotDenyAnExistingLaunch)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.087s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRefusalDoesNotDenyAnExistingLaunch)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "2026/09/16 04:24:25 issue #7: matrix-launch-refused status=refused reason=goal-prompt-delivery-failed field=launch.prompt cause=; Prompt delivery was not confirmed; the launch remains uncertain and no native goal was created.\n--- FAIL: TestNativeGoalRefusalDoesNotDenyAnExistingLaunch (0.25s)\n    native_goal_wiring_test.go:78: uncertain prompt delivery denied an existing launch\nFAIL\nFAIL\torch/cmd/divybot\t0.254s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRefusalDoesNotDenyAnExistingLaunch)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.105s\n"
+  }
+}

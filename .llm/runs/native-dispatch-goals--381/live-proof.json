@@ -1,0 +1,13 @@
+{
+  "command": "authorized dispatcher deployment and real-dispatch proof preflight",
+  "exit_code": 2,
+  "output": {
+    "verdict": "INCONCLUSIVE",
+    "reason": "deployment-connection-unavailable",
+    "dispatch_created": false,
+    "goal_written": false,
+    "binding_written": false,
+    "restart_performed": false,
+    "required": "existing authorized host-execution connection"
+  }
+}

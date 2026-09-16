@@ -1,0 +1,23 @@
+{
+  "id": 80,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "set",
+  "condition": "e != nil",
+  "replacement": "!(e != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalNotificationGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.328s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalNotificationGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalNotificationGuards (0.00s)\n    native_goal_test.go:218: write response changed intended goal\n--- FAIL: TestNativeGoalFrameAndLoopBounds (0.01s)\n    native_goal_test.go:471: write consumed unbounded notifications\nFAIL\nFAIL\torch/cmd/divybot\t0.010s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalNotificationGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.693s\n"
+  }
+}

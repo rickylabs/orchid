@@ -12,6 +12,9 @@ import (
 // Only this fixed vocabulary crosses the public log/comment boundary. No native
 // error strings, configuration values, source output or issue prose are copied.
 var matrixReasons = map[string]struct{ field, hint string }{
+	"goal-budget-invalid":          {"issue.max-tokens", "Use an exact nonnegative token count or decimal k/m suffix within the supported integer range; omit the key for unknown."},
+	"goal-objective-invalid":       {"issue.title", "Provide a nonempty assignment title within the native goal length bound."},
+	"goal-prompt-delivery-failed":  {"launch.prompt", "Prompt delivery was not confirmed; the launch remains uncertain and no native goal was created."},
 	"codex-effort-invalid":         {"route.effort", "The Codex effort is outside the matrix contract; correct the route before launching."},
 	"receipt-owner-invalid":        {"matrix.receipt_owner_uid/receipt_owner_gid", "Configure both nonnegative numeric owner IDs, or omit both."},
 	"source-missing":               {"matrix.source", "Configure an absolute clean NetScript checkout."},
@@ -98,7 +101,7 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 		return
 	}
 	body := fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s No agent was launched by this refused attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
-	if r.ReasonCode == "launch-failed" || r.ReasonCode == "dispatch-persistence-failed" {
+	if r.ReasonCode == "launch-failed" || r.ReasonCode == "dispatch-persistence-failed" || r.ReasonCode == "goal-prompt-delivery-failed" {
 		body = fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s Launch outcome requires inspection; this notice does not authorize another attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
 	}
 	if r.Cause != "" {

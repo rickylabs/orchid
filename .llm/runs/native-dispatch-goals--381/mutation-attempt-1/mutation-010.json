@@ -1,0 +1,23 @@
+{
+  "id": 10,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "acquireNativeGoalBinding",
+  "condition": "reason == \"\"",
+  "replacement": "!(reason == \"\")",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.393s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalBindingAcquisition (0.17s)\n    native_goal_test.go:342: late authoritative report was not bound\nFAIL\nFAIL\torch/cmd/divybot\t0.172s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.402s\n"
+  }
+}

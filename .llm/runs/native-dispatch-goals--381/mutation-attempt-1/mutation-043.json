@@ -1,0 +1,23 @@
+{
+  "id": 43,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "transitionGoal",
+  "condition": "changed",
+  "replacement": "!(changed)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.062s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalWrappedTransition (2.85s)\n    --- FAIL: TestNativeGoalWrappedTransition/success (1.70s)\n        native_goal_transport_test.go:163: verified transition not retained\nFAIL\nFAIL\torch/cmd/divybot\t2.851s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.969s\n"
+  }
+}

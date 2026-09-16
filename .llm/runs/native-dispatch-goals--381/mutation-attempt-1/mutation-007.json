@@ -1,0 +1,23 @@
+{
+  "id": 7,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "acquireNativeGoalBinding",
+  "condition": "r == nil || r.dispatch == nil || r.dispatch.State != \"dispatched\" || r.dispatch.Source != \"codex\" || r.dispatch.Issue.Number != j.Issue || j.Agent != \"codex\" || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace",
+  "replacement": "!(r == nil || r.dispatch == nil || r.dispatch.State != \"dispatched\" || r.dispatch.Source != \"codex\" || r.dispatch.Issue.Number != j.Issue || j.Agent != \"codex\" || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.343s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalBindingAcquisition (0.32s)\n    native_goal_test.go:342: late authoritative report was not bound\nFAIL\nFAIL\torch/cmd/divybot\t0.321s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.201s\n"
+  }
+}

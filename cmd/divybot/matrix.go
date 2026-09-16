@@ -681,6 +681,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return refuse("router-unsupported")
 	} // no gateway adapter or native router substitution
 	o.Model, o.Effort, o.Harness, o.Tier, o.Role = route.Model, route.Effort, agent, route.Tier, route.Role
+	if agent == "codex" {
+		assignment := is
+		assignment.Number = n
+		if _, e := nativeGoalIntent(c.cfg.Inbox, assignment, o); e != nil {
+			return refuse(closedGoalReason(e))
+		}
+	}
 	command, renderErr := buildAgentCmd(agent, o)
 	if renderErr != nil {
 		report(refusalFor(matrixSite("attempt.command-render", renderErr)))

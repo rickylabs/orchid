@@ -223,20 +223,21 @@ type tracker struct {
 }
 
 type Job struct {
-	Issue     int       `json:"issue"`
-	Host      string    `json:"host"`
-	Label     string    `json:"label"`     // display name (claude-<n>)
-	Pane      string    `json:"pane"`      // herdr send/read target (pane id)
-	Workspace string    `json:"workspace"` // herdr teardown handle
-	Target    string    `json:"target"`
-	Repo      string    `json:"repo"`
-	Branch    string    `json:"branch"`
-	Agent     string    `json:"agent"`
-	Title     string    `json:"title"`
-	Goal      string    `json:"goal"`
-	PR        int       `json:"pr"`
-	SpawnedAt time.Time `json:"spawned_at"`
-	LastPoke  time.Time `json:"last_poke"`
+	NativeGoal *dispatchGoal `json:"native_goal,omitempty"`
+	Issue      int           `json:"issue"`
+	Host       string        `json:"host"`
+	Label      string        `json:"label"`     // display name (claude-<n>)
+	Pane       string        `json:"pane"`      // herdr send/read target (pane id)
+	Workspace  string        `json:"workspace"` // herdr teardown handle
+	Target     string        `json:"target"`
+	Repo       string        `json:"repo"`
+	Branch     string        `json:"branch"`
+	Agent      string        `json:"agent"`
+	Title      string        `json:"title"`
+	Goal       string        `json:"goal"`
+	PR         int           `json:"pr"`
+	SpawnedAt  time.Time     `json:"spawned_at"`
+	LastPoke   time.Time     `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -2065,6 +2066,7 @@ func (c *Coord) tick(ctx context.Context) {
 					c.st.mu.Lock()
 					continue
 				}
+				c.finishAssignmentGoal(ctx, jc)
 				c.teardown(ctx, n, jc)
 				c.st.mu.Lock()
 				delete(c.st.Jobs, n)
@@ -2080,6 +2082,7 @@ func (c *Coord) tick(ctx context.Context) {
 	// A persistently absent agent is an abandoned launch, not permission to retry.
 	// Fence it durably before removing tracking so a restart cannot respawn it.
 	type deadJob struct {
+		job  *Job
 		n    int
 		host string
 		ws   string
@@ -2119,13 +2122,14 @@ func (c *Coord) tick(ctx context.Context) {
 		if c.st.saveLocked() != nil {
 			continue
 		}
-		dead = append(dead, deadJob{n: n, host: j.Host, ws: j.Workspace})
+		dead = append(dead, deadJob{n: n, host: j.Host, ws: j.Workspace, job: j})
 		delete(c.st.Jobs, n)
 	}
 	c.st.mu.Unlock()
 	// Close only the abandoned job's recorded workspace. Done outside the state
 	// lock because closeWorkspace is a network round-trip. No automatic respawn follows.
 	for _, d := range dead {
+		c.transitionGoal(ctx, d.job, "blocked")
 		c.st.blockLaunch(d.n, "agent_disappeared")
 		c.reportBlockedLaunch(ctx, d.n)
 		log.Printf("issue #%d: agent absent after supervision threshold; automatic relaunch abandoned", d.n)
@@ -2575,6 +2579,16 @@ func renderGoal(inbox, targetRepo, label, title, body, workdir, branch, hint str
 }
 
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
+	var intent goalIntent
+	if agent == "codex" {
+		var e error
+		is.Number = n
+		intent, e = nativeGoalIntent(c.cfg.Inbox, is, ovr)
+		if e != nil {
+			return matrixReason(closedGoalReason(e))
+		}
+	}
+
 	tgt, ok := c.targetFor(is)
 	if !ok {
 		return matrixSite("launch.target", errMatrix)
@@ -2723,6 +2737,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 	}
+	if agent == "codex" {
+		j.NativeGoal = &dispatchGoal{ReceiptKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"), Intent: intent, Reason: "native-session-unavailable"}
+	}
 	if ovr.Timeout > 0 {
 		j.Deadline = time.Now().Add(ovr.Timeout)
 	} else if runMode {
@@ -2761,8 +2778,11 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
 		if err := host.injectGoal(gctx, target, inject, opencodeClass); err != nil {
 			log.Printf("issue #%d: launch-effect-failed", n)
+			gcancel()
+			return matrixReason("goal-prompt-delivery-failed")
 		}
 		gcancel()
+		c.startDispatchGoal(ctx, host, j, receipt)
 	}
 	log.Printf("issue #%d: launch-started-observation-unproven", n)
 	return nil
@@ -2789,6 +2809,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	// it open would make the deleted job respawn on the very next tick. Retry =
 	// file a fresh inbox issue (or /swarm comment) with a longer timeout.
 	if !j.Deadline.IsZero() && time.Now().After(j.Deadline) {
+		c.transitionGoal(ctx, j, "paused")
 		log.Printf("issue #%d: operator timeout (%s) exceeded — tearing down", n, j.Overrides.Timeout)
 		cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
 		_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
@@ -2836,6 +2857,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 
 	// Blocked: agent waiting for input it can't get in the swarm → escalate.
 	if known && ref.Status == "blocked" {
+		c.transitionGoal(ctx, j, "blocked")
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)
 		c.notify(fmt.Sprintf("issue #%d blocked — needs input", n))
 	}

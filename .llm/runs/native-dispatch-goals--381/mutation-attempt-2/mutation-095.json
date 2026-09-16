@@ -1,0 +1,23 @@
+{
+  "id": 95,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "objective-validation",
+  "condition": "return utf8.ValidString(s) && strings.TrimSpace(s) != \"\" && utf8.RuneCountInString(s) <= 4000 && !strings.ContainsRune(s, 0)",
+  "replacement": "return true || (utf8.ValidString(s) && strings.TrimSpace(s) != \"\" && utf8.RuneCountInString(s) <= 4000 && !strings.ContainsRune(s, 0))",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalObjective (0.00s)\n    native_goal_test.go:65: invalid objective accepted\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  }
+}

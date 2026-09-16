@@ -1,0 +1,23 @@
+{
+  "id": 8,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "acquireNativeGoalBinding",
+  "condition": "attempt < 40",
+  "replacement": "attempt < 41",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t3.023s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalBindingAcquisition (2.35s)\n    native_goal_test.go:366: missing identity lookup was unbounded or guessed\nFAIL\nFAIL\torch/cmd/divybot\t2.354s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalBindingAcquisition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.633s\n"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "command": "feature implementation evaluator native preflight",
+  "exit_code": 2,
+  "output": {
+    "verdict": "INCONCLUSIVE",
+    "reason": "native-model-session-observation-contract-unavailable",
+    "launched": false
+  }
+}

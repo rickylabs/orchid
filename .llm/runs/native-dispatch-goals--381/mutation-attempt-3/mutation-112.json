@@ -1,0 +1,23 @@
+{
+  "id": 112,
+  "file": "cmd/divybot/matrix.go",
+  "function": "matrix-transport-preflight",
+  "condition": "if agent == \"codex\" {\n\t\tassignment := is",
+  "replacement": "if agent != \"codex\" {\n\t\tassignment := is",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestCommonMatrixAttempt)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.505s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestCommonMatrixAttempt)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestCommonMatrixAttempt (0.51s)\n    --- FAIL: TestCommonMatrixAttempt/invalid-native-budget (0.09s)\n        matrix_test.go:171: invalid goal budget reached launch preparation\n    --- FAIL: TestCommonMatrixAttempt/explicit-empty-budget (0.09s)\n        matrix_test.go:171: invalid goal budget reached launch preparation\n    --- FAIL: TestCommonMatrixAttempt/non-codex-unparsed-budget (0.00s)\n        matrix_test.go:188: unexpected admission for non-codex-unparsed-budget\nFAIL\nFAIL\torch/cmd/divybot\t0.515s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestCommonMatrixAttempt)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.218s\n"
+  }
+}

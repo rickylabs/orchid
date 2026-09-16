@@ -1,0 +1,23 @@
+{
+  "id": 51,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "frame",
+  "condition": "decodeNativeJSON(p.scan.Bytes(), &m) != nil || m == nil",
+  "replacement": "!(decodeNativeJSON(p.scan.Bytes(), &m) != nil || m == nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.532s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalCreation (0.00s)\n    native_goal_test.go:88: valid creation failed goal-response-invalid\n--- FAIL: TestNativeGoalRPCGuards (0.00s)\n    native_goal_test.go:189: daemon refusal lost its distinction or identity correlation\n--- FAIL: TestNativeGoalFrameAndLoopBounds (0.00s)\n    native_goal_test.go:457: request consumed unbounded notifications\nFAIL\nFAIL\torch/cmd/divybot\t0.010s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.502s\n"
+  }
+}

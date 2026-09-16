@@ -1,0 +1,23 @@
+{
+  "id": 120,
+  "file": "cmd/divybot/main.go",
+  "function": "prompt-failure-fence",
+  "condition": "return matrixReason(\"goal-prompt-delivery-failed\")",
+  "replacement": "// mutation allows goal creation after failed prompt delivery",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalLaunchOwnershipWiring)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.006s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalLaunchOwnershipWiring)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalLaunchOwnershipWiring (0.00s)\n    native_goal_wiring_test.go:129: failed prompt delivery can reach native goal creation\nFAIL\nFAIL\torch/cmd/divybot\t0.005s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalLaunchOwnershipWiring)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.005s\n"
+  }
+}

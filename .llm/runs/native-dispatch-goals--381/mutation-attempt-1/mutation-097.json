@@ -1,0 +1,23 @@
+{
+  "id": 97,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "goal-ownership",
+  "condition": "return g != nil && g.Objective == i.Objective && reflect.DeepEqual(g.TokenBudget, i.TokenBudget)",
+  "replacement": "return true",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition|TestNativeGoalNotificationGuards)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.008s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition|TestNativeGoalNotificationGuards)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalNotificationGuards (0.00s)\n    native_goal_test.go:218: write response changed intended goal\n--- FAIL: TestNativeGoalTransition (0.00s)\npanic: runtime error: invalid memory address or nil pointer dereference [recovered, repanicked]\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x28 pc=0x62c699]\n\ngoroutine 9 [running]:\ntesting.tRunner.func1.2({0x6cacc0, 0x999310})\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1872 +0x237\ntesting.tRunner.func1()\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1875 +0x35b\npanic({0x6cacc0?, 0x999310?})\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/runtime/panic.go:783 +0x132\norch/cmd/divybot.transitionDispatchGoal(0xc000014dc0, {{0x72c122?, 0x71f3e4?}, 0xc0001a5c90?}, {0x71fdbc, 0x8})\n\t<private>/cmd/divybot/native_goal.go:190 +0xb9\norch/cmd/divybot.TestNativeGoalTransition(0xc0000bca80)\n\t<private>/cmd/divybot/native_goal_test.go:279 +0xe33\ntesting.tRunner(0xc0000bca80, 0x745560)\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1934 +0xea\ncreated by testing.(*T).Run in goroutine 1\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1997 +0x465\nFAIL\torch/cmd/divybot\t0.005s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition|TestNativeGoalNotificationGuards)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.008s\n"
+  }
+}

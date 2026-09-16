@@ -1,0 +1,23 @@
+{
+  "id": 116,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "completed-binding-wait",
+  "condition": "case <-t.C:\n\t\treturn true",
+  "replacement": "case <-t.C:\n\t\treturn false",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.254s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalWaitAndClosedReason (0.25s)\n    native_goal_transport_test.go:227: live bounded wait prematurely refused\nFAIL\nFAIL\torch/cmd/divybot\t0.254s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.254s\n"
+  }
+}

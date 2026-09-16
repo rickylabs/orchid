@@ -1,0 +1,23 @@
+{
+  "id": 74,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "get",
+  "condition": "e != nil",
+  "replacement": "!(e != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.006s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalCreation (0.00s)\n    native_goal_test.go:100: pre-existing goal replaced\n--- FAIL: TestNativeGoalRPCGuards (0.00s)\n    native_goal_test.go:179: absent/malformed goal interpreted as null\nFAIL\nFAIL\torch/cmd/divybot\t0.006s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.006s\n"
+  }
+}

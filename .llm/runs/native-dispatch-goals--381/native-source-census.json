@@ -1,0 +1,25 @@
+{
+  "command": "python3 native-source-census.py",
+  "exit_code": 0,
+  "output": {
+    "command": "native thread/list source census, state database only",
+    "counts": {
+      "threads": 421,
+      "parentFieldPresent": 0,
+      "nativeThreadSpawnSource": 133,
+      "sourceParentPresent": 133,
+      "sourceDepthPresent": 133,
+      "sourceParentsResolveInListing": 133,
+      "sourceParentsDangle": 0,
+      "maximumNativeDepth": 1,
+      "selectedChildReadHasParentField": true,
+      "selectedChildReadMatchesNativeSpawnParent": true
+    },
+    "sourceKinds": {
+      "exec": 41,
+      "object": 133,
+      "cli": 5,
+      "vscode": 242
+    }
+  }
+}

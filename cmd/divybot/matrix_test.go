@@ -43,7 +43,7 @@ func testCommand(t *testing.T, cwd, command string, args ...string) string {
 }
 
 func TestCommonMatrixAttempt(t *testing.T) {
-	cases := []string{"invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
+	cases := []string{"invalid-native-budget", "explicit-empty-budget", "valid-native-budget", "absent-native-budget", "non-codex-unparsed-budget", "invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := privateTestRoot(t)
@@ -77,7 +77,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				},
 				launch: func(_ context.Context, _ int, _ Issue, _ Host, agent string, o Overrides, r *durableMatrixReceipt) error {
 					events = append(events, "launch")
-					if agent != "claude" || o.Model != route.Model || o.Effort != route.Effort || !r.claim(mustBuildAgentCmd(t, agent, o)) {
+					if agent != route.Transport || o.Model != route.Model || o.Effort != route.Effort || !r.claim(mustBuildAgentCmd(t, agent, o)) {
 						t.Fatal("launch did not consume the selected durable receipt")
 					}
 					data, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
@@ -89,6 +89,22 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				},
 			}
 			switch name {
+			case "invalid-native-budget", "explicit-empty-budget", "valid-native-budget", "absent-native-budget", "non-codex-unparsed-budget":
+				if name != "non-codex-unparsed-budget" {
+					route.Transport = "codex"
+					c.gov.q["codex"] = q
+					budget["codex"] = 1
+				}
+				value := "500k"
+				if name == "invalid-native-budget" || name == "non-codex-unparsed-budget" {
+					value = "not-a-number"
+				}
+				if name == "explicit-empty-budget" {
+					value = ""
+				}
+				if name != "absent-native-budget" {
+					is.Body = "/swarm\ntier: feature\nrole: implementation\nmax-tokens: " + value + "\n\nSynthetic task"
+				}
 			case "invalid-codex-effort":
 				route.Transport, route.Effort = "codex", "invalid"
 				c.gov.q["codex"] = q
@@ -151,10 +167,13 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				c.dry = true
 			}
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
+			if (name == "invalid-native-budget" || name == "explicit-empty-budget") && (len(refusals) != 1 || refusals[0].ReasonCode != "goal-budget-invalid" || containsString(events, "host") || containsString(events, "persist")) {
+				t.Fatal("invalid goal budget reached launch preparation")
+			}
 			if name == "invalid-codex-effort" && (len(refusals) != 1 || refusals[0].ReasonCode != "codex-effort-invalid" || containsString(events, "host") || containsString(events, "persist")) {
 				t.Fatal("invalid Codex effort must refuse before host selection and persistence")
 			}
-			success := name == "success" || name == "dry-run"
+			success := name == "success" || name == "dry-run" || name == "valid-native-budget" || name == "absent-native-budget" || name == "non-codex-unparsed-budget"
 			if strings.HasPrefix(name, "evaluator-") {
 				if !reflect.DeepEqual(refusals, []matrixRefusal{evaluatorRefusal()}) {
 					t.Fatal("evaluator refusal became a silent skip")
@@ -168,10 +187,10 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			if ok != success {
 				t.Fatalf("unexpected admission for %s", name)
 			}
-			if name == "success" && !reflect.DeepEqual(events, []string{"profile", "resolve", "host", "persist", "launch"}) {
+			if success && name != "dry-run" && !reflect.DeepEqual(events, []string{"profile", "resolve", "host", "persist", "launch"}) {
 				t.Fatal("resolution, host, persistence and effect order changed")
 			}
-			if name != "success" && containsString(events, "launch") {
+			if !success && containsString(events, "launch") {
 				t.Fatal("refused attempt reached effect")
 			}
 		})

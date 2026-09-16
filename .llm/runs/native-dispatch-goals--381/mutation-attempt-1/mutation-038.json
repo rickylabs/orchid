@@ -1,0 +1,23 @@
+{
+  "id": 38,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "closedGoalReason",
+  "condition": "ok",
+  "replacement": "!(ok)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.254s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalUnownedAndDryWritesRefused (0.00s)\n    native_goal_transport_test.go:128: native error escaped closed diagnostics\n--- FAIL: TestNativeGoalWaitAndClosedReason (0.25s)\n    native_goal_transport_test.go:218: closed reason lost its meaning\nFAIL\nFAIL\torch/cmd/divybot\t0.253s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.253s\n"
+  }
+}

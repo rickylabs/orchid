@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "mode": "role",
+  "role": "implementation_evaluation",
+  "tiers": [
+    {
+      "tier": "feature",
+      "description": "Workhorse for real implementations, features, fixes, and long-running work; low temperature and medium-high complexity.",
+      "routes": [
+        {
+          "model": "muse_spark_1_3",
+          "effort": "xhigh"
+        },
+        {
+          "model": "opus_5",
+          "effort": "xhigh"
+        }
+      ],
+      "policy": {
+        "maxRounds": 5,
+        "notifyOwnerAfter": 3,
+        "reSteerSameSession": true
+      }
+    }
+  ]
+}

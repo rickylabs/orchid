@@ -1,0 +1,5 @@
+{
+  "command": "python3 scripts/check-native-goal-publication.py",
+  "exit_code": 0,
+  "output": "{\"changed_texts\": 158, \"findings\": {\"operator_path\": 0, \"tailnet_name\": 0, \"native_session\": 0, \"credential\": 0, \"private_address\": 0, \"spend_literal\": 0}}\n"
+}
