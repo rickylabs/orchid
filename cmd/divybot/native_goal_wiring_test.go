@@ -71,7 +71,7 @@ func TestNativeGoalRefusalDoesNotDenyAnExistingLaunch(t *testing.T) {
 	for _, reason := range []string{"goal-prompt-delivery-failed", "goal-budget-invalid"} {
 		c := &Coord{cfg: &Config{Inbox: "fixture/inbox"}, st: loadState(filepath.Join(t.TempDir(), "state.json"))}
 		body := ""
-		c.reportIssueMatrixRefusal(context.Background(), 7, Issue{ID: "fixture-issue", Title: "fixture task"}, matrixRefusal{"refused", reason, ""}, func(_ context.Context, _ string, _ int, text string) error { body = text; return nil })
+		c.reportIssueMatrixRefusal(context.Background(), 7, Issue{ID: "fixture-issue", Title: "fixture task"}, matrixRefusal{"refused", reason, "", ""}, func(_ context.Context, _ string, _ int, text string) error { body = text; return nil })
 		if body == "" {
 			t.Fatal("refusal comment missing")
 		}

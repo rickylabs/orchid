@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -51,9 +52,58 @@ type matrixReason string
 
 func (e matrixReason) Error() string { return string(e) }
 func (e matrixReason) Unwrap() error { return errMatrix }
+var validQuotaTransports = map[string]bool{
+	"claude": true,
+	"codex":  true,
+	"agy":    true,
+}
+
+var validQuotaConditions = map[string]bool{
+	"blocked by capacity": true,
+	"absent":              true,
+	"stale":               true,
+	"expired":             true,
+	"over ceiling":        true,
+}
+
+func validQuotaDetail(detail string) bool {
+	if detail == "" {
+		return false
+	}
+	items := strings.Split(detail, ", ")
+	if len(items) == 0 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		parts := strings.Split(item, ": ")
+		if len(parts) != 2 {
+			return false
+		}
+		transport, cond := parts[0], parts[1]
+		if !validQuotaTransports[transport] || seen[transport] {
+			return false
+		}
+		seen[transport] = true
+		if !validQuotaConditions[cond] {
+			return false
+		}
+	}
+	return true
+}
+
 func validMatrixRefusal(r matrixRefusal) bool {
 	_, ok := matrixReasons[r.ReasonCode]
-	return ok && (r.Cause == "" || matrixSites[r.Cause]) && ((r.ReasonCode == "observer-unavailable" && r.Status == "inconclusive") || (r.ReasonCode != "observer-unavailable" && r.Status == "refused"))
+	if !ok || (r.Cause != "" && !matrixSites[r.Cause]) {
+		return false
+	}
+	if (r.ReasonCode == "observer-unavailable" && r.Status != "inconclusive") || (r.ReasonCode != "observer-unavailable" && r.Status != "refused") {
+		return false
+	}
+	if r.Detail != "" && (r.ReasonCode != "quota-unavailable" || !validQuotaDetail(r.Detail)) {
+		return false
+	}
+	return true
 }
 func refusalFor(err error) matrixRefusal {
 	if errors.Is(err, errEvaluatorEvidence) {
@@ -61,12 +111,12 @@ func refusalFor(err error) matrixRefusal {
 	}
 	var reason matrixReason
 	if errors.As(err, &reason) {
-		r := matrixRefusal{"refused", string(reason), matrixCause(err)}
+		r := matrixRefusal{"refused", string(reason), matrixCause(err), ""}
 		if validMatrixRefusal(r) {
 			return r
 		}
 	}
-	return matrixRefusal{"refused", "resolution-failed", matrixCause(err)}
+	return matrixRefusal{"refused", "resolution-failed", matrixCause(err), ""}
 }
 
 func postMatrixComment(ctx context.Context, repo string, n int, body string) error {
@@ -89,11 +139,15 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 		r = refusalFor(errMatrix)
 	}
 	detail := matrixReasons[r.ReasonCode]
-	log.Printf("issue #%d: matrix-launch-refused status=%s reason=%s field=%s cause=%s; %s", n, r.Status, r.ReasonCode, detail.field, r.Cause, detail.hint)
+	if r.Detail != "" {
+		log.Printf("issue #%d: matrix-launch-refused status=%s reason=%s field=%s cause=%s detail=%s; %s", n, r.Status, r.ReasonCode, detail.field, r.Cause, r.Detail, detail.hint)
+	} else {
+		log.Printf("issue #%d: matrix-launch-refused status=%s reason=%s field=%s cause=%s; %s", n, r.Status, r.ReasonCode, detail.field, r.Cause, detail.hint)
+	}
 	if c.dry {
 		return
 	}
-	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode + "\x00" + r.Cause))
+	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode + "\x00" + r.Cause + "\x00" + r.Detail))
 	c.st.mu.Lock()
 	notified := c.st.MatrixNotices[n] == key
 	c.st.mu.Unlock()
@@ -106,6 +160,9 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	}
 	if r.Cause != "" {
 		body += " Cause: `" + r.Cause + "`."
+	}
+	if r.Detail != "" {
+		body += " Detail: `" + r.Detail + "`."
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -213,5 +270,10 @@ func matrixCause(err error) string {
 func refusalWithReason(err error, code string) matrixRefusal {
 	r := refusalFor(matrixReason(code))
 	r.Cause = matrixCause(err)
+	return r
+}
+func refusalForQuota(detail string) matrixRefusal {
+	r := refusalFor(matrixReason("quota-unavailable"))
+	r.Detail = detail
 	return r
 }
