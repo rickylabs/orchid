@@ -8,6 +8,6 @@
     "goal_written": false,
     "binding_written": false,
     "restart_performed": false,
-    "required": "existing authorized host-execution connection"
+    "required": "operator-run deployment and real-dispatch proof"
   }
 }

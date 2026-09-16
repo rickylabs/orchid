@@ -68,11 +68,11 @@ Every material statement is classified as CURRENT (inspected baseline source), C
 
 ## Validation and rollout
 
-**MEASURED.** `go test ./... -count=1` and the dispatcher build pass. The new process client holds the existing child-reaper gate throughout its process lifetime. The mutation suite currently records 121 distinct killed mutations, zero survivors, 121 restored controls and zero broken controls. Historical failed/invalid attempts remain recorded rather than being discarded. Exact commands, exit codes and output are in `.llm/runs/native-dispatch-goals--381/`. The real-dispatch verdict remains INCONCLUSIVE: deployment connectivity has not been supplied, so no new dispatch or native goal write has been attempted.
+**MEASURED.** `go test ./... -count=1` and the dispatcher build pass. The new process client holds the existing child-reaper gate throughout its process lifetime. The mutation suite currently records 121 distinct killed mutations, zero survivors, 121 restored controls and zero broken controls. Historical failed/invalid attempts remain recorded rather than being discarded. Exact commands, exit codes and output are in `.llm/runs/native-dispatch-goals--381/`. The real-dispatch verdict remains INCONCLUSIVE: agent workspaces are intentionally isolated from deployment, so no new dispatch or native goal write has been attempted.
 
 **PLANNED.** One explicitly created issue will exercise the authorized dispatcher path. Before the trigger label, read back the entire brief and announce its issue and lane. Verify its new private binding, active goal and authorized budget, actual updated notification, status-only transition and restoration to the initial null goal. Never substitute an unrelated native thread.
 
-**PLANNED.** Deploy only through an authorized host connection and restart only the dispatcher. Keep the agent container running. Whole-diff leak scanning, mutation controls and the real-dispatch proof precede the PR.
+**PLANNED.** Deploy only through an authorized host connection and restart only the dispatcher. Keep the agent container running. Whole-diff leak scanning and mutation controls precede publication. The coordinator authorized opening a checkpoint PR with live proof INCONCLUSIVE; the operator will attach deployment and real-dispatch evidence.
 
 ## Revisit triggers
 
