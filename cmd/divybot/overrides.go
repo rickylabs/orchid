@@ -39,7 +39,7 @@ type Overrides struct {
 	RoutingInvalid   bool   `json:"-"`
 	Harness          string `json:"harness,omitempty"`
 	Model            string `json:"model,omitempty"`
-	// Router is the opencode provider prefix ("openai", "n5air", …). opencode
+	// Router is the opencode provider prefix ("openai", "openrouter", …). opencode
 	// models are addressed as provider/model; router lets an operator name the
 	// two halves separately (model: gpt-5.5 + router: openai). Ignored when the
 	// model already contains a slash, and by non-opencode harnesses.
