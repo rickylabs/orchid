@@ -1,0 +1,23 @@
+{
+  "id": 6,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "nativeGoalIntent",
+  "condition": "is.Number <= 0 || !repositoryName.MatchString(repo) || strings.TrimSpace(is.Title) == \"\" || !validGoalObjective(objective)",
+  "replacement": "!(is.Number <= 0 || !repositoryName.MatchString(repo) || strings.TrimSpace(is.Title) == \"\" || !validGoalObjective(objective))",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalObjective (0.00s)\n    native_goal_test.go:61: valid assignment intent failed\nFAIL\nFAIL\torch/cmd/divybot\t0.002s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  }
+}

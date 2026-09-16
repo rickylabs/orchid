@@ -1,0 +1,23 @@
+{
+  "id": 113,
+  "file": "cmd/divybot/matrix.go",
+  "function": "matrix-intent-preflight",
+  "condition": "nativeGoalIntent(c.cfg.Inbox, assignment, o); e != nil",
+  "replacement": "nativeGoalIntent(c.cfg.Inbox, assignment, o); e == nil",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestCommonMatrixAttempt)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.432s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestCommonMatrixAttempt)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestCommonMatrixAttempt (0.29s)\n    --- FAIL: TestCommonMatrixAttempt/invalid-native-budget (0.07s)\n        matrix_test.go:171: invalid goal budget reached launch preparation\n    --- FAIL: TestCommonMatrixAttempt/explicit-empty-budget (0.07s)\n        matrix_test.go:171: invalid goal budget reached launch preparation\n    --- FAIL: TestCommonMatrixAttempt/valid-native-budget (0.00s)\n        matrix_test.go:188: unexpected admission for valid-native-budget\n    --- FAIL: TestCommonMatrixAttempt/absent-native-budget (0.01s)\n        matrix_test.go:188: unexpected admission for absent-native-budget\n    --- FAIL: TestCommonMatrixAttempt/invalid-codex-effort (0.00s)\n        matrix_test.go:174: invalid Codex effort must refuse before host selection and persistence\nFAIL\nFAIL\torch/cmd/divybot\t0.289s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestCommonMatrixAttempt)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.931s\n"
+  }
+}

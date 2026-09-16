@@ -1,0 +1,23 @@
+{
+  "id": 102,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "status-only",
+  "condition": "map[string]any{\"threadId\": p.thread, \"status\": status}",
+  "replacement": "map[string]any{\"threadId\": p.thread, \"status\": status, \"objective\": intent.Objective}",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.004s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalTransition (0.00s)\n    native_goal_test.go:268: status update reset intent or accounting\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  }
+}

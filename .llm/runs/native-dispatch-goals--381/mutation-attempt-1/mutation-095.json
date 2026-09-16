@@ -1,0 +1,23 @@
+{
+  "id": 95,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "objective-validation",
+  "condition": "return utf8.ValidString(s) && strings.TrimSpace(s) != \"\" && utf8.RuneCountInString(s) <= 4000 && !strings.ContainsRune(s, 0)",
+  "replacement": "return true",
+  "verdict": "INCONCLUSIVE",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "FAIL\torch/cmd/divybot [build failed]\nFAIL\n# orch/cmd/divybot [orch/cmd/divybot.test]\ncmd/divybot/native_goal.go:14:2: \"unicode/utf8\" imported and not used\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalObjective)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": 27,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "transitionDispatchGoal",
+  "condition": "!sameGoalIntent(old, intent)",
+  "replacement": "!(!sameGoalIntent(old, intent))",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalTransition (0.00s)\n    native_goal_test.go:260: valid lifecycle transition refused goal-ownership-mismatch\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransition)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  }
+}

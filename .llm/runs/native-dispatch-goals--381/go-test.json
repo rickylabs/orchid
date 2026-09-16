@@ -1,0 +1,5 @@
+{
+  "command": "go test ./... -count=1",
+  "exit_code": 0,
+  "output": "ok  \torch/cmd/divybot\t37.764s\n"
+}

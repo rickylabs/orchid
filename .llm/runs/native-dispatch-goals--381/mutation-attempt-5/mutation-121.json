@@ -1,0 +1,23 @@
+{
+  "id": 121,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "fresh-write-notification",
+  "condition": "p.updates = nil",
+  "replacement": "// mutation retains stale pre-write notifications",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFreshWriteNotification)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFreshWriteNotification)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalFreshWriteNotification (0.00s)\n    native_goal_test.go:511: stale pre-write notification certified a write\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFreshWriteNotification)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.002s\n"
+  }
+}

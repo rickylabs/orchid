@@ -32,12 +32,13 @@ import (
 )
 
 type Overrides struct {
-	Tier           string `json:"tier,omitempty"`
-	Role           string `json:"role,omitempty"`
-	Pin            string `json:"pin,omitempty"`
-	RoutingInvalid bool   `json:"-"`
-	Harness        string `json:"harness,omitempty"`
-	Model          string `json:"model,omitempty"`
+	MaxTokensPresent bool   `json:"max_tokens_present,omitempty"`
+	Tier             string `json:"tier,omitempty"`
+	Role             string `json:"role,omitempty"`
+	Pin              string `json:"pin,omitempty"`
+	RoutingInvalid   bool   `json:"-"`
+	Harness          string `json:"harness,omitempty"`
+	Model            string `json:"model,omitempty"`
 	// Router is the opencode provider prefix ("openai", "n5air", …). opencode
 	// models are addressed as provider/model; router lets an operator name the
 	// two halves separately (model: gpt-5.5 + router: openai). Ignored when the
@@ -90,6 +91,9 @@ func parseOverrides(text string) Overrides {
 			if t == "" {
 				continue
 			}
+			if emptyGoalBudgetKey.MatchString(t) {
+				o.MaxTokensPresent = true
+			} // Detect invalid explicit emptiness without changing prompt parsing.
 			if m := swarmKV.FindStringSubmatch(t); m != nil {
 				key := strings.ReplaceAll(m[1], "_", "-")
 				val := strings.TrimSpace(strings.SplitN(m[2], "#", 2)[0]) // strip trailing comment
@@ -124,6 +128,7 @@ func parseOverrides(text string) Overrides {
 					o.Effort = strings.ToLower(val)
 				case "max-tokens":
 					o.MaxTokens = val
+					o.MaxTokensPresent = true
 				case "profile":
 					o.Profile = val
 				case "timeout":

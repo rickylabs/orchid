@@ -1,0 +1,23 @@
+{
+  "id": 37,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "startDispatchGoal",
+  "condition": "j.NativeGoal.Reason != \"\"",
+  "replacement": "!(j.NativeGoal.Reason != \"\")",
+  "verdict": "SURVIVED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.873s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.026s\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.808s\n"
+  }
+}

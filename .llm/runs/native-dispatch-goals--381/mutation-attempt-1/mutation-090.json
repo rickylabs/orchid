@@ -1,0 +1,23 @@
+{
+  "id": 90,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "withGoalConnection",
+  "condition": "h.isLocal()",
+  "replacement": "!(h.isLocal())",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.080s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalTransport (0.32s)\n    native_goal_transport_test.go:53: valid transport failed goal-source-closed-or-frame-limit\nFAIL\nFAIL\torch/cmd/divybot\t0.324s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.093s\n"
+  }
+}

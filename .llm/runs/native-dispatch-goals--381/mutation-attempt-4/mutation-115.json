@@ -1,0 +1,23 @@
+{
+  "id": 115,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "cancelled-binding-wait",
+  "condition": "case <-ctx.Done():\n\t\treturn false",
+  "replacement": "case <-ctx.Done():\n\t\treturn true",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.253s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalUnownedAndDryWritesRefused (0.00s)\n    native_goal_transport_test.go:145: cancelled identity wait continued\nFAIL\nFAIL\torch/cmd/divybot\t0.254s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.254s\n"
+  }
+}

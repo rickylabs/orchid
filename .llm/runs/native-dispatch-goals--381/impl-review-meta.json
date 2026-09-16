@@ -1,0 +1,10 @@
+{
+  "command": "python3 native-goal-review.py impl meta/muse-spark-1.3-contributor",
+  "exit_code": 0,
+  "output": {
+    "requestedModel": "meta/muse-spark-1.3-contributor",
+    "observedModel": "meta/muse-spark-1.3-contributor",
+    "nativeIdentityObserved": true,
+    "verdictText": "PASS \u2014 implementation matches plan on intent, budget grammar, binding, creation/lifecycle guards, precedence and closed diagnostics. D1 stale-update fix with paired fresh/stale control verified in supplied tests; D2-D6 dispositions retained as stated.\n\nNo concrete code defect to fix in this diff.\n\nLIVE PROOF PENDING \u2014 not certified by this review. Operational host connection is not runtime proof. Required before Orchid PR: read-back absent goal, bind from official hook report, observe active creation with authorized budget and notification, status-only transition, clear to prior null; do not mutate pre-existing goal.\n"
+  }
+}

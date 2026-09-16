@@ -1,0 +1,23 @@
+{
+  "id": 39,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "transitionGoal",
+  "condition": "c.dry || j.NativeGoal == nil || !j.NativeGoal.Owned",
+  "replacement": "!(c.dry || j.NativeGoal == nil || !j.NativeGoal.Owned)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.747s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalUnownedAndDryWritesRefused (0.00s)\npanic: runtime error: invalid memory address or nil pointer dereference [recovered, repanicked]\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x30 pc=0x62d11c]\n\ngoroutine 22 [running]:\ntesting.tRunner.func1.2({0x6cacc0, 0x999310})\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1872 +0x237\ntesting.tRunner.func1()\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1875 +0x35b\npanic({0x6cacc0?, 0x999310?})\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/runtime/panic.go:783 +0x132\norch/cmd/divybot.(*Coord).transitionGoal(0xc0001afe38, {0x7a0128?, 0x9c9a40?}, 0xc0001afbf0, {0x71fdbc, 0x8})\n\t<private>/cmd/divybot/native_goal.go:251 +0xbc\norch/cmd/divybot.TestNativeGoalUnownedAndDryWritesRefused(0xc000103180)\n\t<private>/cmd/divybot/native_goal_transport_test.go:122 +0x192\ntesting.tRunner(0xc000103180, 0x745570)\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1934 +0xea\ncreated by testing.(*T).Run in goroutine 1\n\t<private>/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/src/testing/testing.go:1997 +0x465\nFAIL\torch/cmd/divybot\t0.006s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWrappedTransition|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.959s\n"
+  }
+}

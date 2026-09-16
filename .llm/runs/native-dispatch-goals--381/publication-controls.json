@@ -1,0 +1,5 @@
+{
+  "command": "python3 scripts/check-native-goal-publication.py --self-test",
+  "exit_code": 0,
+  "output": "{\"negative_controls\": 6, \"clean_controls\": 6, \"broken_controls\": 0}\n"
+}

@@ -1,0 +1,23 @@
+{
+  "id": 14,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "bindDispatchGoal",
+  "condition": "e != nil",
+  "replacement": "!(e != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.406s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "2026/09/16 04:16:26 issue #7: native goal INCONCLUSIVE reason=native-session-evidence-invalid\n2026/09/16 04:16:26 issue #7: native goal INCONCLUSIVE reason=native-session-evidence-invalid\n2026/09/16 04:16:26 issue #7: native goal INCONCLUSIVE reason=goal-identity-source-unavailable\n2026/09/16 04:16:26 issue #7: native goal INCONCLUSIVE reason=goal-state-persistence-failed\n--- FAIL: TestNativeGoalStartOwnershipAndFailures (0.78s)\n    --- FAIL: TestNativeGoalStartOwnershipAndFailures/success (0.18s)\n        native_goal_transport_test.go:102: verified creation did not earn ownership\nFAIL\nFAIL\torch/cmd/divybot\t0.781s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.755s\n"
+  }
+}

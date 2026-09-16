@@ -1,0 +1,23 @@
+{
+  "id": 104,
+  "file": "cmd/divybot/main.go",
+  "function": "completion-hook",
+  "condition": "c.finishAssignmentGoal(ctx, jc)",
+  "replacement": "_ = jc",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalDispatchWiring)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.005s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalDispatchWiring)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalDispatchWiring (0.00s)\n    native_goal_wiring_test.go:56: native goal lifecycle hook disconnected\nFAIL\nFAIL\torch/cmd/divybot\t0.006s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalDispatchWiring)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.005s\n"
+  }
+}

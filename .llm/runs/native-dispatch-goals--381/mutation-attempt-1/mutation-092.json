@@ -1,0 +1,23 @@
+{
+  "id": 92,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "withGoalConnection",
+  "condition": "e != nil",
+  "replacement": "!(e != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.078s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalTransport (0.00s)\n    native_goal_transport_test.go:53: valid transport failed goal-transport-unavailable\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.078s\n"
+  }
+}

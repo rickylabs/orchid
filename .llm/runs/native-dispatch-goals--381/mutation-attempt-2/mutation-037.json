@@ -1,0 +1,23 @@
+{
+  "id": 37,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "startDispatchGoal",
+  "condition": "j.NativeGoal.Reason != \"\"",
+  "replacement": "!(j.NativeGoal.Reason != \"\")",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.815s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalStartOwnershipAndFailures (2.94s)\n    --- FAIL: TestNativeGoalStartOwnershipAndFailures/success (0.32s)\n        native_goal_transport_test.go:106: successful goal emitted a refusal\n    --- FAIL: TestNativeGoalStartOwnershipAndFailures/missing-notification (0.60s)\n        native_goal_transport_test.go:109: failed goal emitted success or lost its reason\n    --- FAIL: TestNativeGoalStartOwnershipAndFailures/identity-unavailable (0.41s)\n        native_goal_transport_test.go:109: failed goal emitted success or lost its reason\n    --- FAIL: TestNativeGoalStartOwnershipAndFailures/state-persistence-failure (1.61s)\n        native_goal_transport_test.go:109: failed goal emitted success or lost its reason\nFAIL\nFAIL\torch/cmd/divybot\t2.943s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.059s\n"
+  }
+}

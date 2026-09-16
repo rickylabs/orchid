@@ -1,0 +1,23 @@
+{
+  "id": 66,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "request",
+  "condition": "json.Unmarshal(m[\"error\"], &v) == nil && v.Code == -32600 && v.Message == \"thread not found: \"+p.thread",
+  "replacement": "!(json.Unmarshal(m[\"error\"], &v) == nil && v.Code == -32600 && v.Message == \"thread not found: \"+p.thread)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.187s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalRPCGuards (0.00s)\n    native_goal_test.go:189: daemon refusal lost its distinction or identity correlation\nFAIL\nFAIL\torch/cmd/divybot\t0.428s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalRPCGuards|TestNativeGoalCreation|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.595s\n"
+  }
+}

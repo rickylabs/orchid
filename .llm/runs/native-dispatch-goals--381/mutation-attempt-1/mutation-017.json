@@ -1,0 +1,23 @@
+{
+  "id": 17,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "readGoalIdentity",
+  "condition": "e != nil || !s.Mode().IsRegular() || s.Mode().Perm() != 0600 || s.Size() > 1048576",
+  "replacement": "!(e != nil || !s.Mode().IsRegular() || s.Mode().Perm() != 0600 || s.Size() > 1048576)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalPrivateBindingRead|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t4.725s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalPrivateBindingRead|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalPrivateBindingRead (0.14s)\n    native_goal_test.go:383: valid binding unavailable\nFAIL\nFAIL\torch/cmd/divybot\t0.279s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalPrivateBindingRead|TestNativeGoalFrameAndLoopBounds)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t4.299s\n"
+  }
+}

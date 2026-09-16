@@ -1,0 +1,23 @@
+{
+  "id": 119,
+  "file": "cmd/divybot/main.go",
+  "function": "goal-ownership-transport",
+  "condition": "if agent == \"codex\" {\n\t\tj.NativeGoal =",
+  "replacement": "if agent != \"codex\" {\n\t\tj.NativeGoal =",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalLaunchOwnershipWiring)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.006s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalLaunchOwnershipWiring)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalLaunchOwnershipWiring (0.00s)\n    native_goal_wiring_test.go:126: native goal ownership is not scoped to the Codex launch\nFAIL\nFAIL\torch/cmd/divybot\t0.005s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalLaunchOwnershipWiring)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.006s\n"
+  }
+}

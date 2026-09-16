@@ -1,0 +1,23 @@
+{
+  "id": 34,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "startDispatchGoal",
+  "condition": "e == nil",
+  "replacement": "!(e == nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.442s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "2026/09/16 04:18:09 issue #7: native goal active; updated notification observed\n2026/09/16 04:18:09 issue #7: native goal active; updated notification observed\n2026/09/16 04:18:10 issue #7: native goal INCONCLUSIVE reason=goal-identity-unavailable\n2026/09/16 04:18:10 issue #7: native goal INCONCLUSIVE reason=goal-state-persistence-failed\n--- FAIL: TestNativeGoalStartOwnershipAndFailures (1.92s)\n    --- FAIL: TestNativeGoalStartOwnershipAndFailures/missing-notification (0.19s)\n        native_goal_transport_test.go:109: uncertain goal creation earned ownership\nFAIL\nFAIL\torch/cmd/divybot\t1.925s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalStartOwnershipAndFailures|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.013s\n"
+  }
+}

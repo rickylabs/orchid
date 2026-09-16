@@ -1,0 +1,23 @@
+{
+  "id": 44,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "assignmentGoalStatus",
+  "condition": "state != \"CLOSED\"",
+  "replacement": "!(state != \"CLOSED\")",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalAssignmentStatus)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.003s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalAssignmentStatus)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalAssignmentStatus (0.00s)\n    native_goal_test.go:309: assignment state fabricated\nFAIL\nFAIL\torch/cmd/divybot\t0.003s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalAssignmentStatus)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.002s\n"
+  }
+}

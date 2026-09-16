@@ -1,0 +1,23 @@
+{
+  "id": 87,
+  "file": "cmd/divybot/native_goal_rpc.go",
+  "function": "initialize",
+  "condition": "e != nil",
+  "replacement": "!(e != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.075s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalTransport (0.03s)\n    native_goal_transport_test.go:60: bad initialize accepted\nFAIL\nFAIL\torch/cmd/divybot\t0.030s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalTransport)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.077s\n"
+  }
+}

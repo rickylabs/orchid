@@ -1,0 +1,11 @@
+{
+  "command": "python3 native-goal-review.py impl meta/muse-spark-1.3-contributor",
+  "exit_code": 2,
+  "output": {
+    "verdict": "INCONCLUSIVE",
+    "reason": "evaluator-evidence-incomplete",
+    "modelMatches": true,
+    "identityObserved": true,
+    "finishReason": "length"
+  }
+}

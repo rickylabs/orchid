@@ -74,3 +74,23 @@ systemctl stop orchid            # stop the old multi-file orchid
 | clawpatrol per-workspace                    | bare claude/codex + central auth-sync |
 | `join_managed` / `bootstrapVM` / vm-keys gating | tailnet pool, no join |
 | ~13k LOC across 25 files                    | ~1.2k LOC, one file |
+
+
+### Native Codex goals
+
+For new Codex dispatches, divybot reads the official session report again after
+prompt delivery and records the authoritative identity in the existing private
+binding. It then creates an active native goal using the assignment title and
+reference. The authorized `/swarm max-tokens` value is its token budget. Omit the
+key for an unknown budget; zero is an explicit numeric budget. Whole-token decimal
+values and exact decimal k/m suffixes are accepted; invalid values refuse before
+launch.
+
+The execution environment needs the official herdr Codex integration and the
+plain `codex app-server` goal contract. Missing identity stays explicitly
+unavailable. An existing goal is not overwritten. Completion, cancellation,
+deadline and blocked events update only the status of goals this dispatcher has
+verified it created. Native budget/usage limitation statuses remain distinct.
+
+See [RFC 0001](../../docs/rfcs/0001-native-dispatch-goals.md) for ownership,
+privacy, uncertainty and the live verification gate.

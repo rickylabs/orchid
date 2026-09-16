@@ -1,0 +1,23 @@
+{
+  "id": 115,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "cancelled-binding-wait",
+  "condition": "case <-ctx.Done():\n\t\treturn false",
+  "replacement": "case <-ctx.Done():\n\t\treturn true",
+  "verdict": "SURVIVED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.254s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.254s\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalWaitAndClosedReason)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t0.253s\n"
+  }
+}

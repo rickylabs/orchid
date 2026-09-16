@@ -1,0 +1,23 @@
+{
+  "id": 46,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "finishAssignmentGoal",
+  "condition": "ghJSON(ctx, &issue, \"issue\", \"view\", fmt.Sprint(j.Issue), \"--repo\", c.cfg.Inbox, \"--json\", \"state,stateReason\") != nil",
+  "replacement": "!(ghJSON(ctx, &issue, \"issue\", \"view\", fmt.Sprint(j.Issue), \"--repo\", c.cfg.Inbox, \"--json\", \"state,stateReason\") != nil)",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFinishAssignment|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.216s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFinishAssignment|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalFinishAssignment (1.07s)\n    --- FAIL: TestNativeGoalFinishAssignment/CLOSEDCOMPLETED (0.28s)\n        native_goal_transport_test.go:203: assignment status lost or fabricated\n    --- FAIL: TestNativeGoalFinishAssignment/CLOSEDNOT_PLANNED (0.28s)\n        native_goal_transport_test.go:203: assignment status lost or fabricated\n    --- FAIL: TestNativeGoalFinishAssignment/CLOSEDCOMPLETED#01 (0.18s)\n        native_goal_transport_test.go:206: failed issue read lost its reason\nFAIL\nFAIL\torch/cmd/divybot\t1.073s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFinishAssignment|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t1.235s\n"
+  }
+}

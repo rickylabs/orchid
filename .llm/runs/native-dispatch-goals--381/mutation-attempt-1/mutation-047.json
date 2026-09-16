@@ -1,0 +1,23 @@
+{
+  "id": 47,
+  "file": "cmd/divybot/native_goal.go",
+  "function": "finishAssignmentGoal",
+  "condition": "status != \"\"",
+  "replacement": "!(status != \"\")",
+  "verdict": "KILLED",
+  "baseline": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFinishAssignment|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t2.029s\n"
+  },
+  "mutation": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFinishAssignment|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 1,
+    "output": "--- FAIL: TestNativeGoalFinishAssignment (1.57s)\n    --- FAIL: TestNativeGoalFinishAssignment/CLOSEDCOMPLETED (0.11s)\n        native_goal_transport_test.go:203: assignment status lost or fabricated\n    --- FAIL: TestNativeGoalFinishAssignment/CLOSEDNOT_PLANNED (0.27s)\n        native_goal_transport_test.go:203: assignment status lost or fabricated\nFAIL\nFAIL\torch/cmd/divybot\t1.574s\nFAIL\n"
+  },
+  "restored": {
+    "command": "go test ./cmd/divybot -run '^(TestNativeGoalFinishAssignment|TestNativeGoalUnownedAndDryWritesRefused)$' -count=1 -timeout=30s",
+    "exit_code": 0,
+    "output": "ok  \torch/cmd/divybot\t3.487s\n"
+  }
+}
