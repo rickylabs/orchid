@@ -154,7 +154,7 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	if notified {
 		return
 	}
-	body := fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s No agent was launched by this refused attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
+	body := fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s No agent was launched by this refused attempt. %s", r.Status, r.ReasonCode, detail.field, detail.hint, matrixRetryNote)
 	if r.ReasonCode == "launch-failed" || r.ReasonCode == "dispatch-persistence-failed" || r.ReasonCode == "goal-prompt-delivery-failed" {
 		body = fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s Launch outcome requires inspection; this notice does not authorize another attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
 	}
@@ -182,6 +182,36 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	// A crash between comment and state write may duplicate a comment, never a launch.
 }
 
+// Refused attempts are not terminal: tick re-runs matrixAttempt on every poll while the label stays.
+const matrixRetryNote = "divybot re-checks this issue on every poll while the label stays, so a later poll may still launch it; a follow-up notice is posted if it does."
+
+// reportMatrixLaunchAfterRefusal closes the loop on a refusal notice. Without it the thread reads
+// "no agent was launched" followed by an agent's own output, with nothing explaining the retry.
+func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post func(context.Context, string, int, string) error) {
+	if c.dry || c.st == nil {
+		return
+	}
+	c.st.mu.Lock()
+	_, refused := c.st.MatrixNotices[n]
+	c.st.mu.Unlock()
+	if !refused {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	body := "divybot: a later poll launched an agent for this issue. The earlier matrix refusal notice on this issue is superseded."
+	if post(ctx, c.cfg.Inbox, n, body) != nil {
+		log.Printf("issue #%d: superseded-refusal notice unavailable", n)
+		return
+	}
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	delete(c.st.MatrixNotices, n)
+	if c.st.saveLocked() != nil {
+		log.Printf("issue #%d: matrix refusal notification persistence failed", n)
+	}
+}
+
 var matrixSites = map[string]bool{
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-render": true,
 	"spawn.native-binding": true, "dispatch.native-clear": true,
@@ -190,6 +220,10 @@ var matrixSites = map[string]bool{
 	"decode.envelope":                      true,
 	"output.limit":                         true,
 	"command.exit":                         true,
+	"command.timeout":                      true,
+	"command.canceled":                     true,
+	"command.signal":                       true,
+	"command.start":                        true,
 	"resolve.temp-create":                  true,
 	"resolve.temp-write-close":             true,
 	"resolve.encode-request":               true,
