@@ -81,10 +81,14 @@ systemctl stop orchid            # stop the old multi-file orchid
 For new Codex dispatches, divybot reads the official session report again after
 prompt delivery and records the authoritative identity in the existing private
 binding. It then creates an active native goal using the assignment title and
-reference. The authorized `/swarm max-tokens` value is its token budget. Omit the
-key for an unknown budget; zero is an explicit numeric budget. Whole-token decimal
-values and exact decimal k/m suffixes are accepted; invalid values refuse before
-launch.
+reference. The private matrix config may set `budget_defaults` by exact workload
+tier and profile, for example `feature` / `leaf`. A `/swarm max-tokens` value
+overrides that default. If neither exists the goal receives null; zero is an
+explicit numeric budget. Whole-token decimal values and exact decimal k/m suffixes
+are accepted for issue overrides; invalid values refuse before launch. The same
+resolved value and `issue` / `route` / `unset` source are persisted in private
+`dispatch.json` for the Harness issue-agent feed. The coordinator decided this
+precedence on 2026-09-27; Eric can overrule.
 
 The execution environment needs the official herdr Codex integration and the
 plain `codex app-server` goal contract. Missing identity stays explicitly

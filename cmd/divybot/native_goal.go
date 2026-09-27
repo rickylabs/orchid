@@ -60,6 +60,26 @@ func parseGoalBudget(value string, present bool) (*int64, error) {
 	result := n.Int64()
 	return &result, nil
 }
+
+// Resolve the budget once for dispatch and the native goal. An explicit zero is a value.
+func resolveRouteBudget(cfg MatrixConfig, tier, profile string, o Overrides) (*int64, string, error) {
+	if o.MaxTokensPresent || o.MaxTokens != "" {
+		budget, err := parseGoalBudget(o.MaxTokens, o.MaxTokensPresent)
+		if err != nil {
+			return nil, "", err
+		}
+		return budget, "issue", nil
+	}
+	if profiles := cfg.BudgetDefaults[tier]; profiles != nil {
+		if value, ok := profiles[profile]; ok {
+			if !goalNumber(value) {
+				return nil, "", goalError("goal-budget-invalid")
+			}
+			return &value, "route", nil
+		}
+	}
+	return nil, "unset", nil
+}
 func validGoalObjective(s string) bool {
 	return utf8.ValidString(s) && strings.TrimSpace(s) != "" && utf8.RuneCountInString(s) <= 4000 && !strings.ContainsRune(s, 0)
 }

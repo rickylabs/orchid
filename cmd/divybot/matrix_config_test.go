@@ -46,7 +46,7 @@ func TestMatrixConfigCLI(t *testing.T) {
 	is := Issue{ID: "synthetic-private-canary", Number: 1, Title: "Synthetic", Body: "/swarm\nprofile: leaf\ntier: feature\n\nComplete synthetic brief <&>"}
 	issueJSON, _ := json.Marshal(is)
 	writeFixture(t, issueFile, string(issueJSON))
-	writeFixture(t, cfgPath, `{"inbox":"example/inbox","targets":[{"label":"synthetic-label","repo":"example/project"}],"extension":{"preserve":"synthetic-private-canary"}}`)
+	writeFixture(t, cfgPath, `{"inbox":"example/inbox","targets":[{"label":"synthetic-label","repo":"example/project"}],"matrix":{"budget_defaults":{"feature":{"leaf":12000}}},"extension":{"preserve":"synthetic-private-canary"}}`)
 	bin := filepath.Join(private, "bin")
 	if os.Mkdir(bin, 0700) != nil {
 		t.Fatal("fixture setup")
@@ -64,7 +64,7 @@ func TestMatrixConfigCLI(t *testing.T) {
 		t.Fatalf("build exit %d: %s", code, diagnostic.String())
 	}
 	cfg, raw, p := readMatrixConfigFile(candidate)
-	if len(p) > 0 || cfg.Matrix.Revision != source.Revision || cfg.Matrix.Grants[0].BriefDigest != briefDigest(is) || !strings.Contains(string(raw["extension"]), "synthetic-private-canary") {
+	if len(p) > 0 || cfg.Matrix.Revision != source.Revision || cfg.Matrix.Grants[0].BriefDigest != briefDigest(is) || cfg.Matrix.BudgetDefaults["feature"]["leaf"] != 12000 || !strings.Contains(string(raw["extension"]), "synthetic-private-canary") {
 		t.Fatal("candidate lost resolved pins, grant or unrelated config")
 	}
 	st, _ := os.Stat(candidate)
@@ -95,7 +95,8 @@ func TestMatrixConfigRequiredFields(t *testing.T) {
 	base := syntheticSource(t)
 	base.ReceiptRoot = privateTestRoot(t)
 	base.TargetRevisions = map[string]string{"example/project": strings.Repeat("c", 40)}
-	for _, name := range []string{"valid", "source", "revision", "receipt_root", "target_revisions", "pins", "grant-digest", "grant-authority", "override-pin"} {
+	base.BudgetDefaults = map[string]map[string]int64{"feature": {"leaf": 0}}
+	for _, name := range []string{"valid", "source", "revision", "receipt_root", "target_revisions", "pins", "budget-tier", "budget-profile", "budget-negative", "budget-overflow", "grant-digest", "grant-authority", "override-pin"} {
 		t.Run(name, func(t *testing.T) {
 			raw, _ := json.Marshal(base)
 			var m MatrixConfig
@@ -111,6 +112,14 @@ func TestMatrixConfigRequiredFields(t *testing.T) {
 				m.TargetRevisions = nil
 			case "pins":
 				m.Pins = map[string]MatrixPin{"synthetic": {}}
+			case "budget-tier":
+				m.BudgetDefaults = map[string]map[string]int64{"bad/tier": {"leaf": 1000}}
+			case "budget-profile":
+				m.BudgetDefaults = map[string]map[string]int64{"feature": {"bad/profile": 1000}}
+			case "budget-negative":
+				m.BudgetDefaults = map[string]map[string]int64{"feature": {"leaf": -1}}
+			case "budget-overflow":
+				m.BudgetDefaults = map[string]map[string]int64{"feature": {"leaf": maxGoalNumber + 1}}
 			case "grant-digest":
 				m.Grants = []MatrixGrant{{IssueID: "synthetic", Repo: "example/project", BriefDigest: "invalid"}}
 			case "grant-authority":
@@ -128,7 +137,7 @@ func TestMatrixConfigRequiredFields(t *testing.T) {
 }
 
 func TestMatrixConfigRejectsAmbiguousJSON(t *testing.T) {
-	for _, body := range []string{`{"matrix":{"source":"one","source":"two"}}`, `{"matrix":{"invented":"synthetic-private-canary"}}`, `{"matrix":null}`, `{"matrix":[]} {}`} {
+	for _, body := range []string{`{"matrix":{"source":"one","source":"two"}}`, `{"matrix":{"invented":"synthetic-private-canary"}}`, `{"matrix":{"budget_defaults":null}}`, `{"matrix":{"budget_defaults":{"feature":{"leaf":1.5}}}}`, `{"matrix":null}`, `{"matrix":[]} {}`} {
 		path := filepath.Join(privateTestRoot(t), "config.json")
 		writeFixture(t, path, body)
 		_, _, p := readMatrixConfigFile(path)

@@ -7,6 +7,9 @@
       "<TARGET_OWNER>/<TARGET_REPOSITORY>": "<FULL_TARGET_COMMIT>"
     },
     "pins": {},
+    "budget_defaults": {
+      "feature": { "leaf": 12000 }
+    },
     "grants": []
   },
   "inbox": "denoland/divybot",

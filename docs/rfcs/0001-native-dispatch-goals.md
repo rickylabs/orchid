@@ -74,6 +74,10 @@ Every material statement is classified as CURRENT (inspected baseline source), C
 
 **PLANNED.** Deploy only through an authorized host connection and restart only the dispatcher. Keep the agent container running. Whole-diff leak scanning and mutation controls precede publication. The coordinator authorized opening a checkpoint PR with live proof INCONCLUSIVE; the operator will attach deployment and real-dispatch evidence.
 
+## Amendment, 2026-09-27: route-default budgets
+
+The coordinator decided 2026-09-27, subject to Eric overruling, that the resolved route carries an exact tier/profile default from private matrix configuration. The issue's `/swarm max-tokens` value wins over that default, including explicit zero. Null is sent only when neither source exists. The chosen value and `issue` / `route` / `unset` source are written to the private dispatch record and the same value goes to the Codex goal writer. This supersedes the earlier planned absent-key behavior above, which predated the coordinator decision.
+
 ## Revisit triggers
 
 **PLANNED.** Revisit if native SessionStart identity/schema changes; a compare-and-set goal API becomes available; a durable reconciliation policy is approved; native goals become authoritative across multiple concurrent writers; or the owner assigns token budgets to the routing contract instead of assignments. The reader's flattened ancestry projection discrepancy remains a separate read-side concern.
