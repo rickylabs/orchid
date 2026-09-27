@@ -39,10 +39,13 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 		if strictJSON(block, &fields) != nil || fields == nil {
 			return nil, nil, configProblem("matrix", "object-required")
 		}
+		if value, ok := fields["budget_defaults"]; ok && string(value) == "null" {
+			return nil, nil, configProblem("matrix.budget_defaults", "profile-map-required")
+		}
 		checks := []struct {
 			name  string
 			value any
-		}{{"source", &cfg.Matrix.Source}, {"revision", &cfg.Matrix.Revision}, {"receipt_root", &cfg.Matrix.ReceiptRoot}, {"receipt_owner_uid", &cfg.Matrix.ReceiptOwnerUID}, {"receipt_owner_gid", &cfg.Matrix.ReceiptOwnerGID}, {"target_revisions", &cfg.Matrix.TargetRevisions}, {"pins", &cfg.Matrix.Pins}, {"grants", &cfg.Matrix.Grants}}
+		}{{"source", &cfg.Matrix.Source}, {"revision", &cfg.Matrix.Revision}, {"receipt_root", &cfg.Matrix.ReceiptRoot}, {"receipt_owner_uid", &cfg.Matrix.ReceiptOwnerUID}, {"receipt_owner_gid", &cfg.Matrix.ReceiptOwnerGID}, {"target_revisions", &cfg.Matrix.TargetRevisions}, {"pins", &cfg.Matrix.Pins}, {"grants", &cfg.Matrix.Grants}, {"budget_defaults", &cfg.Matrix.BudgetDefaults}}
 		for _, check := range checks {
 			if value, ok := fields[check.name]; ok && json.Unmarshal(value, check.value) != nil {
 				return nil, nil, configProblem("matrix."+check.name, "invalid-field-type")
@@ -115,6 +118,17 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 		if !cleanText(name) || !cleanText(p.Model) || !cleanText(p.Effort) {
 			bad("matrix.pins", "nonblank-name-model-effort-required")
 			break
+		}
+	}
+	for tier, profiles := range m.BudgetDefaults {
+		if !budgetTierPattern.MatchString(tier) || profiles == nil {
+			bad("matrix.budget_defaults", "tier-and-profile-map-required")
+			continue
+		}
+		for profile, budget := range profiles {
+			if !profileStem.MatchString(profile) || !goalNumber(budget) {
+				bad("matrix.budget_defaults", "valid-profile-and-safe-budget-required")
+			}
 		}
 	}
 	seen := map[string]bool{}
@@ -232,6 +246,9 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 	}
 	if o.Harness != "" && o.Harness != route.Transport && !(o.Harness == "codex-run" && route.Transport == "codex") {
 		return configProblem("issue.harness", "harness-conflict")
+	}
+	if _, _, err := resolveRouteBudget(cfg.Matrix, route.Tier, profile, o); err != nil {
+		return configProblem("issue.max-tokens", closedGoalReason(err))
 	}
 	return nil
 }

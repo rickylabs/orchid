@@ -43,7 +43,7 @@ func testCommand(t *testing.T, cwd, command string, args ...string) string {
 }
 
 func TestCommonMatrixAttempt(t *testing.T) {
-	cases := []string{"invalid-native-budget", "explicit-empty-budget", "valid-native-budget", "absent-native-budget", "non-codex-unparsed-budget", "invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
+	cases := []string{"invalid-native-budget", "explicit-empty-budget", "valid-native-budget", "absent-native-budget", "route-default-budget", "override-route-budget", "zero-override-budget", "non-codex-unparsed-budget", "invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := privateTestRoot(t)
@@ -85,6 +85,20 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" {
 						t.Fatal("authoritative inbox issue was not bound before launch")
 					}
+					if name == "route-default-budget" || name == "override-route-budget" || name == "zero-override-budget" {
+						want := int64(12000)
+						source := "route"
+						if name == "override-route-budget" {
+							want, source = 6000, "issue"
+						}
+						if name == "zero-override-budget" {
+							want, source = 0, "issue"
+						}
+						intent, e := nativeGoalIntent(cfg.Inbox, is, o)
+						if e != nil || binding.TokenBudget == nil || *binding.TokenBudget != want || binding.BudgetSource != source || intent.TokenBudget == nil || *intent.TokenBudget != want {
+							t.Fatal("dispatch and native goal did not share the resolved budget")
+						}
+					}
 					return nil
 				},
 			}
@@ -103,6 +117,18 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					value = ""
 				}
 				if name != "absent-native-budget" {
+					is.Body = "/swarm\ntier: feature\nrole: implementation\nmax-tokens: " + value + "\n\nSynthetic task"
+				}
+			case "route-default-budget", "override-route-budget", "zero-override-budget":
+				route.Transport = "codex"
+				c.gov.q["codex"] = q
+				budget["codex"] = 1
+				cfg.Matrix.BudgetDefaults = map[string]map[string]int64{"feature": {"leaf": 12000}}
+				if name != "route-default-budget" {
+					value := "6k"
+					if name == "zero-override-budget" {
+						value = "0"
+					}
 					is.Body = "/swarm\ntier: feature\nrole: implementation\nmax-tokens: " + value + "\n\nSynthetic task"
 				}
 			case "invalid-codex-effort":
@@ -167,13 +193,13 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				c.dry = true
 			}
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
-			if (name == "invalid-native-budget" || name == "explicit-empty-budget") && (len(refusals) != 1 || refusals[0].ReasonCode != "goal-budget-invalid" || containsString(events, "host") || containsString(events, "persist")) {
+			if (name == "invalid-native-budget" || name == "explicit-empty-budget" || name == "non-codex-unparsed-budget") && (len(refusals) != 1 || refusals[0].ReasonCode != "goal-budget-invalid" || containsString(events, "host") || containsString(events, "persist")) {
 				t.Fatal("invalid goal budget reached launch preparation")
 			}
 			if name == "invalid-codex-effort" && (len(refusals) != 1 || refusals[0].ReasonCode != "codex-effort-invalid" || containsString(events, "host") || containsString(events, "persist")) {
 				t.Fatal("invalid Codex effort must refuse before host selection and persistence")
 			}
-			success := name == "success" || name == "dry-run" || name == "valid-native-budget" || name == "absent-native-budget" || name == "non-codex-unparsed-budget"
+			success := name == "success" || name == "dry-run" || name == "valid-native-budget" || name == "absent-native-budget" || name == "route-default-budget" || name == "override-route-budget" || name == "zero-override-budget"
 			if strings.HasPrefix(name, "evaluator-") {
 				if !reflect.DeepEqual(refusals, []matrixRefusal{evaluatorRefusal()}) {
 					t.Fatal("evaluator refusal became a silent skip")

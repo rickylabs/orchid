@@ -34,6 +34,38 @@ func TestNativeGoalBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveRouteBudgetPrecedence(t *testing.T) {
+	cfg := MatrixConfig{BudgetDefaults: map[string]map[string]int64{"feature": {"leaf": 12000, "zero": 0}}}
+	for _, tc := range []struct {
+		name    string
+		tier    string
+		profile string
+		o       Overrides
+		want    *int64
+		source  string
+		invalid bool
+	}{
+		{"route-default", "feature", "leaf", Overrides{}, goalInt(12000), "route", false},
+		{"issue-override", "feature", "leaf", Overrides{MaxTokens: "6k", MaxTokensPresent: true}, goalInt(6000), "issue", false},
+		{"explicit-zero", "feature", "leaf", Overrides{MaxTokens: "0", MaxTokensPresent: true}, goalInt(0), "issue", false},
+		{"unset-tier", "bugfix", "leaf", Overrides{}, nil, "unset", false},
+		{"unset-profile", "feature", "other", Overrides{}, nil, "unset", false},
+		{"route-zero", "feature", "zero", Overrides{}, goalInt(0), "route", false},
+		{"invalid-override", "feature", "leaf", Overrides{MaxTokens: "bad", MaxTokensPresent: true}, nil, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, source, err := resolveRouteBudget(cfg, tc.tier, tc.profile, tc.o)
+			if (err != nil) != tc.invalid || source != tc.source || (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
+				t.Fatal("budget precedence, provenance or zero/null distinction changed")
+			}
+		})
+	}
+	bad := MatrixConfig{BudgetDefaults: map[string]map[string]int64{"feature": {"leaf": -1}}}
+	if _, _, err := resolveRouteBudget(bad, "feature", "leaf", Overrides{}); err == nil {
+		t.Fatal("invalid configured budget became a dispatch budget")
+	}
+}
 func goalInt(v int64) *int64    { return &v }
 func fixtureIntent() goalIntent { return goalIntent{"fixture/inbox#7: synthetic task", goalInt(100)} }
 func fixtureGoal(status string) *nativeGoal {

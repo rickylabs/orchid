@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,14 +25,15 @@ import (
 // MatrixConfig is private operator configuration, not issue-supplied authority.
 // Pins are replaceable named values. No default model list is compiled into divybot.
 type MatrixConfig struct {
-	Source          string               `json:"source"`
-	Revision        string               `json:"revision"`
-	ReceiptOwnerUID *int                 `json:"receipt_owner_uid,omitempty"`
-	ReceiptOwnerGID *int                 `json:"receipt_owner_gid,omitempty"`
-	ReceiptRoot     string               `json:"receipt_root"`
-	TargetRevisions map[string]string    `json:"target_revisions"`
-	Pins            map[string]MatrixPin `json:"pins"`
-	Grants          []MatrixGrant        `json:"grants"`
+	Source          string                      `json:"source"`
+	Revision        string                      `json:"revision"`
+	ReceiptOwnerUID *int                        `json:"receipt_owner_uid,omitempty"`
+	ReceiptOwnerGID *int                        `json:"receipt_owner_gid,omitempty"`
+	ReceiptRoot     string                      `json:"receipt_root"`
+	TargetRevisions map[string]string           `json:"target_revisions"`
+	Pins            map[string]MatrixPin        `json:"pins"`
+	Grants          []MatrixGrant               `json:"grants"`
+	BudgetDefaults  map[string]map[string]int64 `json:"budget_defaults,omitempty"`
 }
 
 type MatrixPin struct {
@@ -83,11 +85,14 @@ type matrixRoute struct {
 	Tier            string `json:"tier"`
 	Role            string `json:"role"`
 	Digest          string `json:"digest"`
+	TokenBudget     *int64 `json:"tokenBudget"`
+	BudgetSource    string `json:"budgetSource"`
 }
 
 var sourceRevision = regexp.MustCompile(`^[a-f0-9]{40}$`)
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var profileStem = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var budgetTierPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 var repositoryName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var errMatrix = errors.New("matrix-refused")
 var errEvaluatorEvidence = errors.New("inconclusive: observer-unavailable")
@@ -412,6 +417,8 @@ type dispatchBinding struct {
 	Effort        string            `json:"effort,omitempty"`
 	State         string            `json:"state"`
 	Location      *dispatchLocation `json:"location"`
+	TokenBudget   *int64            `json:"tokenBudget"`
+	BudgetSource  string            `json:"budgetSource"`
 }
 
 type durableMatrixReceipt struct {
@@ -687,6 +694,16 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if o.Router != "" {
 		return refuse("router-unsupported")
 	} // no gateway adapter or native router substitution
+	resolvedBudget, budgetSource, budgetErr := resolveRouteBudget(cfg, route.Tier, o.Profile, o)
+	if budgetErr != nil {
+		return refuse(closedGoalReason(budgetErr))
+	}
+	route.TokenBudget, route.BudgetSource = resolvedBudget, budgetSource
+	if resolvedBudget != nil {
+		o.MaxTokens, o.MaxTokensPresent = strconv.FormatInt(*resolvedBudget, 10), true
+	} else {
+		o.MaxTokens, o.MaxTokensPresent = "", false
+	}
 	o.Model, o.Effort, o.Harness, o.Tier, o.Role = route.Model, route.Effort, agent, route.Tier, route.Role
 	if agent == "codex" {
 		assignment := is
@@ -725,7 +742,8 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
-		Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort}
+		Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort,
+		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	if e := handle.writeDispatch("reserved", nil); e != nil {
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
 		return "", false
