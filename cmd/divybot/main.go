@@ -2213,6 +2213,7 @@ func (c *Coord) tick(ctx context.Context) {
 		})
 		if launched {
 			budget[acct]--
+			c.reportMatrixLaunchAfterRefusal(ctx, n, postMatrixComment)
 		}
 	}
 	c.st.save()

@@ -83,7 +83,9 @@ async function main() {
   if (!coordinator) args.push("--tier", tier, "--role", role);
   args.push("--json");
   const child = new Deno.Command("deno", { args, stdout: "piped", stderr: "null" }).spawn();
-  const deadline = setTimeout(() => { try { child.kill(); } catch { /* already exited */ } }, 20_000);
+  // Must stay below divybot's matrixResolveTimeout, so a slow nested CLI is refused here
+  // with a JSON reason instead of the whole bridge being killed from outside.
+  const deadline = setTimeout(() => { try { child.kill(); } catch { /* already exited */ } }, 60_000);
   const reader = child.stdout.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;

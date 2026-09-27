@@ -169,11 +169,91 @@ func matrixCommand(ctx context.Context, cwd, command string, input []byte, args 
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.WaitDelay = time.Second
 	var out limitedOutput
+	var stderr stderrTail
 	cmd.Stdout = &out
-	if cmd.Run() != nil {
-		return nil, matrixSite("command.exit", errMatrix)
+	cmd.Stderr = &stderr
+	if e := cmd.Run(); e != nil {
+		failure := classifyCommandFailure(ctx, e)
+		// Operator log only: a closed cause, the exit status and a scrubbed stderr tail.
+		// The public refusal comment carries the closed cause alone.
+		log.Printf("matrix subprocess %s failed: cause=%s %s", filepath.Base(command), matrixCause(failure), commandStatus(e, stderr.Bytes()))
+		return nil, failure
 	}
 	return out.Bytes(), nil
+}
+
+// Before this split every failure read as command.exit, so a subprocess killed by the
+// resolution deadline looked exactly like one that failed on its own.
+func classifyCommandFailure(ctx context.Context, err error) error {
+	var site *matrixSiteError
+	var exit *exec.ExitError
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return matrixSite("command.timeout", errMatrix)
+	case ctx.Err() != nil:
+		return matrixSite("command.canceled", errMatrix)
+	case errors.As(err, &site):
+		return err // output.limit from the bounded stdout writer
+	case errors.As(err, &exit) && exit.Exited():
+		return matrixSite("command.exit", errMatrix)
+	case errors.As(err, &exit):
+		return matrixSite("command.signal", errMatrix)
+	default:
+		return matrixSite("command.start", errMatrix)
+	}
+}
+
+func commandStatus(err error, stderr []byte) string {
+	status := "exit=unknown"
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			status = "signal=" + ws.Signal().String()
+		} else {
+			status = "exit=" + strconv.Itoa(exit.ExitCode())
+		}
+	}
+	return status + " stderr=" + strconv.Quote(scrubStderr(stderr))
+}
+
+// stderrTail keeps only the last few KiB a subprocess writes to stderr.
+type stderrTail struct{ buf []byte }
+
+const stderrTailLimit = 4096
+
+func (t *stderrTail) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > stderrTailLimit {
+		t.buf = append([]byte(nil), t.buf[len(t.buf)-stderrTailLimit:]...)
+	}
+	return len(p), nil
+}
+func (t *stderrTail) Bytes() []byte { return t.buf }
+
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+
+// scrubStderr keeps the last non-empty line and drops every word that could carry a path,
+// URL, address, assignment or credential. What survives is the error's wording, never its data.
+func scrubStderr(b []byte) string {
+	lines := strings.Split(ansiEscape.ReplaceAllString(string(b), ""), "\n")
+	line := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line = strings.TrimSpace(lines[i]); line != "" {
+			break
+		}
+	}
+	words := strings.Fields(line)
+	for i, w := range words {
+		printable := !strings.ContainsFunc(w, func(r rune) bool { return r < 0x21 || r > 0x7e })
+		if !printable || len(w) > 32 || strings.ContainsAny(w, `/\@=`) || strings.Contains(w, "://") || strings.ContainsFunc(w, func(r rune) bool { return r >= '0' && r <= '9' }) && len(w) > 12 {
+			words[i] = "<redacted>"
+		}
+	}
+	out := strings.Join(words, " ")
+	if len(out) > 160 {
+		out = out[:160]
+	}
+	return out
 }
 func sourceClean(ctx context.Context, cfg MatrixConfig) bool { return sourceCheck(ctx, cfg) == nil }
 func sourceCheck(ctx context.Context, cfg MatrixConfig) error {
@@ -196,9 +276,18 @@ func sourceCheck(ctx context.Context, cfg MatrixConfig) error {
 	}
 	return nil
 }
+
+// matrixResolveTimeout bounds one whole resolution: two source checks, the bridge and the
+// bridge's nested matrix CLI. 30 s was too tight. Measured 2026-09-27 at load average ~7:
+// warm resolution 1.0-2.6 s; with Deno and the pinned source evicted from the page cache,
+// 14.8 s; with an empty Deno cache, 12.5 s. A real dispatch was refused at the old bound
+// 36 s after its poll began, which fits a deadline kill that the old code reported as an exit.
+// Keep it above the bridge's own nested-CLI deadline (matrix-bridge.ts) so that deadline fires first.
+const matrixResolveTimeout = 90 * time.Second
+
 func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest) (matrixRoute, error) {
 	var route matrixRoute
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, matrixResolveTimeout)
 	defer cancel()
 	if e := sourceCheck(ctx, cfg); e != nil {
 		return route, e
