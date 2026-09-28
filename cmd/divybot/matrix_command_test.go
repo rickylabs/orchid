@@ -44,6 +44,14 @@ func TestMatrixCommandNamesDeadlineKill(t *testing.T) {
 	}
 }
 
+func TestMatrixResolveDeadlineAllowsSlowSourceButRemainsBounded(t *testing.T) {
+	// The #397 source status command exhausted 90 s under disk pressure. Preserve
+	// enough room for that check and the bridge, without allowing an unbounded poll.
+	if matrixResolveTimeout < 150*time.Second || matrixResolveTimeout > 5*time.Minute {
+		t.Fatalf("matrix resolution budget %s cannot cover slow source inspection safely", matrixResolveTimeout)
+	}
+}
+
 func TestMatrixCommandClassifiesFailures(t *testing.T) {
 	captureLog(t)
 	cases := map[string][]string{
