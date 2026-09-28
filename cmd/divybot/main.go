@@ -2153,8 +2153,11 @@ func (c *Coord) tick(ctx context.Context) {
 	caps := c.curCaps()
 	c.st.mu.Lock()
 	running := map[string]int{}
-	for _, j := range c.st.Jobs {
-		running[accountKey(j.Agent)]++
+	for n, j := range c.st.Jobs {
+		ref, known := status[n]
+		if occupiesAdmissionSlot(j, ref, known) {
+			running[accountKey(j.Agent)]++
+		}
 	}
 	c.st.mu.Unlock()
 	budget := map[string]int{}
@@ -2249,6 +2252,18 @@ type agentRef struct {
 	Status    string // idle|working|blocked|done|unknown
 	Pane      string // send/read target
 	Workspace string // teardown handle
+}
+
+// A completed herdr turn remains a warm, supervised job. It no longer consumes
+// an active admission slot while that exact occupant reports done. If a later
+// prompt resumes it, the next fleet snapshot counts it again. Unknown status or
+// changed handles remain counted so a stale/mismatched observation cannot free
+// someone else's capacity.
+func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
+	if !known || j == nil || j.Pane == "" || j.Workspace == "" {
+		return true
+	}
+	return ref.Status != "done" || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || accountKey(ref.Agent) != accountKey(j.Agent)
 }
 
 var issueCwdRe = regexp.MustCompile(`issue-(\d+)`)
@@ -2780,7 +2795,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if err := host.injectGoal(gctx, target, inject, opencodeClass); err != nil {
 			log.Printf("issue #%d: launch-effect-failed", n)
 			gcancel()
-			return matrixReason("goal-prompt-delivery-failed")
+			return matrixReason("goal-prompt-unconfirmed")
 		}
 		gcancel()
 		c.startDispatchGoal(ctx, host, j, receipt)
