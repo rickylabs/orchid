@@ -68,14 +68,18 @@ func TestNativeGoalDispatchWiring(t *testing.T) {
 }
 
 func TestNativeGoalRefusalDoesNotDenyAnExistingLaunch(t *testing.T) {
-	for _, reason := range []string{"goal-prompt-delivery-failed", "goal-budget-invalid"} {
+	for _, reason := range []string{"goal-prompt-unconfirmed", "goal-budget-invalid"} {
 		c := &Coord{cfg: &Config{Inbox: "fixture/inbox"}, st: loadState(filepath.Join(t.TempDir(), "state.json"))}
 		body := ""
-		c.reportIssueMatrixRefusal(context.Background(), 7, Issue{ID: "fixture-issue", Title: "fixture task"}, matrixRefusal{"refused", reason, "", ""}, func(_ context.Context, _ string, _ int, text string) error { body = text; return nil })
+		status := "refused"
+		if reason == "goal-prompt-unconfirmed" {
+			status = "inconclusive"
+		}
+		c.reportIssueMatrixRefusal(context.Background(), 7, Issue{ID: "fixture-issue", Title: "fixture task"}, matrixRefusal{status, reason, "", ""}, func(_ context.Context, _ string, _ int, text string) error { body = text; return nil })
 		if body == "" {
 			t.Fatal("refusal comment missing")
 		}
-		if reason == "goal-prompt-delivery-failed" {
+		if reason == "goal-prompt-unconfirmed" {
 			if strings.Contains(body, "No agent was launched") || !strings.Contains(body, "requires inspection") {
 				t.Fatal("uncertain prompt delivery denied an existing launch")
 			}
@@ -118,7 +122,7 @@ func TestNativeGoalLaunchOwnershipWiring(t *testing.T) {
 				return true
 			}
 			ret, ok := condition.Body.List[len(condition.Body.List)-1].(*ast.ReturnStmt)
-			foundPromptFence = ok && render(ret) == `return matrixReason("goal-prompt-delivery-failed")`
+			foundPromptFence = ok && render(ret) == `return matrixReason("goal-prompt-unconfirmed")`
 			return true
 		})
 	}

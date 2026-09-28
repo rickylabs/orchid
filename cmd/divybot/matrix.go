@@ -838,8 +838,18 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return "", false
 	}
 	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
-		_ = handle.writeDispatch("uncertain", handle.dispatch.Location)
-		report(refusalWithReason(e, "launch-failed"))
+		var reason matrixReason
+		if errors.As(e, &reason) && reason == "goal-prompt-unconfirmed" {
+			// Registration and job persistence succeeded. Prompt confirmation is
+			// uncertain, but the already-dispatched receipt still truthfully binds
+			// the agent. A later exact native report may finish that binding.
+			report(refusalFor(e))
+		} else {
+			// A failed call can have executed its effect before returning an error.
+			// Keep the fence and report uncertainty, never a false no-agent claim.
+			_ = handle.writeDispatch("uncertain", handle.dispatch.Location)
+			report(refusalWithReason(e, "launch-inconclusive"))
+		}
 		return "", false
 	}
 	return route.Transport, true

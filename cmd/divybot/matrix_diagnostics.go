@@ -15,7 +15,8 @@ import (
 var matrixReasons = map[string]struct{ field, hint string }{
 	"goal-budget-invalid":          {"issue.max-tokens", "Use an exact nonnegative token count or decimal k/m suffix within the supported integer range; omit the key for unknown."},
 	"goal-objective-invalid":       {"issue.title", "Provide a nonempty assignment title within the native goal length bound."},
-	"goal-prompt-delivery-failed":  {"launch.prompt", "Prompt delivery was not confirmed; the launch remains uncertain and no native goal was created."},
+	"goal-prompt-delivery-failed":  {"launch.prompt", "Agent registration was confirmed, but prompt acceptance was not; inspect the run before any new dispatch."},
+	"goal-prompt-unconfirmed":      {"launch.prompt", "Agent registration was confirmed, but prompt acceptance was not; inspect the run before any new dispatch."},
 	"codex-effort-invalid":         {"route.effort", "The Codex effort is outside the matrix contract; correct the route before launching."},
 	"receipt-owner-invalid":        {"matrix.receipt_owner_uid/receipt_owner_gid", "Configure both nonnegative numeric owner IDs, or omit both."},
 	"source-missing":               {"matrix.source", "Configure an absolute clean NetScript checkout."},
@@ -45,6 +46,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"receipt-persistence-failed":   {"matrix.receipt_root", "Inspect receipt permissions and any existing reservation; never erase a fence to retry blindly."},
 	"dispatch-persistence-failed":  {"matrix.receipt_root", "Dispatch binding could not be persisted; inspect the existing reservation."},
 	"launch-failed":                {"launch", "Inspect the registration abandonment notice and durable launch fence."},
+	"launch-inconclusive":          {"launch", "Launch effects could have occurred; inspect the durable fence and the agent before any new dispatch."},
 	"observer-unavailable":         {"route.observed", "Evaluator launch is inconclusive until independent model and session evidence exists."},
 }
 
@@ -52,6 +54,7 @@ type matrixReason string
 
 func (e matrixReason) Error() string { return string(e) }
 func (e matrixReason) Unwrap() error { return errMatrix }
+
 var validQuotaTransports = map[string]bool{
 	"claude": true,
 	"codex":  true,
@@ -97,7 +100,8 @@ func validMatrixRefusal(r matrixRefusal) bool {
 	if !ok || (r.Cause != "" && !matrixSites[r.Cause]) {
 		return false
 	}
-	if (r.ReasonCode == "observer-unavailable" && r.Status != "inconclusive") || (r.ReasonCode != "observer-unavailable" && r.Status != "refused") {
+	inconclusive := r.ReasonCode == "observer-unavailable" || r.ReasonCode == "launch-inconclusive" || r.ReasonCode == "goal-prompt-delivery-failed" || r.ReasonCode == "goal-prompt-unconfirmed"
+	if (inconclusive && r.Status != "inconclusive") || (!inconclusive && r.Status != "refused") {
 		return false
 	}
 	if r.Detail != "" && (r.ReasonCode != "quota-unavailable" || !validQuotaDetail(r.Detail)) {
@@ -111,7 +115,11 @@ func refusalFor(err error) matrixRefusal {
 	}
 	var reason matrixReason
 	if errors.As(err, &reason) {
-		r := matrixRefusal{"refused", string(reason), matrixCause(err), ""}
+		status := "refused"
+		if reason == "observer-unavailable" || reason == "launch-inconclusive" || reason == "goal-prompt-delivery-failed" || reason == "goal-prompt-unconfirmed" {
+			status = "inconclusive"
+		}
+		r := matrixRefusal{status, string(reason), matrixCause(err), ""}
 		if validMatrixRefusal(r) {
 			return r
 		}
@@ -155,7 +163,7 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 		return
 	}
 	body := fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s No agent was launched by this refused attempt. %s", r.Status, r.ReasonCode, detail.field, detail.hint, matrixRetryNote)
-	if r.ReasonCode == "launch-failed" || r.ReasonCode == "dispatch-persistence-failed" || r.ReasonCode == "goal-prompt-delivery-failed" {
+	if r.ReasonCode == "launch-failed" || r.ReasonCode == "launch-inconclusive" || r.ReasonCode == "dispatch-persistence-failed" || r.ReasonCode == "goal-prompt-delivery-failed" || r.ReasonCode == "goal-prompt-unconfirmed" {
 		body = fmt.Sprintf("divybot: matrix launch %s. Reason: `%s`. Field: `%s`. %s Launch outcome requires inspection; this notice does not authorize another attempt.", r.Status, r.ReasonCode, detail.field, detail.hint)
 	}
 	if r.Cause != "" {
