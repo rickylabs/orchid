@@ -462,7 +462,13 @@ func (c *Coord) deliverAction(ctx context.Context, req actionRequest, r *actionR
 		NativeSessionID string `json:"NativeSessionID"`
 		Repo            string `json:"Repo"`
 	}
-	if err := readPrivateActionJSON(filepath.Join(record, "binding.json"), &binding); err != nil {
+	// The native binding carries additional launch metadata. Keep the strict
+	// duplicate-key and private-file checks, then project only the two fields
+	// needed to authorize this action.
+	var bindingFields map[string]json.RawMessage
+	if err := readPrivateActionJSON(filepath.Join(record, "binding.json"), &bindingFields); err != nil ||
+		json.Unmarshal(bindingFields["NativeSessionID"], &binding.NativeSessionID) != nil ||
+		json.Unmarshal(bindingFields["Repo"], &binding.Repo) != nil {
 		r.Reason = "dispatch_receipt_unavailable"
 		return
 	}
