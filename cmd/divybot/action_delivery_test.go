@@ -169,7 +169,9 @@ func boundActionFixture(t *testing.T, c *Coord, receipts string) actionRequest {
 	if err := actionSyncFile(filepath.Join(record, "dispatch.json"), body); err != nil {
 		t.Fatal(err)
 	}
-	if err := actionSyncFile(filepath.Join(record, "binding.json"), []byte(`{"NativeSessionID":"","Repo":"example/repo"}`)); err != nil {
+	// Production binding.json contains launch metadata beyond the action
+	// authorization fields. A strict decode into a two-field struct rejects it.
+	if err := actionSyncFile(filepath.Join(record, "binding.json"), []byte(`{"BriefDigest":"fixture","Host":"fixture_host","IssueID":7,"NativeSessionID":"","ProfileDigest":"fixture","ProfileRevision":"fixture","Repo":"example/repo","Request":{},"Route":{}}`)); err != nil {
 		t.Fatal(err)
 	}
 	r := actionTestRequest()
