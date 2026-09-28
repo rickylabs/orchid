@@ -33,7 +33,7 @@ func TestNativeGoalDispatchWiring(t *testing.T) {
 	if e != nil {
 		t.Fatal("dispatcher AST unavailable")
 	}
-	want := map[string]map[string]int{"spawn": {"startDispatchGoal": 1}, "supervise": {"transitionGoal": 2, "bindLiveNativeIdentity": 1}, "tick": {"finishAssignmentGoal": 1, "transitionGoal": 1}}
+	want := map[string]map[string]int{"spawn": {"startDispatchGoal": 1}, "supervise": {"transitionGoal": 2, "bindLiveNativeIdentity": 1, "retryBoundGoal": 1}, "tick": {"finishAssignmentGoal": 1, "transitionGoal": 1}}
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {

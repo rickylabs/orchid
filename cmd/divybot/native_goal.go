@@ -21,6 +21,7 @@ type goalIntent struct {
 type dispatchGoal struct {
 	ReceiptKey          string     `json:"receiptKey"`
 	Intent              goalIntent `json:"intent"`
+	PromptConfirmed     bool       `json:"promptConfirmed,omitempty"`
 	Owned               bool       `json:"owned"`
 	Reason              string     `json:"reason,omitempty"`
 	LastStatus          string     `json:"lastStatus,omitempty"`
@@ -250,6 +251,36 @@ func (c *Coord) bindLiveNativeIdentity(ctx context.Context, host Host, j *Job) {
 	if bound {
 		log.Printf("issue #%d: live native binding acquired", j.Issue)
 	}
+}
+
+// A goal write can miss the first Codex thread hook even after the prompt was
+// confirmed. Retry only after the exact private receipt is bound and only for
+// a pre-write identity failure. Other goal errors may follow a remote effect
+// and must not be replayed automatically.
+func retryBoundGoalEligible(j *Job) bool {
+	if j == nil || j.NativeGoal == nil || !j.NativeGoal.PromptConfirmed || j.NativeGoal.Owned {
+		return false
+	}
+	switch j.NativeGoal.Reason {
+	case "native-session-unavailable", "goal-identity-source-unavailable":
+		return true
+	}
+	return false
+}
+
+func (c *Coord) retryBoundGoal(ctx context.Context, host Host, j *Job) {
+	if !retryBoundGoalEligible(j) {
+		return
+	}
+	owner, err := configuredReceiptOwner(c.cfg.Matrix)
+	if err != nil {
+		return
+	}
+	r, id, err := loadGoalReceipt(c.cfg.Matrix.ReceiptRoot, j, c.cfg.Inbox, owner)
+	if err != nil || id == "" || !retryBoundGoalEligible(j) {
+		return
+	}
+	c.startDispatchGoal(ctx, host, j, r)
 }
 func createDispatchGoal(p *goalRPC, intent goalIntent) error {
 	old, e := p.get()
