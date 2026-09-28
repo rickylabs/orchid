@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Every identifier, title and number in these controls is synthetic.
@@ -378,6 +379,9 @@ func nativeReport(j *Job, identity bool) json.RawMessage {
 	return goalJSON(map[string]any{"type": "agent_info", "agent": a})
 }
 func TestNativeGoalBindingAcquisition(t *testing.T) {
+	if nativeGoalStartTimeout < 45*time.Second {
+		t.Fatal("initial goal judgement cannot cover the observed native binding window")
+	}
 	r, j, _ := fixtureGoalBinding(t)
 	_ = os.WriteFile(filepath.Join(filepath.Dir(r.file), "binding.json"), goalJSON(map[string]any{"Repo": "fixture/target"}), 0600)
 	reads := 0
@@ -390,6 +394,14 @@ func TestNativeGoalBindingAcquisition(t *testing.T) {
 	_ = json.Unmarshal(data, &b)
 	if b.NativeSessionID != id {
 		t.Fatal("binding was not persisted")
+	}
+	reads = 0
+	id, e = acquireNativeGoalBinding(context.Background(), r, j, func() (json.RawMessage, error) {
+		reads++
+		return nativeReport(j, reads == 150), nil
+	}, func(context.Context) bool { return true })
+	if e != nil || id != "fixture-thread" || reads != 150 {
+		t.Fatal("late native thread hook was judged unavailable before its binding arrived")
 	}
 	for _, change := range []func(*durableMatrixReceipt, *Job){func(r *durableMatrixReceipt, j *Job) { r.dispatch = nil }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.State = "uncertain" }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.Source = "claude" }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.Issue.Number++ }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.Location = nil }, func(r *durableMatrixReceipt, j *Job) { j.Agent = "claude" }, func(r *durableMatrixReceipt, j *Job) { j.Pane = "other" }, func(r *durableMatrixReceipt, j *Job) { j.Workspace = "other" }} {
 		r, j, _ := fixtureGoalBinding(t)
@@ -406,7 +418,7 @@ func TestNativeGoalBindingAcquisition(t *testing.T) {
 		t.Fatal("concurrent unrelated occupant accepted")
 	}
 	reads = 0
-	if _, e := acquireNativeGoalBinding(context.Background(), r, j, func() (json.RawMessage, error) { reads++; return nativeReport(j, false), nil }, func(context.Context) bool { return true }); e == nil || reads != 40 {
+	if _, e := acquireNativeGoalBinding(context.Background(), r, j, func() (json.RawMessage, error) { reads++; return nativeReport(j, false), nil }, func(context.Context) bool { return true }); e == nil || reads != 200 {
 		t.Fatal("missing identity lookup was unbounded or guessed")
 	}
 	reads = 0

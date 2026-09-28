@@ -98,11 +98,17 @@ func nativeGoalIntent(repo string, is Issue, o Overrides) (goalIntent, error) {
 
 // The ID comes only from the official integration report for the registered
 // occupant. Location is a correlation guard, never the identity being recorded.
+const nativeGoalBindingAttempts = 200
+const nativeGoalStartTimeout = 60 * time.Second
+
 func acquireNativeGoalBinding(ctx context.Context, r *durableMatrixReceipt, j *Job, read func() (json.RawMessage, error), wait func(context.Context) bool) (string, error) {
 	if r == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != "codex" || r.dispatch.Issue.Number != j.Issue || j.Agent != "codex" || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace {
 		return "", goalError("goal-dispatch-binding-invalid")
 	}
-	for attempt := 0; attempt < 40; attempt++ {
+	// The native thread hook can arrive tens of seconds after the prompt is confirmed.
+	// Keep this bounded by the outer deadline; a later supervise tick still retries
+	// only after the private receipt has acquired the exact native binding.
+	for attempt := 0; attempt < nativeGoalBindingAttempts; attempt++ {
 		raw, e := read()
 		if e != nil {
 			return "", goalError("goal-identity-source-unavailable")
@@ -328,7 +334,7 @@ func (c *Coord) startDispatchGoal(ctx context.Context, host Host, j *Job, r *dur
 	if j.NativeGoal == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, nativeGoalStartTimeout)
 	defer cancel()
 	id, e := host.bindDispatchGoal(ctx, r, j)
 	if e == nil {
