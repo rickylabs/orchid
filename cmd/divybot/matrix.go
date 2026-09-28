@@ -278,12 +278,10 @@ func sourceCheck(ctx context.Context, cfg MatrixConfig) error {
 }
 
 // matrixResolveTimeout bounds one whole resolution: two source checks, the bridge and the
-// bridge's nested matrix CLI. 30 s was too tight. Measured 2026-09-27 at load average ~7:
-// warm resolution 1.0-2.6 s; with Deno and the pinned source evicted from the page cache,
-// 14.8 s; with an empty Deno cache, 12.5 s. A real dispatch was refused at the old bound
-// 36 s after its poll began, which fits a deadline kill that the old code reported as an exit.
-// Keep it above the bridge's own nested-CLI deadline (matrix-bridge.ts) so that deadline fires first.
-const matrixResolveTimeout = 90 * time.Second
+// bridge's nested matrix CLI. A real git status check hit the prior 90 s bound under host
+// disk I/O pressure on 2026-09-28. Allow one more bounded interval for source inspection;
+// the caller's earlier deadline still wins. Keep this above the bridge's nested-CLI deadline.
+const matrixResolveTimeout = 180 * time.Second
 
 func resolveMatrix(ctx context.Context, cfg MatrixConfig, request matrixRequest) (matrixRoute, error) {
 	var route matrixRoute
