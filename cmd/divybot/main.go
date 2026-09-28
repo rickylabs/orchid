@@ -39,18 +39,19 @@ import (
 // ============================ config ============================
 
 type Config struct {
-	Matrix       MatrixConfig `json:"matrix"`
-	Inbox        string       `json:"inbox"`         // e.g. "denoland/divybot"
-	BotLogin     string       `json:"bot_login"`     // PR author login (for review attribution)
-	BotEmail     string       `json:"bot_email"`     // git committer email
-	PollInterval string       `json:"poll_interval"` // e.g. "30s"
-	BranchPrefix string       `json:"branch_prefix"` // e.g. "orch/divybot-"
-	StateFile    string       `json:"state_file"`    // private state location
-	NtfyTopic    string       `json:"ntfy_topic"`    // ntfy.sh topic for escalation (optional)
-	Hosts        []Host       `json:"hosts"`
-	Targets      []Target     `json:"targets"`
-	Governor     Gov          `json:"governor"`
-	Memory       Mem          `json:"memory"`
+	Matrix            MatrixConfig `json:"matrix"`
+	ActionRequestRoot string       `json:"action_request_root,omitempty"` // separate private maildir mount
+	Inbox             string       `json:"inbox"`                         // e.g. "denoland/divybot"
+	BotLogin          string       `json:"bot_login"`                     // PR author login (for review attribution)
+	BotEmail          string       `json:"bot_email"`                     // git committer email
+	PollInterval      string       `json:"poll_interval"`                 // e.g. "30s"
+	BranchPrefix      string       `json:"branch_prefix"`                 // e.g. "orch/divybot-"
+	StateFile         string       `json:"state_file"`                    // private state location
+	NtfyTopic         string       `json:"ntfy_topic"`                    // ntfy.sh topic for escalation (optional)
+	Hosts             []Host       `json:"hosts"`
+	Targets           []Target     `json:"targets"`
+	Governor          Gov          `json:"governor"`
+	Memory            Mem          `json:"memory"`
 }
 
 // Mem configures the git-backed shared memory. Reuses the inbox repo
@@ -223,21 +224,22 @@ type tracker struct {
 }
 
 type Job struct {
-	NativeGoal *dispatchGoal `json:"native_goal,omitempty"`
-	Issue      int           `json:"issue"`
-	Host       string        `json:"host"`
-	Label      string        `json:"label"`     // display name (claude-<n>)
-	Pane       string        `json:"pane"`      // herdr send/read target (pane id)
-	Workspace  string        `json:"workspace"` // herdr teardown handle
-	Target     string        `json:"target"`
-	Repo       string        `json:"repo"`
-	Branch     string        `json:"branch"`
-	Agent      string        `json:"agent"`
-	Title      string        `json:"title"`
-	Goal       string        `json:"goal"`
-	PR         int           `json:"pr"`
-	SpawnedAt  time.Time     `json:"spawned_at"`
-	LastPoke   time.Time     `json:"last_poke"`
+	NativeGoal  *dispatchGoal `json:"native_goal,omitempty"`
+	DispatchKey string        `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue       int           `json:"issue"`
+	Host        string        `json:"host"`
+	Label       string        `json:"label"`     // display name (claude-<n>)
+	Pane        string        `json:"pane"`      // herdr send/read target (pane id)
+	Workspace   string        `json:"workspace"` // herdr teardown handle
+	Target      string        `json:"target"`
+	Repo        string        `json:"repo"`
+	Branch      string        `json:"branch"`
+	Agent       string        `json:"agent"`
+	Title       string        `json:"title"`
+	Goal        string        `json:"goal"`
+	PR          int           `json:"pr"`
+	SpawnedAt   time.Time     `json:"spawned_at"`
+	LastPoke    time.Time     `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -1821,12 +1823,13 @@ func relaxBucket(used float64) bool { return used < govEngageFloorPct }
 // ============================ coordinator ============================
 
 type Coord struct {
-	cfg   *Config
-	st    *State
-	auth  *AuthStore
-	hosts map[string]Host
-	dry   bool // dry-run: log spawn/adopt decisions, take no spawning action
-	gov   struct {
+	cfg     *Config
+	st      *State
+	auth    *AuthStore
+	hosts   map[string]Host
+	actions actionCalls // injected only by action-delivery tests
+	dry     bool        // dry-run: log spawn/adopt decisions, take no spawning action
+	gov     struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
 	}
@@ -2074,6 +2077,7 @@ func (c *Coord) activeHosts() []Host {
 }
 
 func (c *Coord) tick(ctx context.Context) {
+	c.actionTick(ctx)
 	// Feeder first: mirror any newly bot-assigned upstream issues into the
 	// inbox so they're visible to pollIssues on this same cycle.
 	c.assignmentTick(ctx)
@@ -2809,7 +2813,8 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 
 	j := &Job{
 		Issue: n, Host: host.Name, Label: label, Pane: pane, Workspace: ws,
-		Target: tgt.Label, Repo: tgt.Repo,
+		DispatchKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"),
+		Target:      tgt.Label, Repo: tgt.Repo,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 	}
