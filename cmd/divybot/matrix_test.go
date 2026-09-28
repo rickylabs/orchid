@@ -92,7 +92,10 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					}
 					data, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
 					var binding dispatchBinding
-					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" {
+					var public map[string]json.RawMessage
+					if err != nil || json.Unmarshal(data, &binding) != nil || json.Unmarshal(data, &public) != nil ||
+						public["profileRevision"] == nil || public["matrixRevision"] == nil ||
+						binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" || binding.ProfileRevision != cfg.Matrix.TargetRevisions["example/project"] || binding.MatrixRevision != cfg.Matrix.Revision {
 						t.Fatal("authoritative inbox issue was not bound before launch")
 					}
 					private, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "binding.json"))

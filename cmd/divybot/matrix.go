@@ -496,20 +496,22 @@ type dispatchLocation struct {
 	WorkspaceID string `json:"workspaceId"`
 }
 type dispatchBinding struct {
-	Provider      string            `json:"provider"`
-	SchemaVersion int               `json:"schemaVersion"`
-	RunID         string            `json:"runId"`
-	Issue         dispatchIssue     `json:"issue"`
-	ParentRunID   *string           `json:"parentRunId"`
-	Source        string            `json:"source"`
-	Host          string            `json:"host,omitempty"`
-	Profile       string            `json:"profile"`
-	Model         string            `json:"model"`
-	Effort        string            `json:"effort,omitempty"`
-	State         string            `json:"state"`
-	Location      *dispatchLocation `json:"location"`
-	TokenBudget   *int64            `json:"tokenBudget"`
-	BudgetSource  string            `json:"budgetSource"`
+	Provider        string            `json:"provider"`
+	SchemaVersion   int               `json:"schemaVersion"`
+	RunID           string            `json:"runId"`
+	Issue           dispatchIssue     `json:"issue"`
+	ParentRunID     *string           `json:"parentRunId"`
+	Source          string            `json:"source"`
+	Host            string            `json:"host,omitempty"`
+	Profile         string            `json:"profile"`
+	ProfileRevision string            `json:"profileRevision"`
+	MatrixRevision  string            `json:"matrixRevision"`
+	Model           string            `json:"model"`
+	Effort          string            `json:"effort,omitempty"`
+	State           string            `json:"state"`
+	Location        *dispatchLocation `json:"location"`
+	TokenBudget     *int64            `json:"tokenBudget"`
+	BudgetSource    string            `json:"budgetSource"`
 }
 
 type durableMatrixReceipt struct {
@@ -833,7 +835,8 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
-		Host: host.Name, Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort,
+		Host: host.Name, Profile: o.Profile, ProfileRevision: revision, MatrixRevision: cfg.Revision,
+		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	if e := handle.writeDispatch("reserved", nil); e != nil {
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
