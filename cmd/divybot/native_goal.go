@@ -108,11 +108,17 @@ func acquireNativeGoalBinding(ctx context.Context, r *durableMatrixReceipt, j *J
 	// The native thread hook can arrive tens of seconds after the prompt is confirmed.
 	// Keep this bounded by the outer deadline; a later supervise tick still retries
 	// only after the private receipt has acquired the exact native binding.
+	lastUnavailable := "native-session-unavailable"
 	for attempt := 0; attempt < nativeGoalBindingAttempts; attempt++ {
 		raw, e := read()
 		if e != nil {
-			return "", goalError("goal-identity-source-unavailable")
+			lastUnavailable = "goal-identity-source-unavailable"
+			if !wait(ctx) {
+				return "", goalError(lastUnavailable)
+			}
+			continue
 		}
+		lastUnavailable = "native-session-unavailable"
 		id, reason := nativeSessionFromResponse(raw, "agent_info", "codex", j.Label, r.dispatch.Location)
 		if reason == "" {
 			if e := r.writeNativeIdentity(&id); e != nil {
@@ -127,7 +133,7 @@ func acquireNativeGoalBinding(ctx context.Context, r *durableMatrixReceipt, j *J
 			return "", goalError("native-session-unavailable")
 		}
 	}
-	return "", goalError("native-session-unavailable")
+	return "", goalError(lastUnavailable)
 }
 func goalWait(ctx context.Context) bool {
 	t := time.NewTimer(250 * time.Millisecond)

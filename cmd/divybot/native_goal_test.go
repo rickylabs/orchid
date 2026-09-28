@@ -403,6 +403,33 @@ func TestNativeGoalBindingAcquisition(t *testing.T) {
 	if e != nil || id != "fixture-thread" || reads != 150 {
 		t.Fatal("late native thread hook was judged unavailable before its binding arrived")
 	}
+	// A source read can fail while the first thread is starting. Model the
+	// observed sixteen-second gap without making the fixture sleep in real time.
+	r, j, _ = fixtureGoalBinding(t)
+	reads, waits := 0, 0
+	id, e = acquireNativeGoalBinding(context.Background(), r, j, func() (json.RawMessage, error) {
+		reads++
+		if reads <= 64 {
+			return nil, io.EOF
+		}
+		return nativeReport(j, true), nil
+	}, func(context.Context) bool { waits++; return true })
+	if e != nil || id != "fixture-thread" || reads != 65 || waits != 64 {
+		t.Fatalf("delayed binding was judged unavailable before its source recovered: id=%q err=%v reads=%d waits=%d", id, e, reads, waits)
+	}
+	data, _ = os.ReadFile(filepath.Join(filepath.Dir(r.file), "binding.json"))
+	_ = json.Unmarshal(data, &b)
+	if b.NativeSessionID != id {
+		t.Fatal("delayed binding was not persisted")
+	}
+	reads, waits = 0, 0
+	_, e = acquireNativeGoalBinding(context.Background(), r, j, func() (json.RawMessage, error) {
+		reads++
+		return nil, io.EOF
+	}, func(context.Context) bool { waits++; return true })
+	if e != goalError("goal-identity-source-unavailable") || reads != nativeGoalBindingAttempts || waits != nativeGoalBindingAttempts {
+		t.Fatalf("persistently unavailable identity source did not stay bounded: err=%v reads=%d waits=%d", e, reads, waits)
+	}
 	for _, change := range []func(*durableMatrixReceipt, *Job){func(r *durableMatrixReceipt, j *Job) { r.dispatch = nil }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.State = "uncertain" }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.Source = "claude" }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.Issue.Number++ }, func(r *durableMatrixReceipt, j *Job) { r.dispatch.Location = nil }, func(r *durableMatrixReceipt, j *Job) { j.Agent = "claude" }, func(r *durableMatrixReceipt, j *Job) { j.Pane = "other" }, func(r *durableMatrixReceipt, j *Job) { j.Workspace = "other" }} {
 		r, j, _ := fixtureGoalBinding(t)
 		change(r, j)
