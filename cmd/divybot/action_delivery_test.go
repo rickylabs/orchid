@@ -21,7 +21,7 @@ func actionFixture(t *testing.T) (*Coord, string, string) {
 		}
 	}
 	c := &Coord{cfg: &Config{Inbox: "example/repo", ActionRequestRoot: spool, Matrix: MatrixConfig{ReceiptRoot: receipts}},
-		st: &State{Jobs: map[int]*Job{}, LaunchBlocks: map[int]launchBlock{}}, hosts: map[string]Host{}}
+		st: &State{Jobs: map[int]*Job{}, LaunchBlocks: map[int]launchBlock{}, path: filepath.Join(base, "state.json")}, hosts: map[string]Host{}}
 	return c, spool, receipts
 }
 func actionTestRequest() actionRequest {

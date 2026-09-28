@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,18 +35,105 @@ type teardownObservation struct {
 }
 
 func (c *Coord) teardownPendingRoot() string {
-	root := c.cfg.Matrix.ReceiptRoot
-	if !privateReceiptRoot(root) {
+	receipts := c.cfg.Matrix.ReceiptRoot
+	if !privateReceiptRoot(receipts) || c.st == nil || c.st.path == "" {
 		return ""
 	}
-	dir := filepath.Join(root, "teardown-pending")
+	state, err := filepath.Abs(c.st.path)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(filepath.Dir(state), "teardown-pending")
+	// The queue is Orchid's work, never part of the reader-facing receipt tree.
+	if relative, err := filepath.Rel(receipts, dir); err != nil || relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+		return ""
+	}
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 		return ""
 	}
 	if !privateReceiptRoot(dir) {
 		return ""
 	}
+	if err := migrateTeardownPending(filepath.Join(receipts, "teardown-pending"), dir); err != nil {
+		return ""
+	}
 	return dir
+}
+
+// Older deployments kept this private work queue beneath the public receipt
+// root. Copy each file durably before removing the old entry, then remove the
+// old directory. Retrying after a crash accepts only an identical copy.
+func migrateTeardownPending(old, current string) error {
+	if _, err := os.Lstat(old); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if !privateReceiptRoot(old) {
+		return os.ErrInvalid
+	}
+	entries, err := os.ReadDir(old)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		from := filepath.Join(old, entry.Name())
+		info, err := os.Lstat(from)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			return os.ErrInvalid
+		}
+		body, err := os.ReadFile(from)
+		if err != nil {
+			return err
+		}
+		to := filepath.Join(current, entry.Name())
+		if prior, err := os.ReadFile(to); err == nil {
+			if !bytes.Equal(prior, body) {
+				return os.ErrExist
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		} else {
+			temp, err := os.CreateTemp(current, ".teardown-")
+			if err != nil {
+				return err
+			}
+			name := temp.Name()
+			if err = temp.Chmod(0600); err == nil {
+				_, err = temp.Write(body)
+			}
+			if err == nil {
+				err = temp.Sync()
+			}
+			closeErr := temp.Close()
+			if err == nil {
+				err = closeErr
+			}
+			if err == nil {
+				err = os.Link(name, to)
+			}
+			_ = os.Remove(name)
+			if err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			if err := syncDirectory(current); err != nil {
+				return err
+			}
+			if prior, err := os.ReadFile(to); err != nil || !bytes.Equal(prior, body) {
+				return os.ErrExist
+			}
+		}
+		if err := os.Remove(from); err != nil {
+			return err
+		}
+	}
+	if err := syncDirectory(old); err != nil {
+		return err
+	}
+	if err := os.Remove(old); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(old))
 }
 
 func (c *Coord) teardownRecord(j *Job, ws string) (string, string, bool) {
