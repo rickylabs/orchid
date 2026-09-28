@@ -23,7 +23,7 @@ func goalTransportHost(t *testing.T, mode string) Host {
 import sys,json,os,time
 mode=os.environ.get('GOAL_RPC_FIXTURE','')
 goal=None
-if mode=='existing':goal={'threadId':'fixture-thread','objective':'fixture/inbox#7: synthetic task','tokenBudget':100,'status':'active','tokensUsed':10,'timeUsedSeconds':2,'createdAt':1,'updatedAt':3}
+if mode in ('existing','existing-complete'):goal={'threadId':'fixture-thread','objective':'fixture/inbox#7: synthetic task','tokenBudget':100,'status':'complete' if mode=='existing-complete' else 'active','tokensUsed':10,'timeUsedSeconds':2,'createdAt':1,'updatedAt':3}
 def send(v): print(json.dumps(v),flush=True)
 for line in sys.stdin:
  m=json.loads(line);method=m.get('method');i=m.get('id');p=m.get('params',{})
@@ -147,17 +147,24 @@ func TestNativeGoalUnownedAndDryWritesRefused(t *testing.T) {
 }
 
 func TestNativeGoalWrappedTransition(t *testing.T) {
-	for _, mode := range []string{"success", "binding-invalid", "host-unavailable", "daemon-refused"} {
+	for _, mode := range []string{"success", "existing-complete", "binding-invalid", "host-unavailable", "daemon-refused", "persist-failed"} {
 		t.Run(mode, func(t *testing.T) {
 			_, j, root := fixtureGoalBinding(t)
 			j.NativeGoal.Owned = true
 			rpcMode := "existing"
+			if mode == "existing-complete" {
+				rpcMode = mode
+			}
 			if mode == "daemon-refused" {
 				rpcMode = "bad-initialize"
 			}
 			host := goalTransportHost(t, rpcMode)
 			j.Host = host.Name
-			c := &Coord{cfg: &Config{Inbox: "fixture/inbox", Matrix: MatrixConfig{ReceiptRoot: root}}, st: loadState(filepath.Join(t.TempDir(), "state.json")), hosts: map[string]Host{host.Name: host}}
+			statePath := filepath.Join(t.TempDir(), "state.json")
+			if mode == "persist-failed" {
+				statePath = filepath.Join(t.TempDir(), "missing", "state.json")
+			}
+			c := &Coord{cfg: &Config{Inbox: "fixture/inbox", Matrix: MatrixConfig{ReceiptRoot: root}}, st: loadState(statePath), hosts: map[string]Host{host.Name: host}}
 			c.st.Jobs[j.Issue] = j
 			if mode == "binding-invalid" {
 				j.NativeGoal.ReceiptKey = "invalid"
@@ -170,15 +177,19 @@ func TestNativeGoalWrappedTransition(t *testing.T) {
 			log.SetOutput(&logs)
 			defer log.SetOutput(original)
 			c.transitionGoal(context.Background(), j, "complete")
-			if mode == "success" {
+			if mode == "success" || mode == "existing-complete" {
 				if j.NativeGoal.LastStatus != "complete" || !j.NativeGoal.UpdatedNotification {
 					t.Fatal("verified transition not retained")
+				}
+				if !strings.Contains(logs.String(), "native goal complete notification observed") {
+					t.Fatal("verified terminal notification not logged")
 				}
 				saved := loadState(c.st.path).Jobs[j.Issue]
 				if saved == nil || saved.NativeGoal.LastStatus != "complete" {
 					t.Fatal("transition not persisted")
 				}
-			} else if j.NativeGoal.LastStatus != "" || !strings.Contains(logs.String(), "INCONCLUSIVE reason=") {
+			} else if j.NativeGoal.LastStatus != "" || !strings.Contains(logs.String(), "INCONCLUSIVE reason=") ||
+				strings.Contains(logs.String(), "goal complete notification observed") {
 				t.Fatal("failed transition lost refusal or claimed success")
 			}
 		})
@@ -189,11 +200,14 @@ func TestNativeGoalFinishAssignment(t *testing.T) {
 	for _, v := range []struct {
 		state, reason, want string
 		failure             bool
-	}{{"CLOSED", "COMPLETED", "complete", false}, {"CLOSED", "NOT_PLANNED", "paused", false}, {"OPEN", "COMPLETED", "", false}, {"CLOSED", "unknown", "", false}, {"CLOSED", "COMPLETED", "", true}} {
+		native              string
+	}{{"CLOSED", "COMPLETED", "complete", false, "existing"}, {"CLOSED", "COMPLETED", "complete", false, "existing-complete"},
+		{"CLOSED", "NOT_PLANNED", "paused", false, "existing"}, {"OPEN", "COMPLETED", "", false, "existing"},
+		{"CLOSED", "unknown", "", false, "existing"}, {"CLOSED", "COMPLETED", "", true, "existing"}} {
 		t.Run(v.state+v.reason, func(t *testing.T) {
 			_, j, root := fixtureGoalBinding(t)
 			j.NativeGoal.Owned = true
-			host := goalTransportHost(t, "existing")
+			host := goalTransportHost(t, v.native)
 			j.Host = host.Name
 			c := &Coord{cfg: &Config{Inbox: "fixture/inbox", Matrix: MatrixConfig{ReceiptRoot: root}}, st: loadState(filepath.Join(t.TempDir(), "state.json")), hosts: map[string]Host{host.Name: host}}
 			c.st.Jobs[j.Issue] = j
@@ -213,6 +227,9 @@ func TestNativeGoalFinishAssignment(t *testing.T) {
 			c.finishAssignmentGoal(context.Background(), j)
 			if j.NativeGoal.LastStatus != v.want {
 				t.Fatal("assignment status lost or fabricated")
+			}
+			if v.want == "complete" && !v.failure && !strings.Contains(logs.String(), "native goal complete notification observed") {
+				t.Fatal("completed assignment lacks writer-side terminal notification")
 			}
 			if v.failure && !strings.Contains(logs.String(), "goal-inbox-unavailable") {
 				t.Fatal("failed issue read lost its reason")
