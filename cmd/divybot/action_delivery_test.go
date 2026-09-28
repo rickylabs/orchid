@@ -130,6 +130,14 @@ func TestActionRootSeparationAndPrivateMaildir(t *testing.T) {
 	if _, err := actionDirs(receipts, receipts); err == nil {
 		t.Fatal("accepted request spool in receipt root")
 	}
+	for _, dir := range []string{spool, filepath.Join(spool, "tmp"), filepath.Join(spool, "new"), filepath.Join(spool, "done")} {
+		if err := os.Chmod(dir, 0770); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := actionDirs(spool, receipts); err != nil {
+		t.Fatalf("private shared-group spool rejected: %v", err)
+	}
 	if err := os.Chmod(filepath.Join(spool, "new"), 0755); err != nil {
 		t.Fatal(err)
 	}

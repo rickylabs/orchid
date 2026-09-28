@@ -1,8 +1,8 @@
 # Cockpit action delivery to divybot
 
-Divybot may consume an operator-provisioned private request spool. The spool is **separate** from `matrix.receipt_root`. Set `action_request_root` to the container path after the mount exists. Omit it to disable action intake. Both roots and `tmp/`, `new/`, `done/` under the spool must be existing, nonsymlink, outside-Git directories with mode `0700`. Cockpit has write access to the spool and read-only access to the receipt root; divybot has write access to both. There is no HTTP listener or public issue-comment transport.
+Divybot may consume an operator-provisioned private request spool. The spool is **separate** from `matrix.receipt_root`. Set `action_request_root` to the container path after the mount exists. Omit it to disable action intake. The spool and `tmp/`, `new/`, `done/` under it must be existing, nonsymlink, outside-Git directories with private mode `0700` or `0770` for a shared group/ACL. The receipt root remains mode `0700`. Cockpit has write access to the spool and read-only access to the receipt root; divybot has write access to both. There is no HTTP listener or public issue-comment transport.
 
-Cockpit writes a bounded JSON request to `tmp/<operationId>.json` with mode `0600`, syncs the file, renames it to `new/<operationId>.json`, and syncs `new/`. `operationId` is a lowercase UUID. The request shape is:
+Cockpit writes a bounded JSON request to `tmp/<operationId>.json` with private mode `0600`, or `0660` when the two runtimes use a shared group, syncs the file, renames it to `new/<operationId>.json`, and syncs `new/`. `operationId` is a lowercase UUID. The request shape is:
 
     {"schemaVersion":1,"operationId":"<uuid>","idempotencyKey":"<key>","repository":"owner/repo","issueNumber":123,"agentId":"agent_<sha256>","dispatchId":"assignment_<sha256>","expectedAgentRevision":"<sha256>","action":"stop|steer|retry|send","payload":{"text":"...","reason":"..."}}
 

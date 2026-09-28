@@ -99,6 +99,31 @@ func readPrivateActionJSON(path string, value any) error {
 func actionOpaque(kind, runID string) string { return kind + "_" + shaText([]byte(kind+"\x00"+runID)) }
 func actionRoot(root string) string          { return filepath.Join(root, "actions") }
 
+// The request spool is shared by two containers. Permit a private 0770 group
+// or named-user ACL mask; the divybot-owned receipt root stays strictly 0700.
+func privateActionSpoolDir(root string) bool {
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != filepath.Clean(root) {
+		return false
+	}
+	st, err := os.Stat(root)
+	if err != nil || !st.IsDir() || (st.Mode().Perm() != 0700 && st.Mode().Perm() != 0770) {
+		return false
+	}
+	for p := root; ; p = filepath.Dir(p) {
+		if _, err := os.Lstat(filepath.Join(p, ".git")); err == nil || !os.IsNotExist(err) {
+			return false
+		}
+		if filepath.Dir(p) == p {
+			break
+		}
+	}
+	return true
+}
+
 func actionRequestValid(r actionRequest) string {
 	if r.SchemaVersion != 1 || !actionIDPattern.MatchString(r.OperationID) || !actionKeyPattern.MatchString(r.IdempotencyKey) ||
 		!repositoryName.MatchString(r.Repository) || r.IssueNumber <= 0 ||
@@ -127,13 +152,13 @@ func actionRequestValid(r actionRequest) string {
 }
 
 func actionDirs(spool, receiptRoot string) (string, error) {
-	if !privateReceiptRoot(spool) || !privateReceiptRoot(receiptRoot) || spool == receiptRoot ||
+	if !privateActionSpoolDir(spool) || !privateReceiptRoot(receiptRoot) || spool == receiptRoot ||
 		strings.HasPrefix(spool+string(os.PathSeparator), receiptRoot+string(os.PathSeparator)) ||
 		strings.HasPrefix(receiptRoot+string(os.PathSeparator), spool+string(os.PathSeparator)) {
 		return "", errors.New("action_root_invalid")
 	}
 	for _, dir := range []string{"tmp", "new", "done"} {
-		if !privateReceiptRoot(filepath.Join(spool, dir)) {
+		if !privateActionSpoolDir(filepath.Join(spool, dir)) {
 			return "", errors.New("action_spool_invalid")
 		}
 	}
@@ -311,7 +336,7 @@ func (c *Coord) actionOne(ctx context.Context, receiptRoot, file string) error {
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm() != 0600 || st.Size() > 20000 {
+	if !st.Mode().IsRegular() || (st.Mode().Perm() != 0600 && st.Mode().Perm() != 0660) || st.Size() > 20000 {
 		return errors.New("request_file_invalid")
 	}
 	raw, err := os.ReadFile(path)
