@@ -380,10 +380,7 @@ func (c *Coord) actionOne(ctx context.Context, receiptRoot, file string) error {
 		if err := c.publishActionOwner(dir, filepath.Join(dir, "intent.json"), filepath.Join(dir, "result.json")); err != nil {
 			return err
 		}
-		if err := c.actionPublishStopIndex(*prior); err != nil {
-			return err
-		}
-		return actionMoveDone(c.cfg.ActionRequestRoot, file, digest)
+		return c.actionFinishStopIndex(*prior, file, digest)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -426,10 +423,24 @@ func (c *Coord) actionExecuteAndFinish(ctx context.Context, dir, file, digest st
 	if err := c.publishActionOwner(ownerPaths...); err != nil {
 		return err
 	}
-	if err := c.actionPublishStopIndex(r); err != nil {
+	return c.actionFinishStopIndex(r, file, digest)
+}
+
+// A malformed immutable result cannot acquire a valid index on a later tick.
+// Preserve the result, move the request out of new/, and log the defect once.
+// Storage and ownership failures still retry without repeating the effect.
+func (c *Coord) actionFinishStopIndex(r actionReceipt, file, digest string) error {
+	indexErr := c.actionPublishStopIndex(r)
+	if indexErr != nil && !actionStopIndexTerminal(indexErr) {
+		return indexErr
+	}
+	if err := actionMoveDone(c.cfg.ActionRequestRoot, file, digest); err != nil {
 		return err
 	}
-	return actionMoveDone(c.cfg.ActionRequestRoot, file, digest)
+	if indexErr != nil {
+		log.Printf("action %s: %v (terminal)", r.OperationID, indexErr)
+	}
+	return nil
 }
 
 func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest, r *actionReceipt) {

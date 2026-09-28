@@ -38,6 +38,15 @@ type actionStopIndex struct {
 	RequestDigest string `json:"requestDigest"`
 }
 
+var (
+	errStopIndexRunInvalid     = errors.New("stop_index_run_invalid")
+	errStopIndexBindingInvalid = errors.New("stop_index_binding_invalid")
+)
+
+func actionStopIndexTerminal(err error) bool {
+	return errors.Is(err, errStopIndexRunInvalid) || errors.Is(err, errStopIndexBindingInvalid)
+}
+
 // The dispatch record gives the feed a direct, bounded lookup for this stop.
 // It never needs to enumerate the growing action receipt root on each watch.
 func (c *Coord) actionPublishStopIndex(r actionReceipt) error {
@@ -45,11 +54,11 @@ func (c *Coord) actionPublishStopIndex(r actionReceipt) error {
 		return nil
 	}
 	if !strings.HasPrefix(r.NativeRunID, "orchid-") {
-		return errors.New("stop_index_run_invalid")
+		return errStopIndexRunInvalid
 	}
 	key := strings.TrimPrefix(r.NativeRunID, "orchid-")
 	if !digestPattern.MatchString(key) || !actionIDPattern.MatchString(r.OperationID) || !digestPattern.MatchString(r.RequestDigest) {
-		return errors.New("stop_index_binding_invalid")
+		return errStopIndexBindingInvalid
 	}
 	record := filepath.Join(c.cfg.Matrix.ReceiptRoot, key, "record")
 	if !privateReceiptRoot(record) {
