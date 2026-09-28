@@ -32,6 +32,40 @@ type actionStopObservation struct {
 	Kind          string `json:"kind"` // seat_absent | process_absent
 	ObservedAt    string `json:"observedAt"`
 }
+type actionStopIndex struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	OperationID   string `json:"operationId"`
+	RequestDigest string `json:"requestDigest"`
+}
+
+// The dispatch record gives the feed a direct, bounded lookup for this stop.
+// It never needs to enumerate the growing action receipt root on each watch.
+func (c *Coord) actionPublishStopIndex(r actionReceipt) error {
+	if r.Action != "stop" || r.Outcome != "accepted" || r.Reason != "workspace_close_delivered" {
+		return nil
+	}
+	if !strings.HasPrefix(r.NativeRunID, "orchid-") {
+		return errors.New("stop_index_run_invalid")
+	}
+	key := strings.TrimPrefix(r.NativeRunID, "orchid-")
+	if !digestPattern.MatchString(key) || !actionIDPattern.MatchString(r.OperationID) || !digestPattern.MatchString(r.RequestDigest) {
+		return errors.New("stop_index_binding_invalid")
+	}
+	record := filepath.Join(c.cfg.Matrix.ReceiptRoot, key, "record")
+	if !privateReceiptRoot(record) {
+		return errors.New("stop_index_record_unavailable")
+	}
+	index := actionStopIndex{SchemaVersion: 1, OperationID: r.OperationID, RequestDigest: r.RequestDigest}
+	path := filepath.Join(record, "stop-action.json")
+	if err := actionImmutableJSON(record, "stop-action.json", index); err != nil && !os.IsExist(err) {
+		return err
+	}
+	var existing actionStopIndex
+	if err := readPrivateActionJSON(path, &existing); err != nil || existing != index {
+		return errors.New("stop_index_conflict")
+	}
+	return c.publishActionOwner(record, path)
+}
 
 const actionProcCapturePython = `import os,json,sys
 root=int(sys.argv[1]); group=int(sys.argv[2])

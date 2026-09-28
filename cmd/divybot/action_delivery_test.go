@@ -275,6 +275,12 @@ func TestActionStopObservationRequiresSeatAndNativeProcessGone(t *testing.T) {
 	if r := actionResult(t, receipts); r.Outcome != "accepted" || r.Reason != "workspace_close_delivered" {
 		t.Fatalf("delivery: %+v", r)
 	}
+	indexPath := filepath.Join(receipts, strings.Repeat("d", 64), "record", "stop-action.json")
+	var index actionStopIndex
+	if err := readPrivateActionJSON(indexPath, &index); err != nil || index.OperationID != req.OperationID ||
+		index.RequestDigest != actionResult(t, receipts).RequestDigest {
+		t.Fatalf("unbound direct stop index: %+v %v", index, err)
+	}
 	dir := filepath.Join(receipts, "actions", testActionID)
 	if _, err := os.Stat(filepath.Join(dir, "seat-observed.json")); err != nil {
 		t.Fatal("seat absence missing", err)

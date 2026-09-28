@@ -380,6 +380,9 @@ func (c *Coord) actionOne(ctx context.Context, receiptRoot, file string) error {
 		if err := c.publishActionOwner(dir, filepath.Join(dir, "intent.json"), filepath.Join(dir, "result.json")); err != nil {
 			return err
 		}
+		if err := c.actionPublishStopIndex(*prior); err != nil {
+			return err
+		}
 		return actionMoveDone(c.cfg.ActionRequestRoot, file, digest)
 	} else if !os.IsNotExist(err) {
 		return err
@@ -421,6 +424,9 @@ func (c *Coord) actionExecuteAndFinish(ctx context.Context, dir, file, digest st
 		ownerPaths = append(ownerPaths, filepath.Join(dir, "stop-anchor.json"))
 	}
 	if err := c.publishActionOwner(ownerPaths...); err != nil {
+		return err
+	}
+	if err := c.actionPublishStopIndex(r); err != nil {
 		return err
 	}
 	return actionMoveDone(c.cfg.ActionRequestRoot, file, digest)
