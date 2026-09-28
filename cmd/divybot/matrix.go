@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -686,12 +687,30 @@ func syncDirectory(dir string) error {
 
 // The injection points exercise the common production attempt, not a parallel test-only path.
 type matrixAttemptDeps struct {
-	report  func(matrixRefusal)
-	read    func(context.Context, string, string, string) (string, error)
-	resolve func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error)
-	persist func(string, string, string, matrixReceipt, any, ...*receiptOwner) (*durableMatrixReceipt, error)
-	launch  func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) error
-	host    func(Target, string) (Host, bool)
+	report    func(matrixRefusal)
+	read      func(context.Context, string, string, string) (string, error)
+	resolve   func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error)
+	persist   func(string, string, string, matrixReceipt, any, ...*receiptOwner) (*durableMatrixReceipt, error)
+	launch    func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) error
+	host      func(Target, string) (Host, bool)
+	retry     *retryExpectation
+	preflight bool
+}
+
+type retryExpectation struct {
+	OperationID string
+	Dispatch    dispatchBinding
+	Tier        string
+	Role        string
+}
+
+func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, targetRevision, profile string, route matrixRoute, host Host) bool {
+	d := expected.Dispatch
+	return actionIDPattern.MatchString(expected.OperationID) && d.State == "dispatched" &&
+		d.Source == route.Transport && d.Provider == route.Provider && d.Model == route.Model && d.Effort == route.Effort &&
+		d.Profile == profile && d.ProfileRevision == targetRevision && d.MatrixRevision == cfg.Revision &&
+		d.Host == host.Name && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
+		expected.Tier == route.Tier && expected.Role == route.Role
 }
 
 func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Target, budget map[string]int, d matrixAttemptDeps) (string, bool) {
@@ -814,7 +833,10 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if !ok || !placementHostName.MatchString(host.Name) {
 		return refuse("host-unavailable")
 	}
-	if c.dry {
+	if d.retry != nil && !retryPinsMatch(*d.retry, cfg, revision, o.Profile, route, host) {
+		return refuse("retry-pins-unavailable")
+	}
+	if c.dry || d.preflight {
 		return route.Transport, true
 	}
 	binding := struct {
@@ -824,6 +846,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}{is.ID, target.Repo, briefDigest(is), revision, shaText([]byte(req.ProfileText)), host.Name, req, route}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
+	if d.retry != nil {
+		key = shaText([]byte("retry\x00" + key + "\x00" + d.retry.OperationID))
+	}
 	handle, e := d.persist(cfg.ReceiptRoot, key, command, receiptFor(cfg, route), binding, owner)
 	if e != nil {
 		report(refusalWithReason(e, "receipt-persistence-failed"))

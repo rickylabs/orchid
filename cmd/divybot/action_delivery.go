@@ -39,35 +39,40 @@ type actionRequest struct {
 }
 
 type actionReceipt struct {
-	SchemaVersion      int    `json:"schemaVersion"`
-	OperationID        string `json:"operationId"`
-	RequestDigest      string `json:"requestDigest"`
-	IdempotencyKey     string `json:"idempotencyKey"`
-	Repository         string `json:"repository,omitempty"`
-	IssueNumber        int    `json:"issueNumber,omitempty"`
-	AgentID            string `json:"agentId,omitempty"`
-	DispatchID         string `json:"dispatchId,omitempty"`
-	Action             string `json:"action,omitempty"`
-	NativeRunID        string `json:"nativeRunId,omitempty"`
-	NativeSessionID    string `json:"nativeSessionId,omitempty"`
-	Host               string `json:"host,omitempty"`
-	PaneID             string `json:"paneId,omitempty"`
-	WorkspaceID        string `json:"workspaceId,omitempty"`
-	Outcome            string `json:"outcome"` // accepted|rejected|unknown, never execution
-	Reason             string `json:"reason"`
-	ObservedAt         string `json:"observedAt"`
-	ReplacementAgentID string `json:"replacementAgentId,omitempty"`
-	MessageID          string `json:"messageId,omitempty"`
+	SchemaVersion         int    `json:"schemaVersion"`
+	OperationID           string `json:"operationId"`
+	RequestDigest         string `json:"requestDigest"`
+	IdempotencyKey        string `json:"idempotencyKey"`
+	Repository            string `json:"repository,omitempty"`
+	IssueNumber           int    `json:"issueNumber,omitempty"`
+	AgentID               string `json:"agentId,omitempty"`
+	DispatchID            string `json:"dispatchId,omitempty"`
+	Action                string `json:"action,omitempty"`
+	NativeRunID           string `json:"nativeRunId,omitempty"`
+	NativeSessionID       string `json:"nativeSessionId,omitempty"`
+	Host                  string `json:"host,omitempty"`
+	PaneID                string `json:"paneId,omitempty"`
+	WorkspaceID           string `json:"workspaceId,omitempty"`
+	Outcome               string `json:"outcome"` // accepted|rejected|unknown, never execution
+	Reason                string `json:"reason"`
+	ObservedAt            string `json:"observedAt"`
+	ReplacementAgentID    string `json:"replacementAgentId,omitempty"`
+	ReplacementDispatchID string `json:"replacementDispatchId,omitempty"`
+	MessageID             string `json:"messageId,omitempty"`
 }
 
 type actionCalls struct {
-	list          func(context.Context, Host) ([]AgentInfo, error)
-	send          func(context.Context, Host, string, string) error
-	close         func(context.Context, Host, string) error
-	stopProcess   func(context.Context, Host, string, string) (*actionStopProcess, error)
-	processGone   func(context.Context, Host, actionStopProcess) (bool, error)
-	workspaceGone func(context.Context, Host, string) (bool, error)
-	raiseBudget   func(context.Context, Host, string, goalIntent, int64) (*nativeGoal, error)
+	list              func(context.Context, Host) ([]AgentInfo, error)
+	send              func(context.Context, Host, string, string) error
+	close             func(context.Context, Host, string) error
+	stopProcess       func(context.Context, Host, string, string) (*actionStopProcess, error)
+	processGone       func(context.Context, Host, actionStopProcess) (bool, error)
+	workspaceGone     func(context.Context, Host, string) (bool, error)
+	raiseBudget       func(context.Context, Host, string, goalIntent, int64) (*nativeGoal, error)
+	retryIssue        func(context.Context, int) (Issue, string, error)
+	retryReopen       func(context.Context, int) error
+	retryNativeFailed func(context.Context, Host, string) (bool, error)
+	retryAttempt      func(context.Context, Issue, Target, retryExpectation, bool) (bool, matrixRefusal)
 }
 
 func (c *Coord) actionList(ctx context.Context, h Host) ([]AgentInfo, error) {
@@ -466,6 +471,10 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		r.Outcome, r.Reason = "rejected", "repository_mismatch"
 		return
 	}
+	if req.Action == "retry" {
+		c.deliverRetryAction(ctx, req, r)
+		return
+	}
 	c.st.mu.Lock()
 	j := c.st.Jobs[req.IssueNumber]
 	c.st.mu.Unlock()
@@ -611,8 +620,6 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 			return
 		}
 		r.Outcome, r.Reason = "accepted", "prompt_delivered"
-	case "retry":
-		r.Outcome, r.Reason = "rejected", "retry_requires_terminal_successor_contract"
 	case "raise_budget":
 		if j.Agent != "codex" || status != "working" || j.NativeGoal == nil || !j.NativeGoal.Owned || j.NativeGoal.LastStatus != "active" || j.NativeGoal.Intent.TokenBudget == nil {
 			r.Outcome, r.Reason = "rejected", "goal_not_raiseable"

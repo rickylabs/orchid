@@ -107,7 +107,7 @@ func (p *goalRPC) notification(m map[string]json.RawMessage) error {
 	return nil
 }
 func (p *goalRPC) request(method string, params any) (json.RawMessage, error) {
-	if !(method == "initialize" && p.serial == 0 || (method == "thread/goal/get" || method == "thread/goal/set") && p.serial > 0) {
+	if !(method == "initialize" && p.serial == 0 || (method == "thread/goal/get" || method == "thread/goal/set" || method == "thread/turns/list") && p.serial > 0) {
 		return nil, goalError("goal-method-refused")
 	}
 	p.serial++
@@ -145,6 +145,37 @@ func (p *goalRPC) request(method string, params any) (json.RawMessage, error) {
 		}
 	}
 	return nil, goalError("goal-notification-limit")
+}
+
+// The newest persisted native turn is the failure source for a retry. A goal
+// status or a missing seat alone cannot distinguish failure from success.
+func (p *goalRPC) lastTurnFailed() (bool, error) {
+	raw, err := p.request("thread/turns/list", map[string]any{
+		"threadId": p.thread, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+	})
+	if err != nil {
+		return false, err
+	}
+	var result struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if decodeNativeJSON(raw, &result) != nil || len(result.Data) != 1 {
+		return false, goalError("goal-turn-source-unavailable")
+	}
+	var turn struct {
+		Status string `json:"status"`
+	}
+	if decodeNativeJSON(result.Data[0], &turn) != nil {
+		return false, goalError("goal-turn-source-unavailable")
+	}
+	switch turn.Status {
+	case "failed":
+		return true, nil
+	case "completed", "interrupted", "inProgress":
+		return false, nil
+	default:
+		return false, goalError("goal-turn-source-unavailable")
+	}
 }
 func decodeGoal(raw json.RawMessage, thread string) (*nativeGoal, error) {
 	var fields map[string]json.RawMessage
