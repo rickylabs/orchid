@@ -2048,16 +2048,22 @@ func (c *Coord) tick(ctx context.Context) {
 
 	open, allOpen, pollOK := c.pollIssues(ctx)
 
-	// Teardown jobs whose inbox issue is gone — but ONLY when the poll was
-	// reliable. A flaky gh list (error, or a transient empty result) must never
-	// be read as "all issues closed" and wipe the swarm. Fail-safe: skip teardown
-	// unless every target listed cleanly AND we got a non-empty open set.
-	if pollOK && len(allOpen) > 0 {
+	// Teardown jobs whose inbox issue is gone only after a reliable poll. An
+	// empty successful list may be real (the last labelled issue closed) or a
+	// transient bad response, so confirm each issue is CLOSED before removing
+	// any job in that case.
+	if pollOK {
 		c.st.mu.Lock()
 		for n, j := range c.st.Jobs {
 			if _, ok := allOpen[n]; !ok {
 				jc := j
 				c.st.mu.Unlock()
+				if !teardownEligible(ctx, n, allOpen, pollOK, func(ctx context.Context, n int) string {
+					return ghIssueStateByNum(ctx, c.cfg.Inbox, n)
+				}) {
+					c.st.mu.Lock()
+					continue
+				}
 				// Before tearing down a merged-partial job, give its still-alive worker
 				// ONE grace tick to fan out the remaining work into sibling inbox issues
 				// (parallel sessions). fanoutGrace nudges the pane and returns true to
@@ -2220,6 +2226,19 @@ func (c *Coord) tick(ctx context.Context) {
 		}
 	}
 	c.st.save()
+}
+
+// teardownEligible preserves the empty-poll guard without stranding the last
+// closed inbox job. A failed poll or an unconfirmed issue state never tears
+// down a job; a non-empty reliable poll retains the existing missing-job rule.
+func teardownEligible(ctx context.Context, n int, allOpen map[int]bool, pollOK bool, issueState func(context.Context, int) string) bool {
+	if !pollOK || allOpen[n] {
+		return false
+	}
+	if len(allOpen) > 0 {
+		return true
+	}
+	return issueState(ctx, n) == "CLOSED"
 }
 
 // pollIssues returns the open issues plus ok=false if ANY target's gh list
