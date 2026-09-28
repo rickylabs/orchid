@@ -12,10 +12,10 @@ import (
 
 func TestMatrixQuotaRefusalAttribution(t *testing.T) {
 	cases := []struct {
-		name             string
-		setup            func(now time.Time, budget map[string]int, govQ map[string]quota)
-		wantCondition    string
-		negativeControl  string
+		name            string
+		setup           func(now time.Time, budget map[string]int, govQ map[string]quota)
+		wantCondition   string
+		negativeControl string
 	}{
 		{
 			name: "no budget",
@@ -136,7 +136,7 @@ func TestMatrixQuotaRefusalAttribution(t *testing.T) {
 					}
 					return syntheticRoute(), nil
 				},
-				host: func(Target, string) (Host, bool) { return Host{}, true },
+				host: func(Target, string) (Host, bool) { return Host{Name: "fixture-node"}, true },
 				persist: func(root, key, command string, r matrixReceipt, binding any, owners ...*receiptOwner) (*durableMatrixReceipt, error) {
 					return persistMatrixReceipt(root, key, command, r, binding, owners...)
 				},
@@ -214,7 +214,7 @@ func TestMatrixQuotaMultiTransportAttribution(t *testing.T) {
 		resolve: func(_ context.Context, _ MatrixConfig, req matrixRequest) (matrixRoute, error) {
 			return matrixRoute{}, errMatrix
 		},
-		host: func(Target, string) (Host, bool) { return Host{}, true },
+		host: func(Target, string) (Host, bool) { return Host{Name: "fixture-node"}, true },
 		persist: func(root, key, command string, r matrixReceipt, binding any, owners ...*receiptOwner) (*durableMatrixReceipt, error) {
 			return persistMatrixReceipt(root, key, command, r, binding, owners...)
 		},
@@ -347,4 +347,3 @@ func TestQuotaRefusalSpendAdjacentScan(t *testing.T) {
 		}
 	}
 }
-

@@ -33,7 +33,7 @@ func TestMatrixLaunchOutcomePreservesRegisteredAgent(t *testing.T) {
 					return "| `routing` | matrix `implementation` row |", nil
 				},
 				resolve: func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error) { return syntheticRoute(), nil },
-				host:    func(Target, string) (Host, bool) { return Host{}, true },
+				host:    func(Target, string) (Host, bool) { return Host{Name: "fixture-node"}, true },
 				persist: persistMatrixReceipt,
 				launch: func(_ context.Context, _ int, _ Issue, _ Host, _ string, _ Overrides, r *durableMatrixReceipt) error {
 					if tc.name == "prompt-unconfirmed" {
