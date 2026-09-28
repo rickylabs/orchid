@@ -234,3 +234,101 @@ func TestActionSteerSendsExactTextAndRequiresRunning(t *testing.T) {
 		t.Fatalf("send called %d times", sends)
 	}
 }
+
+func TestActionStopObservationRequiresSeatAndNativeProcessGone(t *testing.T) {
+	c, spool, receipts := actionFixture(t)
+	req := boundActionFixture(t, c, receipts)
+	closed := false
+	processGone := false
+	c.actions.stopProcess = func(_ context.Context, _ Host, pane, agent string) (*actionStopProcess, error) {
+		if pane != "pane-fixture" || agent != "claude" || closed {
+			t.Fatal("process identity not captured before close")
+		}
+		return &actionStopProcess{SchemaVersion: 1, RootPID: 201, GroupID: 201,
+			Members: []actionProcessIdentity{{PID: 201, Start: 77}}}, nil
+	}
+	c.actions.close = func(_ context.Context, _ Host, workspace string) error {
+		if workspace != "workspace-fixture" {
+			t.Fatal("wrong workspace")
+		}
+		closed = true
+		return nil
+	}
+	c.actions.list = func(_ context.Context, _ Host) ([]AgentInfo, error) {
+		if closed {
+			return nil, nil
+		}
+		return []AgentInfo{{Agent: "claude", AgentStatus: "working", Cwd: "/fixture/issue-7",
+			PaneID: "pane-fixture", WorkspaceID: "workspace-fixture"}}, nil
+	}
+	c.actions.workspaceGone = func(_ context.Context, _ Host, workspace string) (bool, error) {
+		return closed && workspace == "workspace-fixture", nil
+	}
+	c.actions.processGone = func(_ context.Context, _ Host, a actionStopProcess) (bool, error) {
+		if a.RootPID != 201 || a.GroupID != 201 || len(a.Members) != 1 || a.Members[0].Start != 77 {
+			t.Fatal("process anchor changed")
+		}
+		return processGone, nil
+	}
+	actionDrop(t, spool, req)
+	c.actionTick(context.Background())
+	if r := actionResult(t, receipts); r.Outcome != "accepted" || r.Reason != "workspace_close_delivered" {
+		t.Fatalf("delivery: %+v", r)
+	}
+	dir := filepath.Join(receipts, "actions", testActionID)
+	if _, err := os.Stat(filepath.Join(dir, "seat-observed.json")); err != nil {
+		t.Fatal("seat absence missing", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "process-observed.json")); !os.IsNotExist(err) {
+		t.Fatal("process death fabricated while process was alive")
+	}
+	processGone = true
+	c.actionTick(context.Background())
+	for name, kind := range map[string]string{"seat-observed.json": "seat_absent", "process-observed.json": "process_absent"} {
+		path := filepath.Join(dir, name)
+		st, err := os.Stat(path)
+		if err != nil || st.Mode().Perm() != 0600 {
+			t.Fatalf("private observation %s: %v", name, err)
+		}
+		var observed actionStopObservation
+		if err := readPrivateActionJSON(path, &observed); err != nil || observed.Kind != kind ||
+			observed.OperationID != req.OperationID || observed.RequestDigest == "" {
+			t.Fatalf("unbound observation %s: %+v %v", name, observed, err)
+		}
+	}
+}
+
+func TestActionStopObservationDoesNotInferWorkspaceGoneFromAgentList(t *testing.T) {
+	c, spool, receipts := actionFixture(t)
+	req := boundActionFixture(t, c, receipts)
+	closed := false
+	workspaceGone := false
+	c.actions.stopProcess = func(context.Context, Host, string, string) (*actionStopProcess, error) {
+		return &actionStopProcess{SchemaVersion: 1, RootPID: 301, GroupID: 301,
+			Members: []actionProcessIdentity{{PID: 301, Start: 88}}}, nil
+	}
+	c.actions.close = func(context.Context, Host, string) error { closed = true; return nil }
+	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
+		if closed {
+			return nil, nil
+		}
+		return []AgentInfo{{Agent: "claude", AgentStatus: "working", Cwd: "/fixture/issue-7",
+			PaneID: "pane-fixture", WorkspaceID: "workspace-fixture"}}, nil
+	}
+	c.actions.workspaceGone = func(context.Context, Host, string) (bool, error) { return workspaceGone, nil }
+	c.actions.processGone = func(context.Context, Host, actionStopProcess) (bool, error) { return true, nil }
+	actionDrop(t, spool, req)
+	c.actionTick(context.Background())
+	dir := filepath.Join(receipts, "actions", testActionID)
+	if _, err := os.Stat(filepath.Join(dir, "process-observed.json")); err != nil {
+		t.Fatal("process absence missing")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "seat-observed.json")); !os.IsNotExist(err) {
+		t.Fatal("agent list absence was incorrectly treated as workspace disappearance")
+	}
+	workspaceGone = true
+	c.actionTick(context.Background())
+	if _, err := os.Stat(filepath.Join(dir, "seat-observed.json")); err != nil {
+		t.Fatal("verified workspace absence missing")
+	}
+}
