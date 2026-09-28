@@ -142,16 +142,16 @@ func (h Host) bindDispatchGoal(ctx context.Context, r *durableMatrixReceipt, j *
 	}, goalWait)
 }
 
-func readGoalIdentity(root string, j *Job, inbox string) (string, error) {
+func loadGoalReceipt(root string, j *Job, inbox string, owner *receiptOwner) (*durableMatrixReceipt, string, error) {
 	if j.NativeGoal == nil || !digestPattern.MatchString(j.NativeGoal.ReceiptKey) || !privateReceiptRoot(root) {
-		return "", goalError("goal-binding-unavailable")
+		return nil, "", goalError("goal-binding-unavailable")
 	}
 	reservation := filepath.Join(root, j.NativeGoal.ReceiptKey)
 	record := filepath.Join(reservation, "record")
 	for _, dir := range []string{reservation, record} {
 		s, e := os.Lstat(dir)
 		if e != nil || !s.IsDir() || s.Mode().Perm() != 0700 {
-			return "", goalError("goal-binding-invalid")
+			return nil, "", goalError("goal-binding-invalid")
 		}
 	}
 	read := func(name string, out any) error {
@@ -168,22 +168,88 @@ func readGoalIdentity(root string, j *Job, inbox string) (string, error) {
 	}
 	var d dispatchBinding
 	if e := read("dispatch.json", &d); e != nil {
-		return "", e
+		return nil, "", e
 	}
 	if d.SchemaVersion != 1 || d.State != "dispatched" || d.Source != "codex" || d.Issue.Repo != inbox || d.Issue.Number != j.Issue || d.RunID != "orchid-"+j.NativeGoal.ReceiptKey || d.ParentRunID != nil {
-		return "", goalError("goal-dispatch-binding-invalid")
+		return nil, "", goalError("goal-dispatch-binding-invalid")
 	}
 	var b struct {
 		NativeSessionID string
 		Repo            string
 	}
 	if e := read("binding.json", &b); e != nil {
+		return nil, "", e
+	}
+	if b.Repo != j.Repo || (b.NativeSessionID != "" && !privateNativeID(b.NativeSessionID)) {
+		return nil, "", goalError("goal-binding-invalid")
+	}
+	return &durableMatrixReceipt{file: filepath.Join(record, "receipt.json"), owner: owner, dispatch: &d}, b.NativeSessionID, nil
+}
+func readGoalIdentity(root string, j *Job, inbox string) (string, error) {
+	_, id, e := loadGoalReceipt(root, j, inbox, nil)
+	if e != nil {
 		return "", e
 	}
-	if b.Repo != j.Repo || !privateNativeID(b.NativeSessionID) {
+	if id == "" {
 		return "", goalError("goal-identity-unavailable")
 	}
-	return b.NativeSessionID, nil
+	return id, nil
+}
+
+// One official occupant read per supervision tick. A missing hook is retryable;
+// all other evidence remains closed. Reopen the private receipt after the read
+// so a changed dispatch cannot gain a late identity.
+func retryLiveNativeBinding(ctx context.Context, root, inbox string, owner *receiptOwner, j *Job, read func(context.Context, string) (json.RawMessage, error)) (bool, error) {
+	r, id, e := loadGoalReceipt(root, j, inbox, owner)
+	if e != nil || id != "" {
+		return false, e
+	}
+	if j.Agent != "codex" || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace || j.Pane == "" {
+		return false, goalError("goal-dispatch-binding-invalid")
+	}
+	raw, e := read(ctx, j.Pane)
+	if e != nil {
+		return false, goalError("goal-identity-source-unavailable")
+	}
+	id, reason := nativeSessionFromResponse(raw, "agent_info", "codex", j.Label, r.dispatch.Location)
+	if reason == nativeUnavailable {
+		return false, nil
+	}
+	if reason != "" {
+		return false, goalError(reason)
+	}
+	r, existing, e := loadGoalReceipt(root, j, inbox, owner)
+	if e != nil || existing != "" {
+		return false, e
+	}
+	if r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace {
+		return false, goalError("goal-dispatch-binding-invalid")
+	}
+	if e := r.writeNativeIdentity(&id); e != nil {
+		return false, goalError("goal-binding-persistence-failed")
+	}
+	return true, nil
+}
+func (c *Coord) bindLiveNativeIdentity(ctx context.Context, host Host, j *Job) {
+	if j.NativeGoal == nil || j.Agent != "codex" || j.Pane == "" {
+		return
+	}
+	owner, e := configuredReceiptOwner(c.cfg.Matrix)
+	if e != nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	bound, _ := retryLiveNativeBinding(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j, func(ctx context.Context, pane string) (json.RawMessage, error) {
+		out, e := host.herdr(ctx, "agent", "get", pane)
+		if e != nil {
+			return nil, e
+		}
+		return herdrUnwrap(out)
+	})
+	if bound {
+		log.Printf("issue #%d: live native binding acquired", j.Issue)
+	}
 }
 func createDispatchGoal(p *goalRPC, intent goalIntent) error {
 	old, e := p.get()
