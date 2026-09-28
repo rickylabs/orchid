@@ -304,7 +304,18 @@ func (c *Coord) teardownObserveOne(ctx context.Context, intent teardownIntent) b
 			c.teardownWriteObservation(record, intent, "process_absent", "teardown-process-observed.json")
 		}
 	}
-	return lstatRegular(seatPath) == nil && lstatRegular(procPath) == nil
+	complete := lstatRegular(seatPath) == nil && lstatRegular(procPath) == nil
+	if complete {
+		c.st.mu.Lock()
+		if flight, ok := c.st.RetryFlights[intent.Issue]; ok && flight.DispatchKey == intent.DispatchKey {
+			delete(c.st.RetryFlights, intent.Issue)
+			if c.st.saveLocked() != nil {
+				c.st.RetryFlights[intent.Issue] = flight
+			}
+		}
+		c.st.mu.Unlock()
+	}
+	return complete
 }
 
 func lstatRegular(path string) error {

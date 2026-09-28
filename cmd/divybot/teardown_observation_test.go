@@ -78,6 +78,25 @@ func TestTeardownRequiresIndependentSeatAndProcessAbsence(t *testing.T) {
 	}
 }
 
+func TestRetryFlightClearsOnlyAfterSeatAndProcessAreObservedAbsent(t *testing.T) {
+	c, _, j, seatGone, processGone := teardownFixture(t)
+	c.st.RetryFlights = map[int]retryFlight{7: {OperationID: testActionID, DispatchKey: j.DispatchKey}}
+	if err := c.st.save(); err != nil {
+		t.Fatal(err)
+	}
+	c.teardownStart(context.Background(), 7, j, j.Workspace, "teardown")
+	*seatGone = true
+	c.teardownObservePending(context.Background())
+	if _, ok := loadState(c.st.path).RetryFlights[7]; !ok {
+		t.Fatal("retry flight cleared before native process absence")
+	}
+	*processGone = true
+	c.teardownObservePending(context.Background())
+	if _, ok := loadState(c.st.path).RetryFlights[7]; ok {
+		t.Fatal("completed retry flight still blocks the issue")
+	}
+}
+
 func TestTeardownMissingNativeBindingCannotPublishIntent(t *testing.T) {
 	c, record, j, _, _ := teardownFixture(t)
 	if err := os.WriteFile(filepath.Join(record, "binding.json"), []byte(`{"NativeSessionID":"","Repo":"example/repo"}`), 0600); err != nil {

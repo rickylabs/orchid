@@ -88,6 +88,32 @@ func goalPort(frames ...any) (*goalRPC, *bytes.Buffer) {
 	p.serial = 1
 	return p, &input
 }
+func TestNewestNativeTurnMustProveFailure(t *testing.T) {
+	for _, tc := range []struct {
+		status  string
+		failed  bool
+		invalid bool
+	}{
+		{"failed", true, false}, {"completed", false, false}, {"interrupted", false, false}, {"inProgress", false, false}, {"unknown", false, true},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			p, input := goalPort(response(2, map[string]any{"data": []any{map[string]any{"status": tc.status}}}))
+			failed, err := p.lastTurnFailed()
+			if failed != tc.failed || (err != nil) != tc.invalid {
+				t.Fatalf("terminal evidence failed=%v err=%v", failed, err)
+			}
+			if !strings.Contains(input.String(), `"method":"thread/turns/list"`) || !strings.Contains(input.String(), `"itemsView":"notLoaded"`) {
+				t.Fatal("unbounded or wrong native query")
+			}
+		})
+	}
+	for _, data := range []any{[]any{}, []any{map[string]any{"status": "failed"}, map[string]any{"status": "completed"}}} {
+		p, _ := goalPort(response(2, map[string]any{"data": data}))
+		if ok, err := p.lastTurnFailed(); ok || err == nil {
+			t.Fatal("ambiguous turn page accepted")
+		}
+	}
+}
 func TestNativeGoalObjective(t *testing.T) {
 	o, e := nativeGoalIntent("fixture/inbox", Issue{Number: 7, Title: "synthetic task"}, Overrides{})
 	if e != nil || o.Objective != fixtureIntent().Objective || o.TokenBudget != nil {

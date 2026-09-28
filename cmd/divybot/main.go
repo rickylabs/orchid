@@ -271,6 +271,7 @@ type Job struct {
 type State struct {
 	MatrixNotices map[int]string      `json:"matrix_notices,omitempty"`
 	LaunchBlocks  map[int]launchBlock `json:"launch_blocks,omitempty"`
+	RetryFlights  map[int]retryFlight `json:"retry_flights,omitempty"`
 	mu            sync.Mutex
 	Jobs          map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
@@ -294,6 +295,7 @@ func loadState(path string) *State {
 			MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
 			Jobs          map[int]*Job             `json:"jobs"`
 			LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
+			RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
 			Continued     map[string]int           `json:"continued"`
 			QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
 			PrevCap       map[string]int           `json:"prev_cap"`
@@ -301,6 +303,7 @@ func loadState(path string) *State {
 		if json.Unmarshal(b, &raw) == nil {
 			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
+			s.RetryFlights = raw.RetryFlights
 			if raw.Jobs != nil {
 				s.Jobs = raw.Jobs
 			}
@@ -333,7 +336,8 @@ func (s *State) saveLocked() error {
 		QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
 		PrevCap       map[string]int           `json:"prev_cap"`
 		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
-	}{s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks}, "", "  ")
+		RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
+	}{s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -2249,6 +2253,12 @@ func (c *Coord) tick(ctx context.Context) {
 		if live {
 			c.supervise(ctx, n, j, status)
 			continue
+		}
+		c.st.mu.Lock()
+		_, retrying := c.st.RetryFlights[n]
+		c.st.mu.Unlock()
+		if retrying {
+			continue // a fenced retry is driven only by its action operation
 		}
 		if c.reportBlockedLaunch(ctx, n) {
 			continue

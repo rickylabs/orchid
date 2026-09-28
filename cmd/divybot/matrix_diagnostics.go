@@ -37,6 +37,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"override-required":            {"matrix.grants.ownerMatrixOverride", "A route deviation requires the trusted owner override and its matching pin."},
 	"override-invalid":             {"matrix.grants.ownerMatrixOverride", "Verify the named pin, route and exact owner worklog entry."},
 	"route-unavailable":            {"matrix", "No matrix route is available on the eligible transports."},
+	"retry-pins-unavailable":       {"matrix", "The original dispatch pins no longer resolve exactly; start a new issue for a changed route."},
 	"routing-invalid":              {"issue.tier/role", "Specify a workload tier and a role allowed by the selected profile."},
 	"resolution-failed":            {"matrix", "Verify Deno, the pinned source contract and matrix CLI; resolution could not complete."},
 	"quota-unavailable":            {"governor", "No transport has both fresh subscription windows, headroom and available capacity."},
