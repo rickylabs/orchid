@@ -50,12 +50,17 @@ func TestMatrixLaunchOutcomePreservesRegisteredAgent(t *testing.T) {
 			if refusal.ReasonCode != tc.wantReason || refusal.Status != "inconclusive" || !validMatrixRefusal(refusal) {
 				t.Fatalf("false launch outcome: %+v", refusal)
 			}
+			body, err := os.ReadFile(launchStatePath(root, cfg.Inbox, is))
+			var state launchStateRecord
+			if err != nil || json.Unmarshal(body, &state) != nil || state.State != "launching" || state.ReasonCode != nil {
+				t.Fatal("ambiguous launch was exported as a refusal")
+			}
 			files, e := filepath.Glob(filepath.Join(root, "*", "record", "dispatch.json"))
 			if e != nil || len(files) != 1 {
 				t.Fatal("dispatch receipt missing")
 			}
 			var d dispatchBinding
-			body, e := os.ReadFile(files[0])
+			body, e = os.ReadFile(files[0])
 			if e != nil || json.Unmarshal(body, &d) != nil || d.State != tc.wantState {
 				t.Fatal("registered receipt was invalidated or uncertain effect was trusted")
 			}

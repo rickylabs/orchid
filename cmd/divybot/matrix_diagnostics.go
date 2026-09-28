@@ -155,6 +155,11 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	if c.dry {
 		return
 	}
+	// Only a pre-launch refusal is a needs-you fact. Inconclusive launch
+	// outcomes can already have a live agent and must never be called refused.
+	if r.Status == "refused" && r.ReasonCode != "launch-failed" {
+		c.publishLaunchState(n, is, "refused", r.ReasonCode)
+	}
 	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode + "\x00" + r.Cause + "\x00" + r.Detail))
 	c.st.mu.Lock()
 	notified := c.st.MatrixNotices[n] == key

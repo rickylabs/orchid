@@ -58,7 +58,14 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			events := []string{}
 			refusals := []matrixRefusal{}
 			deps := matrixAttemptDeps{
-				report: func(refusal matrixRefusal) { refusals = append(refusals, refusal) },
+				report: func(refusal matrixRefusal) {
+					refusals = append(refusals, refusal)
+					if name == "duplicate-routing" {
+						c.st = loadState(filepath.Join(root, "state.json"))
+						c.reportIssueMatrixRefusal(context.Background(), 1, is, refusal,
+							func(context.Context, string, int, string) error { return nil })
+					}
+				},
 				read: func(context.Context, string, string, string) (string, error) {
 					events = append(events, "profile")
 					return "| `routing` | matrix `implementation` row |", nil
@@ -206,6 +213,19 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				c.dry = true
 			}
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
+			if name == "success" || name == "duplicate-routing" {
+				body, err := os.ReadFile(launchStatePath(root, cfg.Inbox, is))
+				var state launchStateRecord
+				if err != nil || json.Unmarshal(body, &state) != nil {
+					t.Fatal("matrix attempt did not publish an issue launch state")
+				}
+				if name == "success" && (state.State != "launched" || state.ReasonCode != nil) {
+					t.Fatal("successful matrix attempt retained a refusal")
+				}
+				if name == "duplicate-routing" && (state.State != "refused" || state.ReasonCode == nil || *state.ReasonCode != "brief-routing-invalid") {
+					t.Fatal("pre-launch routing refusal was not issue-scoped")
+				}
+			}
 			if (name == "invalid-native-budget" || name == "explicit-empty-budget" || name == "non-codex-unparsed-budget") && (len(refusals) != 1 || refusals[0].ReasonCode != "goal-budget-invalid" || containsString(events, "host") || containsString(events, "persist")) {
 				t.Fatal("invalid goal budget reached launch preparation")
 			}
