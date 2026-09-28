@@ -304,7 +304,9 @@ func transitionDispatchGoal(p *goalRPC, intent goalIntent, status string) (bool,
 	if !sameGoalIntent(old, intent) {
 		return false, goalError("goal-ownership-mismatch")
 	}
-	if old.Status == status || old.Status == "complete" {
+	// A native client may complete the goal before the inbox closes. Reasserting
+	// complete emits a same-connection notification that this writer can verify.
+	if status != "complete" && (old.Status == status || old.Status == "complete") {
 		return false, nil
 	}
 	if status != "complete" && (old.Status == "budgetLimited" || old.Status == "usageLimited" || old.Status == "paused") {
@@ -385,10 +387,19 @@ func (c *Coord) transitionGoal(ctx context.Context, j *Job, status string) {
 	}
 	if changed {
 		c.st.mu.Lock()
+		priorStatus, priorNotification := j.NativeGoal.LastStatus, j.NativeGoal.UpdatedNotification
 		j.NativeGoal.LastStatus = status
 		j.NativeGoal.UpdatedNotification = true
-		_ = c.st.saveLocked()
+		saved := c.st.saveLocked()
+		if saved != nil {
+			j.NativeGoal.LastStatus, j.NativeGoal.UpdatedNotification = priorStatus, priorNotification
+		}
 		c.st.mu.Unlock()
+		if saved != nil {
+			log.Printf("issue #%d: native goal transition INCONCLUSIVE reason=goal-state-persistence-failed", j.Issue)
+			return
+		}
+		log.Printf("issue #%d: native goal %s notification observed", j.Issue, status)
 	}
 }
 func assignmentGoalStatus(state, reason string) string {

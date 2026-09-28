@@ -300,6 +300,18 @@ func TestNativeGoalTransition(t *testing.T) {
 			t.Fatal("status update reset intent or accounting")
 		}
 	}
+	// Codex may have completed its own goal before the inbox closes. Reassert
+	// complete without replacing the objective, and require a fresh notification.
+	completed := fixtureGoal("complete")
+	p, input := goalPort(response(2, map[string]any{"goal": completed}), response(3, map[string]any{"goal": completed}), updated(completed))
+	if changed, e := transitionDispatchGoal(p, fixtureIntent(), "complete"); e != nil || !changed ||
+		!strings.Contains(input.String(), `"method":"thread/goal/set"`) || strings.Contains(input.String(), `"objective"`) {
+		t.Fatal("already-complete goal did not emit a verified status-only write", e)
+	}
+	p, _ = goalPort(response(2, map[string]any{"goal": completed}), response(3, map[string]any{"goal": completed}))
+	if _, e := transitionDispatchGoal(p, fixtureIntent(), "complete"); e == nil {
+		t.Fatal("already-complete goal passed without a terminal notification")
+	}
 	for _, status := range []string{"active", "budgetLimited", "usageLimited", "unknown"} {
 		p, in := goalPort()
 		if _, e := transitionDispatchGoal(p, fixtureIntent(), status); e == nil || in.Len() != 0 {
