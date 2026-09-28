@@ -94,6 +94,9 @@ var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var profileStem = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var budgetTierPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 var repositoryName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+// Placement evidence uses a configured short name, never an SSH target or address.
+var placementHostName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,62}$`)
 var errMatrix = errors.New("matrix-refused")
 var errEvaluatorEvidence = errors.New("inconclusive: observer-unavailable")
 
@@ -499,6 +502,7 @@ type dispatchBinding struct {
 	Issue         dispatchIssue     `json:"issue"`
 	ParentRunID   *string           `json:"parentRunId"`
 	Source        string            `json:"source"`
+	Host          string            `json:"host,omitempty"`
 	Profile       string            `json:"profile"`
 	Model         string            `json:"model"`
 	Effort        string            `json:"effort,omitempty"`
@@ -805,17 +809,17 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return "", false
 	}
 	host, ok := d.host(target, route.Transport)
-	if !ok {
+	if !ok || !placementHostName.MatchString(host.Name) {
 		return refuse("host-unavailable")
 	}
 	if c.dry {
 		return route.Transport, true
 	}
 	binding := struct {
-		IssueID, Repo, BriefDigest, ProfileRevision, ProfileDigest string
-		Request                                                    matrixRequest
-		Route                                                      matrixRoute
-	}{is.ID, target.Repo, briefDigest(is), revision, shaText([]byte(req.ProfileText)), req, route}
+		IssueID, Repo, BriefDigest, ProfileRevision, ProfileDigest, Host string
+		Request                                                          matrixRequest
+		Route                                                            matrixRoute
+	}{is.ID, target.Repo, briefDigest(is), revision, shaText([]byte(req.ProfileText)), host.Name, req, route}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
 	handle, e := d.persist(cfg.ReceiptRoot, key, command, receiptFor(cfg, route), binding, owner)
@@ -829,7 +833,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
-		Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort,
+		Host: host.Name, Profile: o.Profile, Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	if e := handle.writeDispatch("reserved", nil); e != nil {
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
