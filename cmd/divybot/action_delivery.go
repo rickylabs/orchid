@@ -58,6 +58,7 @@ type actionReceipt struct {
 	ObservedAt            string `json:"observedAt"`
 	ReplacementAgentID    string `json:"replacementAgentId,omitempty"`
 	ReplacementDispatchID string `json:"replacementDispatchId,omitempty"`
+	TokenBudget           *int64 `json:"tokenBudget,omitempty"`
 	MessageID             string `json:"messageId,omitempty"`
 }
 
@@ -658,6 +659,9 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 			r.Reason = "goal_state_persistence_failed"
 			return
 		}
+		// This number is the read-back native goal value after durable state
+		// persistence. It is the feed's source for the current root budget.
+		r.TokenBudget = &budget
 		r.Outcome, r.Reason = "accepted", "goal_budget_updated"
 	}
 }
