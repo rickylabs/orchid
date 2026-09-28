@@ -839,6 +839,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
 		return "", false
 	}
+	// Supersede an earlier refusal before any launch effects. A failed launch
+	// remains inconclusive; it cannot revive a false no-agent refusal.
+	c.publishLaunchState(n, is, "launching", "")
 	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
 		var reason matrixReason
 		if errors.As(e, &reason) && reason == "goal-prompt-unconfirmed" {
@@ -854,6 +857,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		}
 		return "", false
 	}
+	c.publishLaunchState(n, is, "launched", "")
 	return route.Transport, true
 }
 func containsString(xs []string, value string) bool {
