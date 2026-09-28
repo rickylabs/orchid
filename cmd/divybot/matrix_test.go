@@ -43,7 +43,7 @@ func testCommand(t *testing.T, cwd, command string, args ...string) string {
 }
 
 func TestCommonMatrixAttempt(t *testing.T) {
-	cases := []string{"invalid-native-budget", "explicit-empty-budget", "valid-native-budget", "absent-native-budget", "route-default-budget", "override-route-budget", "zero-override-budget", "non-codex-unparsed-budget", "invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
+	cases := []string{"invalid-native-budget", "explicit-empty-budget", "valid-native-budget", "absent-native-budget", "route-default-budget", "override-route-budget", "zero-override-budget", "non-codex-unparsed-budget", "invalid-codex-effort", "success", "wrong-issue", "invalid-inbox", "missing-config", "missing-identity", "invalid-profile", "duplicate-routing", "unknown-pin", "mixed-pin", "no-quota", "stale-quota", "expired-bucket", "exhausted-account", "no-capacity", "qualified-host", "resolver-failure", "profile-failure", "persist-failure", "nil-receipt", "evaluator-refused", "evaluator-inconclusive", "wrong-harness", "router-substitution", "dry-run"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := privateTestRoot(t)
@@ -70,7 +70,10 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					}
 					return route, nil
 				},
-				host: func(Target, string) (Host, bool) { events = append(events, "host"); return Host{}, true },
+				host: func(Target, string) (Host, bool) {
+					events = append(events, "host")
+					return Host{Name: "fixture-node"}, true
+				},
 				persist: func(root, key, command string, r matrixReceipt, binding any, owners ...*receiptOwner) (*durableMatrixReceipt, error) {
 					events = append(events, "persist")
 					return persistMatrixReceipt(root, key, command, r, binding, owners...)
@@ -82,8 +85,13 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					}
 					data, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
 					var binding dispatchBinding
-					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" {
+					if err != nil || json.Unmarshal(data, &binding) != nil || binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" {
 						t.Fatal("authoritative inbox issue was not bound before launch")
+					}
+					private, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "binding.json"))
+					var native struct{ Host string }
+					if err != nil || json.Unmarshal(private, &native) != nil || native.Host != binding.Host {
+						t.Fatal("private native binding lost selected host")
 					}
 					if name == "route-default-budget" || name == "override-route-budget" || name == "zero-override-budget" {
 						want := int64(12000)
@@ -164,6 +172,11 @@ func TestCommonMatrixAttempt(t *testing.T) {
 				budget["claude"] = 0
 			case "no-capacity":
 				deps.host = func(Target, string) (Host, bool) { events = append(events, "host"); return Host{}, false }
+			case "qualified-host":
+				deps.host = func(Target, string) (Host, bool) {
+					events = append(events, "host")
+					return Host{Name: "fixture.invalid"}, true
+				}
 			case "resolver-failure":
 				deps.resolve = func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error) {
 					events = append(events, "resolve")
@@ -198,6 +211,9 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			}
 			if name == "invalid-codex-effort" && (len(refusals) != 1 || refusals[0].ReasonCode != "codex-effort-invalid" || containsString(events, "host") || containsString(events, "persist")) {
 				t.Fatal("invalid Codex effort must refuse before host selection and persistence")
+			}
+			if name == "qualified-host" && (len(refusals) != 1 || refusals[0].ReasonCode != "host-unavailable" || containsString(events, "persist")) {
+				t.Fatal("address-shaped placement reached durable evidence")
 			}
 			success := name == "success" || name == "dry-run" || name == "valid-native-budget" || name == "absent-native-budget" || name == "route-default-budget" || name == "override-route-budget" || name == "zero-override-budget"
 			if strings.HasPrefix(name, "evaluator-") {
