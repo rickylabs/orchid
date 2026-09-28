@@ -73,7 +73,7 @@ func TestTeardownRequiresIndependentSeatAndProcessAbsence(t *testing.T) {
 	if err := readPrivateActionJSON(filepath.Join(record, "teardown-process-observed.json"), &process); err != nil || process.Kind != "process_absent" {
 		t.Fatalf("process observation missing: %+v %v", process, err)
 	}
-	if _, err := os.Stat(filepath.Join(c.cfg.Matrix.ReceiptRoot, "teardown-pending", j.DispatchKey+".json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(c.teardownPendingRoot(), j.DispatchKey+".json")); !os.IsNotExist(err) {
 		t.Fatal("completed observation remained pending")
 	}
 }
@@ -87,8 +87,55 @@ func TestTeardownMissingNativeBindingCannotPublishIntent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(record, "teardown-intent.json")); !os.IsNotExist(err) {
 		t.Fatal("unbound native session acquired teardown proof")
 	}
-	if _, err := os.Stat(filepath.Join(c.cfg.Matrix.ReceiptRoot, "teardown-pending", strings.Repeat("d", 64)+".json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(c.teardownPendingRoot(), strings.Repeat("d", 64)+".json")); !os.IsNotExist(err) {
 		t.Fatal("unbound native session entered pending index")
+	}
+}
+
+func TestTeardownQueueIsPrivateStateAndReceiptTreeHasOnlyRecordOwner(t *testing.T) {
+	c, record, j, _, _ := teardownFixture(t)
+	owner := &receiptOwner{uid: os.Getuid(), gid: os.Getgid()}
+	c.cfg.Matrix.ReceiptOwnerUID = &owner.uid
+	c.cfg.Matrix.ReceiptOwnerGID = &owner.gid
+	c.teardownStart(context.Background(), 7, j, j.Workspace, "operator-timeout")
+	if err := lstatRegular(filepath.Join(c.teardownPendingRoot(), j.DispatchKey+".json")); err != nil {
+		t.Fatalf("private pending intent absent: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(c.cfg.Matrix.ReceiptRoot, "teardown-pending")); !os.IsNotExist(err) {
+		t.Fatal("Orchid work queue entered reader-facing receipt tree")
+	}
+	if err := lstatRegular(filepath.Join(record, "teardown-intent.json")); err != nil {
+		t.Fatalf("receipt intent absent: %v", err)
+	}
+	checkOwnerTree(t, c.cfg.Matrix.ReceiptRoot, owner.uid, owner.gid)
+}
+
+func TestTeardownQueueMigratesOldReceiptDirectoryOnce(t *testing.T) {
+	c, _, j, _, _ := teardownFixture(t)
+	old := filepath.Join(c.cfg.Matrix.ReceiptRoot, "teardown-pending")
+	if err := os.Mkdir(old, 0700); err != nil {
+		t.Fatal(err)
+	}
+	intent := teardownIntent{SchemaVersion: 1, Issue: 7, DispatchKey: j.DispatchKey,
+		NativeRunID: "orchid-" + j.DispatchKey, NativeSessionID: "thread-fixture",
+		Host: j.Host, PaneID: j.Pane, WorkspaceID: j.Workspace,
+		Cause: "operator-timeout", StartedAt: "2026-09-28T00:00:00Z"}
+	if err := actionImmutableJSON(old, j.DispatchKey+".json", intent); err != nil {
+		t.Fatal(err)
+	}
+	current := c.teardownPendingRoot()
+	if current == "" || current == old {
+		t.Fatal("queue did not move to private state")
+	}
+	var migrated teardownIntent
+	if err := readPrivateActionJSON(filepath.Join(current, j.DispatchKey+".json"), &migrated); err != nil || migrated != intent {
+		t.Fatalf("pending intent was lost: %+v %v", migrated, err)
+	}
+	if _, err := os.Lstat(old); !os.IsNotExist(err) {
+		t.Fatal("old reader-facing queue remained after migration")
+	}
+	if c.teardownPendingRoot() != current {
+		t.Fatal("second migration changed queue root")
 	}
 }
 

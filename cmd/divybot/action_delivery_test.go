@@ -21,7 +21,7 @@ func actionFixture(t *testing.T) (*Coord, string, string) {
 		}
 	}
 	c := &Coord{cfg: &Config{Inbox: "example/repo", ActionRequestRoot: spool, Matrix: MatrixConfig{ReceiptRoot: receipts}},
-		st: &State{Jobs: map[int]*Job{}, LaunchBlocks: map[int]launchBlock{}}, hosts: map[string]Host{}}
+		st: &State{Jobs: map[int]*Job{}, LaunchBlocks: map[int]launchBlock{}, path: filepath.Join(base, "state.json")}, hosts: map[string]Host{}}
 	return c, spool, receipts
 }
 func actionTestRequest() actionRequest {
@@ -111,6 +111,70 @@ func TestActionMissingResultAfterFenceIsUnknownWithoutDelivery(t *testing.T) {
 	}
 	if len(c.st.Jobs) != 0 {
 		t.Fatal("unknown path changed jobs")
+	}
+}
+
+func TestMalformedStopRunIndexIsTerminalAfterImmutableResult(t *testing.T) {
+	for _, runID := range []string{"malformed", "orchid-malformed"} {
+		t.Run(runID, func(t *testing.T) {
+			c, spool, receipts := actionFixture(t)
+			req := actionTestRequest()
+			body := actionDrop(t, spool, req)
+			root, err := actionDirs(spool, receipts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir, _, matches, err := actionIntent(root, req.OperationID, shaText(body))
+			if err != nil || !matches {
+				t.Fatalf("intent: %v", err)
+			}
+			result := actionReceipt{SchemaVersion: 1, OperationID: req.OperationID, RequestDigest: shaText(body),
+				Action: "stop", NativeRunID: runID, Outcome: "accepted", Reason: "workspace_close_delivered",
+				ObservedAt: "2026-01-01T00:00:00Z"}
+			if err := actionImmutableJSON(dir, "result.json", result); err != nil {
+				t.Fatal(err)
+			}
+			c.actionTick(context.Background())
+			if _, err := os.Stat(filepath.Join(spool, "new", req.OperationID+".json")); !os.IsNotExist(err) {
+				t.Fatal("malformed immutable result remained in the retry queue")
+			}
+			if got := actionResult(t, receipts); got.NativeRunID != runID || got.Outcome != "accepted" {
+				t.Fatalf("result changed: %+v", got)
+			}
+			done, err := os.ReadDir(filepath.Join(spool, "done"))
+			if err != nil || len(done) != 1 {
+				t.Fatalf("request was not moved to done: %v, %d", err, len(done))
+			}
+			c.actionTick(context.Background())
+			again, _ := os.ReadDir(filepath.Join(spool, "done"))
+			if len(again) != 1 {
+				t.Fatal("terminal result was replayed")
+			}
+		})
+	}
+}
+
+func TestUnavailableStopIndexStorageRemainsRetryable(t *testing.T) {
+	c, spool, receipts := actionFixture(t)
+	req := actionTestRequest()
+	body := actionDrop(t, spool, req)
+	root, err := actionDirs(spool, receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, _, _, err := actionIntent(root, req.OperationID, shaText(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := actionReceipt{SchemaVersion: 1, OperationID: req.OperationID, RequestDigest: shaText(body),
+		Action: "stop", NativeRunID: "orchid-" + strings.Repeat("d", 64), Outcome: "accepted",
+		Reason: "workspace_close_delivered", ObservedAt: "2026-01-01T00:00:00Z"}
+	if err := actionImmutableJSON(dir, "result.json", result); err != nil {
+		t.Fatal(err)
+	}
+	c.actionTick(context.Background())
+	if _, err := os.Stat(filepath.Join(spool, "new", req.OperationID+".json")); err != nil {
+		t.Fatal("retryable missing record was treated as terminal")
 	}
 }
 
