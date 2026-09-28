@@ -2804,6 +2804,9 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
 		return
 	}
+	if known {
+		c.bindLiveNativeIdentity(ctx, host, j)
+	}
 
 	// Operator timeout (/swarm "timeout:"): past the deadline the run is torn
 	// down and the INBOX ISSUE IS CLOSED with an explanatory comment — leaving
