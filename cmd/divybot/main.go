@@ -471,13 +471,14 @@ func herdrUnwrap(out string) (json.RawMessage, error) {
 }
 
 type AgentInfo struct {
-	Agent       string `json:"agent"`
-	AgentStatus string `json:"agent_status"`
-	Cwd         string `json:"cwd"`
-	PaneID      string `json:"pane_id"`
-	WorkspaceID string `json:"workspace_id"`
-	Label       string `json:"label"`
-	Name        string `json:"name"`
+	Agent          string `json:"agent"`
+	AgentStatus    string `json:"agent_status"`
+	StateChangeSeq uint64 `json:"state_change_seq"`
+	Cwd            string `json:"cwd"`
+	PaneID         string `json:"pane_id"`
+	WorkspaceID    string `json:"workspace_id"`
+	Label          string `json:"label"`
+	Name           string `json:"name"`
 }
 
 func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
@@ -502,22 +503,30 @@ func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
 // (idle|working|blocked|done|unknown), "" on error. Agent-agnostic and reliable
 // for claude AND opencode (both herdr-supported TUIs) — unlike scraping claude's
 // "bypass permissions" footer, which is invisible to opencode's TUI.
-func (h Host) agentStatusOf(ctx context.Context, target string) string {
+func (h Host) agentInfoOf(ctx context.Context, target string) (AgentInfo, error) {
 	out, err := h.herdr(ctx, "agent", "get", target)
 	if err != nil {
-		return ""
+		return AgentInfo{}, err
 	}
 	raw, err := herdrUnwrap(out)
 	if err != nil {
-		return ""
+		return AgentInfo{}, err
 	}
 	var r struct {
 		Agent AgentInfo `json:"agent"`
 	}
-	if json.Unmarshal(raw, &r) != nil {
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return AgentInfo{}, err
+	}
+	return r.Agent, nil
+}
+
+func (h Host) agentStatusOf(ctx context.Context, target string) string {
+	a, err := h.agentInfoOf(ctx, target)
+	if err != nil {
 		return ""
 	}
-	return r.Agent.AgentStatus
+	return a.AgentStatus
 }
 
 // spawnAgent creates an isolated workspace, prepares its shell environment, then
@@ -627,6 +636,10 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if receipt.writeNativeIdentity(identity) != nil {
 			return pane, ws, matrixSite("spawn.native-binding", errMatrix)
 		}
+	} else if identityReason == nativeUnavailable {
+		// Codex may not report a native thread until the first prompt starts it.
+		// Supervision retries this exact occupant and persists the later binding.
+		log.Printf("issue #%d: native identity pending first-thread hook", receipt.dispatch.Issue.Number)
 	} else {
 		log.Printf("issue #%d: native identity INCONCLUSIVE reason=%s", receipt.dispatch.Issue.Number, identityReason)
 	}
@@ -653,12 +666,48 @@ func agentBareIdle(pane string) bool {
 	return strings.Contains(pane, "bypass permissions")
 }
 
-// injectGoal delivers the goal to a freshly-spawned agent reliably. It
-// waits for the prompt to render, sends, then confirms the agent left the
-// bare prompt (i.e. accepted the task). A dropped keystroke during boot or
-// an Enter that raced ahead of a long paste both leave the worker idle;
-// this retries (nudging Enter, then clearing and resending) until the goal
-// registers or the context expires.
+// injectGoal waits for a freshly spawned agent to be ready, submits its
+// assignment, then confirms an observed state change. Native prompts are sent
+// once because a delayed observation cannot prove that a prior send was lost;
+// the non-native branch retains its legacy Enter nudge and retry behavior.
+func nativePromptObserved(before, after AgentInfo) bool {
+	if before.PaneID == "" || before.WorkspaceID == "" || before.Agent == "" ||
+		after.PaneID != before.PaneID || after.WorkspaceID != before.WorkspaceID || after.Agent != before.Agent || after.Name != before.Name ||
+		after.StateChangeSeq <= before.StateChangeSeq {
+		return false
+	}
+	switch after.AgentStatus {
+	case "working", "blocked", "done":
+		return true
+	}
+	return false
+}
+
+func awaitNativePrompt(ctx context.Context, before AgentInfo, observe func(context.Context) (AgentInfo, error), wait func(context.Context) bool) error {
+	for {
+		if after, err := observe(ctx); err == nil && nativePromptObserved(before, after) {
+			return nil
+		}
+		if !wait(ctx) {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("native prompt state unconfirmed: %w", err)
+			}
+			return fmt.Errorf("native prompt state unconfirmed")
+		}
+	}
+}
+
+func nativePromptWait(ctx context.Context) bool {
+	t := time.NewTimer(2 * time.Second)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) error {
 	// Readiness/acceptance via herdr's native status — works for claude AND
 	// opencode. (The old "bypass permissions" pane scrape was claude-only and
@@ -689,29 +738,21 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		}
 	}
 	if native {
-		// Short pointer prompts (opencode class): herdr's `agent prompt --wait`
-		// confirms submission and the post-submit state transition server-side —
-		// no manual Enter, no status polling race. Verified interactively: a
-		// prompt submitted this way flips opencode idle→working within seconds.
-		var lastErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			out, err := h.herdr(ctx, "agent", "prompt", target, goal,
-				"--wait", "--until", "working", "--until", "blocked", "--until", "done", "--timeout", "45000")
-			if err == nil {
-				return nil
-			}
-			lastErr = fmt.Errorf("native prompt: %v: %.160q", err, out)
-			if strings.Contains(out, "agent_blocked") {
-				// codex directory-trust (or similar) prompt: accept and retry.
-				h.herdr(ctx, "pane", "send-keys", target, "Enter")
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(3 * time.Second):
-			}
+		// Herdr's --wait requires a working/blocked transition within five
+		// seconds, even with a longer --timeout. Codex can start real work later,
+		// so that gate falsely reports a failure and retrying may submit the same
+		// prompt multiple times. Submit once, then independently watch this exact
+		// occupant's state-change sequence for the full launch context.
+		before, err := h.agentInfoOf(ctx, target)
+		if err != nil {
+			return fmt.Errorf("native prompt baseline unavailable: %w", err)
 		}
-		return lastErr
+		if _, err := h.herdr(ctx, "agent", "prompt", target, goal); err != nil {
+			return fmt.Errorf("native prompt submission unconfirmed: %w", err)
+		}
+		return awaitNativePrompt(ctx, before, func(ctx context.Context) (AgentInfo, error) {
+			return h.agentInfoOf(ctx, target)
+		}, nativePromptWait)
 	}
 	// Send the goal, then poll for acceptance with a GENEROUS window: opencode
 	// (and codex-class models) can take 10-20s after receiving the prompt before
@@ -2817,6 +2858,14 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			return matrixReason("goal-prompt-unconfirmed")
 		}
 		gcancel()
+		if j.NativeGoal != nil {
+			c.st.mu.Lock()
+			j.NativeGoal.PromptConfirmed = true
+			if err := c.st.saveLocked(); err != nil {
+				log.Printf("issue #%d: prompt confirmation state could not be persisted", n)
+			}
+			c.st.mu.Unlock()
+		}
 		c.startDispatchGoal(ctx, host, j, receipt)
 	}
 	log.Printf("issue #%d: launch-started-observation-unproven", n)
@@ -2840,6 +2889,9 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	}
 	if known {
 		c.bindLiveNativeIdentity(ctx, host, j)
+		if ref.Status == "working" || ref.Status == "blocked" {
+			c.retryBoundGoal(ctx, host, j)
+		}
 	}
 
 	// Operator timeout (/swarm "timeout:"): past the deadline the run is torn

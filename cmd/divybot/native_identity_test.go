@@ -147,8 +147,8 @@ func TestNativeLaunchBinding(t *testing.T) {
 			} else if binding.NativeSessionID != nil {
 				t.Fatal("inconclusive or failed launch published identity")
 			}
-			if !success && mode != "failed-start" && !strings.Contains(logs.String(), "INCONCLUSIVE reason=native-") {
-				t.Fatal("missing closed inconclusive diagnostic")
+			if mode == "absent" && (!strings.Contains(logs.String(), "native identity pending first-thread hook") || strings.Contains(logs.String(), "INCONCLUSIVE")) {
+				t.Fatal("early missing thread was reported as invalid rather than pending")
 			}
 			public, e := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
 			if e != nil {
