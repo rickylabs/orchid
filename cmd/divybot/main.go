@@ -2078,6 +2078,7 @@ func (c *Coord) activeHosts() []Host {
 
 func (c *Coord) tick(ctx context.Context) {
 	c.actionTick(ctx)
+	c.teardownObservePending(ctx)
 	// Feeder first: mirror any newly bot-assigned upstream issues into the
 	// inbox so they're visible to pollIssues on this same cycle.
 	c.assignmentTick(ctx)
@@ -2118,7 +2119,7 @@ func (c *Coord) tick(ctx context.Context) {
 					continue
 				}
 				c.finishAssignmentGoal(ctx, jc)
-				c.teardown(ctx, n, jc)
+				c.teardown(ctx, n, jc, "teardown")
 				c.st.mu.Lock()
 				delete(c.st.Jobs, n)
 			}
@@ -2910,7 +2911,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 		_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
 			"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
 		ccancel()
-		c.teardown(ctx, n, j)
+		c.teardown(ctx, n, j, "operator-timeout")
 		c.st.mu.Lock()
 		delete(c.st.Jobs, n)
 		c.st.mu.Unlock()
@@ -3198,7 +3199,7 @@ func checksGreen(v *PRView) bool {
 	return true
 }
 
-func (c *Coord) teardown(ctx context.Context, n int, j *Job) {
+func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 	host, ok := c.hosts[j.Host]
 	if !ok {
 		return
@@ -3218,7 +3219,15 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job) {
 		}
 	}
 	if ws != "" {
-		_ = host.closeWorkspace(cctx, ws)
+		// Capture a bound native process before closing the workspace. A failed
+		// capture never prevents teardown, but cannot create terminal evidence.
+		captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)
+		c.teardownStart(captureCtx, n, j, ws, cause)
+		captureDone()
+		closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
+		_ = host.closeWorkspace(closeCtx, ws)
+		closeDone()
+		c.teardownObservePending(ctx)
 	}
 
 	// Reclaim the worktree. Closing the herdr workspace does NOT remove the
