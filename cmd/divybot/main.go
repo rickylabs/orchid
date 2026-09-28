@@ -39,19 +39,20 @@ import (
 // ============================ config ============================
 
 type Config struct {
-	Matrix            MatrixConfig `json:"matrix"`
-	ActionRequestRoot string       `json:"action_request_root,omitempty"` // separate private maildir mount
-	Inbox             string       `json:"inbox"`                         // e.g. "denoland/divybot"
-	BotLogin          string       `json:"bot_login"`                     // PR author login (for review attribution)
-	BotEmail          string       `json:"bot_email"`                     // git committer email
-	PollInterval      string       `json:"poll_interval"`                 // e.g. "30s"
-	BranchPrefix      string       `json:"branch_prefix"`                 // e.g. "orch/divybot-"
-	StateFile         string       `json:"state_file"`                    // private state location
-	NtfyTopic         string       `json:"ntfy_topic"`                    // ntfy.sh topic for escalation (optional)
-	Hosts             []Host       `json:"hosts"`
-	Targets           []Target     `json:"targets"`
-	Governor          Gov          `json:"governor"`
-	Memory            Mem          `json:"memory"`
+	Matrix                  MatrixConfig `json:"matrix"`
+	ActionRequestRoot       string       `json:"action_request_root,omitempty"`        // separate private maildir mount
+	ActionGoalBudgetCeiling int64        `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
+	Inbox                   string       `json:"inbox"`                                // e.g. "denoland/divybot"
+	BotLogin                string       `json:"bot_login"`                            // PR author login (for review attribution)
+	BotEmail                string       `json:"bot_email"`                            // git committer email
+	PollInterval            string       `json:"poll_interval"`                        // e.g. "30s"
+	BranchPrefix            string       `json:"branch_prefix"`                        // e.g. "orch/divybot-"
+	StateFile               string       `json:"state_file"`                           // private state location
+	NtfyTopic               string       `json:"ntfy_topic"`                           // ntfy.sh topic for escalation (optional)
+	Hosts                   []Host       `json:"hosts"`
+	Targets                 []Target     `json:"targets"`
+	Governor                Gov          `json:"governor"`
+	Memory                  Mem          `json:"memory"`
 }
 
 // Mem configures the git-backed shared memory. Reuses the inbox repo
@@ -207,6 +208,9 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	c.withDefaults()
+	if c.ActionGoalBudgetCeiling < 0 || !goalNumber(c.ActionGoalBudgetCeiling) {
+		return nil, fmt.Errorf("action_goal_budget_ceiling invalid")
+	}
 	return &c, nil
 }
 

@@ -299,6 +299,109 @@ func TestActionSteerSendsExactTextAndRequiresRunning(t *testing.T) {
 	}
 }
 
+func TestActionRaiseBudgetCeilingAndDurableReadback(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		ceiling, requested      int64
+		wantOutcome, wantReason string
+		calls                   int
+	}{
+		{"accepted", 200, 150, "accepted", "goal_budget_updated", 1},
+		{"ceiling-unset", 0, 150, "rejected", "budget_ceiling_unset", 0},
+		{"over-ceiling", 125, 150, "rejected", "budget_ceiling_exceeded", 0},
+		{"not-increased", 200, 100, "rejected", "budget_not_increased", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, spool, receipts := actionFixture(t)
+			req := boundActionFixture(t, c, receipts)
+			j := c.st.Jobs[7]
+			j.Agent = "codex"
+			j.NativeGoal = &dispatchGoal{Intent: fixtureIntent(), Owned: true, LastStatus: "active"}
+			c.cfg.ActionGoalBudgetCeiling = tc.ceiling
+			req.Action = "raise_budget"
+			req.Payload.TokenBudget = goalInt(tc.requested)
+			record := filepath.Join(receipts, j.DispatchKey, "record")
+			d := dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + j.DispatchKey, Issue: dispatchIssue{Repo: "example/repo", Number: 7},
+				Source: "codex", State: "dispatched", Host: j.Host, Location: &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace}}
+			b, _ := json.Marshal(d)
+			if err := os.WriteFile(filepath.Join(record, "dispatch.json"), b, 0600); err != nil {
+				t.Fatal(err)
+			}
+			binding := `{"Repo":"example/repo","NativeSessionID":"fixture-thread"}`
+			if err := os.WriteFile(filepath.Join(record, "binding.json"), []byte(binding), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
+				return []AgentInfo{{Agent: "codex", AgentStatus: "working", Cwd: "/fixture/issue-7", PaneID: j.Pane, WorkspaceID: j.Workspace}}, nil
+			}
+			calls := 0
+			c.actions.raiseBudget = func(_ context.Context, _ Host, thread string, intent goalIntent, budget int64) (*nativeGoal, error) {
+				calls++
+				if thread != "fixture-thread" || intent.TokenBudget == nil || *intent.TokenBudget != 100 || budget != 150 {
+					t.Fatal("wrong native goal target or amount")
+				}
+				g := fixtureGoal("active")
+				g.TokenBudget = goalInt(budget)
+				return g, nil
+			}
+			actionDrop(t, spool, req)
+			c.actionTick(context.Background())
+			r := actionResult(t, receipts)
+			if r.Outcome != tc.wantOutcome || r.Reason != tc.wantReason || calls != tc.calls {
+				t.Fatalf("result %+v calls=%d", r, calls)
+			}
+			want := int64(100)
+			if tc.calls == 1 {
+				want = 150
+			}
+			if j.NativeGoal.Intent.TokenBudget == nil || *j.NativeGoal.Intent.TokenBudget != want {
+				t.Fatal("in-memory goal intent mismatch")
+			}
+			if tc.calls == 1 {
+				saved := loadState(c.st.path).Jobs[7]
+				if saved == nil || saved.NativeGoal == nil || saved.NativeGoal.Intent.TokenBudget == nil || *saved.NativeGoal.Intent.TokenBudget != want {
+					t.Fatal("verified budget was not durable")
+				}
+			}
+		})
+	}
+}
+
+func TestActionRaiseBudgetRejectsUnverifiedNativeReply(t *testing.T) {
+	c, spool, receipts := actionFixture(t)
+	req := boundActionFixture(t, c, receipts)
+	j := c.st.Jobs[7]
+	j.Agent = "codex"
+	j.NativeGoal = &dispatchGoal{Intent: fixtureIntent(), Owned: true, LastStatus: "active"}
+	c.cfg.ActionGoalBudgetCeiling = 200
+	req.Action = "raise_budget"
+	req.Payload.TokenBudget = goalInt(150)
+	record := filepath.Join(receipts, j.DispatchKey, "record")
+	d := dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + j.DispatchKey, Issue: dispatchIssue{Repo: "example/repo", Number: 7},
+		Source: "codex", State: "dispatched", Host: j.Host, Location: &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace}}
+	b, _ := json.Marshal(d)
+	if err := os.WriteFile(filepath.Join(record, "dispatch.json"), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(record, "binding.json"), []byte(`{"Repo":"example/repo","NativeSessionID":"fixture-thread"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
+		return []AgentInfo{{Agent: "codex", AgentStatus: "working", Cwd: "/fixture/issue-7", PaneID: j.Pane, WorkspaceID: j.Workspace}}, nil
+	}
+	c.actions.raiseBudget = func(context.Context, Host, string, goalIntent, int64) (*nativeGoal, error) {
+		return fixtureGoal("active"), nil // stale budget despite a successful-looking transport
+	}
+	actionDrop(t, spool, req)
+	c.actionTick(context.Background())
+	if got := actionResult(t, receipts); got.Outcome != "unknown" || got.Reason != "goal_budget_update_unconfirmed" {
+		t.Fatalf("stale readback accepted: %+v", got)
+	}
+	if *j.NativeGoal.Intent.TokenBudget != 100 {
+		t.Fatal("unverified budget changed state")
+	}
+}
+
 func TestActionStopObservationRequiresSeatAndNativeProcessGone(t *testing.T) {
 	c, spool, receipts := actionFixture(t)
 	req := boundActionFixture(t, c, receipts)

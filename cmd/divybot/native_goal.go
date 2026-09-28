@@ -305,6 +305,38 @@ func createDispatchGoal(p *goalRPC, intent goalIntent) error {
 	_, e = p.set(map[string]any{"threadId": p.thread, "objective": intent.Objective, "tokenBudget": intent.TokenBudget, "status": "active"}, intent, "active")
 	return e
 }
+
+// Keep the objective and status out of the write so Codex preserves the running
+// goal and its usage history. The app-server's set response, same-connection
+// notification, and subsequent get must all agree before this is accepted.
+func raiseDispatchGoalBudget(p *goalRPC, intent goalIntent, budget int64) (*nativeGoal, error) {
+	if intent.TokenBudget == nil || !goalNumber(budget) || budget <= *intent.TokenBudget {
+		return nil, goalError("goal-budget-not-increased")
+	}
+	old, err := p.get()
+	if err != nil {
+		return nil, err
+	}
+	if !sameGoalIntent(old, intent) || old.Status != "active" {
+		return nil, goalError("goal-ownership-mismatch")
+	}
+	nextIntent := goalIntent{Objective: intent.Objective, TokenBudget: &budget}
+	next, err := p.set(map[string]any{"threadId": p.thread, "tokenBudget": budget}, nextIntent, "active")
+	if err != nil {
+		return nil, err
+	}
+	if next.CreatedAt != old.CreatedAt || next.TokensUsed < old.TokensUsed || next.SecondsUsed < old.SecondsUsed || next.UpdatedAt < old.UpdatedAt {
+		return nil, goalError("goal-accounting-regressed")
+	}
+	readBack, err := p.get()
+	if err != nil {
+		return nil, err
+	}
+	if !sameGoalIntent(readBack, nextIntent) || readBack.Status != "active" || readBack.CreatedAt != old.CreatedAt || readBack.TokensUsed < old.TokensUsed || readBack.SecondsUsed < old.SecondsUsed {
+		return nil, goalError("goal-readback-mismatch")
+	}
+	return readBack, nil
+}
 func transitionDispatchGoal(p *goalRPC, intent goalIntent, status string) (bool, error) {
 	if status != "complete" && status != "blocked" && status != "paused" {
 		return false, goalError("goal-transition-refused")

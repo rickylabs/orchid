@@ -284,6 +284,47 @@ func mapRaw(v any) map[string]json.RawMessage {
 	_ = json.Unmarshal(goalJSON(v), &m)
 	return m
 }
+func TestRaiseDispatchGoalBudgetPreservesGoal(t *testing.T) {
+	old := fixtureGoal("active")
+	next := fixtureGoal("active")
+	next.TokenBudget = goalInt(150)
+	next.TokensUsed = 12
+	p, input := goalPort(response(2, map[string]any{"goal": old}), response(3, map[string]any{"goal": next}), updated(next), response(4, map[string]any{"goal": next}))
+	got, err := raiseDispatchGoalBudget(p, fixtureIntent(), 150)
+	if err != nil || got == nil || *got.TokenBudget != 150 || got.TokensUsed != 12 {
+		t.Fatalf("verified update: %+v %v", got, err)
+	}
+	lines := strings.Split(strings.TrimSpace(input.String()), "\n")
+	var write struct {
+		Params map[string]any `json:"params"`
+	}
+	if len(lines) != 3 || json.Unmarshal([]byte(lines[1]), &write) != nil || len(write.Params) != 2 || write.Params["tokenBudget"] != float64(150) || write.Params["threadId"] != "fixture-thread" {
+		t.Fatal("raise write replaced objective/status or lost the budget")
+	}
+	for _, tc := range []struct {
+		name   string
+		frames []any
+	}{
+		{"no-notification", []any{response(2, map[string]any{"goal": old}), response(3, map[string]any{"goal": next})}},
+		{"wrong-readback", []any{response(2, map[string]any{"goal": old}), response(3, map[string]any{"goal": next}), updated(next), response(4, map[string]any{"goal": old})}},
+		{"accounting-regressed", func() []any {
+			bad := *next
+			bad.TokensUsed = 9
+			return []any{response(2, map[string]any{"goal": old}), response(3, map[string]any{"goal": &bad}), updated(&bad)}
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			port, _ := goalPort(tc.frames...)
+			if _, err := raiseDispatchGoalBudget(port, fixtureIntent(), 150); err == nil {
+				t.Fatal("unverified budget update accepted")
+			}
+		})
+	}
+	port, in := goalPort()
+	if _, err := raiseDispatchGoalBudget(port, fixtureIntent(), 100); err == nil || in.Len() != 0 {
+		t.Fatal("non-increase sent a write")
+	}
+}
 func TestNativeGoalTransition(t *testing.T) {
 	for _, status := range []string{"paused", "blocked", "complete"} {
 		old, next := fixtureGoal("active"), fixtureGoal(status)

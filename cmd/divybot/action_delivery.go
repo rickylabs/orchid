@@ -32,8 +32,9 @@ type actionRequest struct {
 	ExpectedAgentRevision string `json:"expectedAgentRevision"`
 	Action                string `json:"action"`
 	Payload               struct {
-		Text   string `json:"text,omitempty"`
-		Reason string `json:"reason,omitempty"`
+		Text        string `json:"text,omitempty"`
+		Reason      string `json:"reason,omitempty"`
+		TokenBudget *int64 `json:"tokenBudget,omitempty"`
 	} `json:"payload"`
 }
 
@@ -66,6 +67,7 @@ type actionCalls struct {
 	stopProcess   func(context.Context, Host, string, string) (*actionStopProcess, error)
 	processGone   func(context.Context, Host, actionStopProcess) (bool, error)
 	workspaceGone func(context.Context, Host, string) (bool, error)
+	raiseBudget   func(context.Context, Host, string, goalIntent, int64) (*nativeGoal, error)
 }
 
 func (c *Coord) actionList(ctx context.Context, h Host) ([]AgentInfo, error) {
@@ -85,6 +87,18 @@ func (c *Coord) actionClose(ctx context.Context, h Host, workspace string) error
 		return c.actions.close(ctx, h, workspace)
 	}
 	return h.closeWorkspace(ctx, workspace)
+}
+func (c *Coord) actionRaiseBudget(ctx context.Context, h Host, thread string, intent goalIntent, budget int64) (*nativeGoal, error) {
+	if c.actions.raiseBudget != nil {
+		return c.actions.raiseBudget(ctx, h, thread, intent, budget)
+	}
+	var updated *nativeGoal
+	err := h.withGoalConnection(ctx, thread, func(p *goalRPC) error {
+		var e error
+		updated, e = raiseDispatchGoalBudget(p, intent, budget)
+		return e
+	})
+	return updated, err
 }
 
 func readPrivateActionJSON(path string, value any) error {
@@ -137,15 +151,19 @@ func actionRequestValid(r actionRequest) string {
 	}
 	switch r.Action {
 	case "stop":
-		if r.Payload.Text != "" || len(r.Payload.Reason) > 512 {
+		if r.Payload.Text != "" || len(r.Payload.Reason) > 512 || r.Payload.TokenBudget != nil {
 			return "payload_invalid"
 		}
 	case "steer", "send":
-		if len(r.Payload.Text) < 1 || len(r.Payload.Text) > 16000 || r.Payload.Reason != "" {
+		if len(r.Payload.Text) < 1 || len(r.Payload.Text) > 16000 || r.Payload.Reason != "" || r.Payload.TokenBudget != nil {
 			return "payload_invalid"
 		}
 	case "retry":
-		if r.Payload.Text != "" || r.Payload.Reason != "" {
+		if r.Payload.Text != "" || r.Payload.Reason != "" || r.Payload.TokenBudget != nil {
+			return "payload_invalid"
+		}
+	case "raise_budget":
+		if r.Payload.Text != "" || r.Payload.Reason != "" || r.Payload.TokenBudget == nil || !goalNumber(*r.Payload.TokenBudget) || *r.Payload.TokenBudget == 0 {
 			return "payload_invalid"
 		}
 	default:
@@ -595,5 +613,44 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		r.Outcome, r.Reason = "accepted", "prompt_delivered"
 	case "retry":
 		r.Outcome, r.Reason = "rejected", "retry_requires_terminal_successor_contract"
+	case "raise_budget":
+		if j.Agent != "codex" || status != "working" || j.NativeGoal == nil || !j.NativeGoal.Owned || j.NativeGoal.LastStatus != "active" || j.NativeGoal.Intent.TokenBudget == nil {
+			r.Outcome, r.Reason = "rejected", "goal_not_raiseable"
+			return
+		}
+		budget := *req.Payload.TokenBudget
+		if c.cfg.ActionGoalBudgetCeiling == 0 {
+			r.Outcome, r.Reason = "rejected", "budget_ceiling_unset"
+			return
+		}
+		if budget > c.cfg.ActionGoalBudgetCeiling {
+			r.Outcome, r.Reason = "rejected", "budget_ceiling_exceeded"
+			return
+		}
+		if budget <= *j.NativeGoal.Intent.TokenBudget {
+			r.Outcome, r.Reason = "rejected", "budget_not_increased"
+			return
+		}
+		effectCtx, done := context.WithTimeout(ctx, 20*time.Second)
+		updated, updateErr := c.actionRaiseBudget(effectCtx, host, r.NativeSessionID, j.NativeGoal.Intent, budget)
+		done()
+		if updateErr != nil || updated == nil || updated.TokenBudget == nil || *updated.TokenBudget != budget ||
+			updated.Objective != j.NativeGoal.Intent.Objective || updated.Status != "active" || updated.ThreadID != r.NativeSessionID {
+			r.Reason = "goal_budget_update_unconfirmed"
+			return
+		}
+		c.st.mu.Lock()
+		prior := j.NativeGoal.Intent.TokenBudget
+		j.NativeGoal.Intent.TokenBudget = &budget
+		err = c.st.saveLocked()
+		if err != nil {
+			j.NativeGoal.Intent.TokenBudget = prior
+		}
+		c.st.mu.Unlock()
+		if err != nil {
+			r.Reason = "goal_state_persistence_failed"
+			return
+		}
+		r.Outcome, r.Reason = "accepted", "goal_budget_updated"
 	}
 }
