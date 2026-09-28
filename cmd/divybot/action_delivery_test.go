@@ -350,6 +350,13 @@ func TestActionRaiseBudgetCeilingAndDurableReadback(t *testing.T) {
 			if r.Outcome != tc.wantOutcome || r.Reason != tc.wantReason || calls != tc.calls {
 				t.Fatalf("result %+v calls=%d", r, calls)
 			}
+			if tc.wantOutcome == "accepted" {
+				if r.TokenBudget == nil || *r.TokenBudget != tc.requested {
+					t.Fatalf("verified budget absent from receipt: %+v", r)
+				}
+			} else if r.TokenBudget != nil {
+				t.Fatalf("unverified budget entered receipt: %+v", r)
+			}
 			want := int64(100)
 			if tc.calls == 1 {
 				want = 150
