@@ -60,9 +60,12 @@ type actionReceipt struct {
 }
 
 type actionCalls struct {
-	list  func(context.Context, Host) ([]AgentInfo, error)
-	send  func(context.Context, Host, string, string) error
-	close func(context.Context, Host, string) error
+	list          func(context.Context, Host) ([]AgentInfo, error)
+	send          func(context.Context, Host, string, string) error
+	close         func(context.Context, Host, string) error
+	stopProcess   func(context.Context, Host, string, string) (*actionStopProcess, error)
+	processGone   func(context.Context, Host, actionStopProcess) (bool, error)
+	workspaceGone func(context.Context, Host, string) (bool, error)
 }
 
 func (c *Coord) actionList(ctx context.Context, h Host) ([]AgentInfo, error) {
@@ -327,6 +330,7 @@ func (c *Coord) actionTick(ctx context.Context) {
 			log.Printf("action %s: %v", entry.Name(), err)
 		}
 	}
+	c.actionObserveStops(ctx, root)
 }
 
 func (c *Coord) actionOne(ctx context.Context, receiptRoot, file string) error {
@@ -376,6 +380,9 @@ func (c *Coord) actionOne(ctx context.Context, receiptRoot, file string) error {
 		if err := c.publishActionOwner(dir, filepath.Join(dir, "intent.json"), filepath.Join(dir, "result.json")); err != nil {
 			return err
 		}
+		if err := c.actionPublishStopIndex(*prior); err != nil {
+			return err
+		}
 		return actionMoveDone(c.cfg.ActionRequestRoot, file, digest)
 	} else if !os.IsNotExist(err) {
 		return err
@@ -406,19 +413,26 @@ func (c *Coord) actionExecuteAndFinish(ctx context.Context, dir, file, digest st
 	} else if reason := actionRequestValid(req); reason != "" {
 		r.Outcome, r.Reason = "rejected", reason
 	} else {
-		c.deliverAction(ctx, req, &r)
+		c.deliverAction(ctx, dir, req, &r)
 	}
 	r.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := actionImmutableJSON(dir, "result.json", r); err != nil {
 		return err
 	}
-	if err := c.publishActionOwner(dir, filepath.Join(dir, "intent.json"), filepath.Join(dir, "result.json")); err != nil {
+	ownerPaths := []string{dir, filepath.Join(dir, "intent.json"), filepath.Join(dir, "result.json")}
+	if _, err := os.Lstat(filepath.Join(dir, "stop-anchor.json")); err == nil {
+		ownerPaths = append(ownerPaths, filepath.Join(dir, "stop-anchor.json"))
+	}
+	if err := c.publishActionOwner(ownerPaths...); err != nil {
+		return err
+	}
+	if err := c.actionPublishStopIndex(r); err != nil {
 		return err
 	}
 	return actionMoveDone(c.cfg.ActionRequestRoot, file, digest)
 }
 
-func (c *Coord) deliverAction(ctx context.Context, req actionRequest, r *actionReceipt) {
+func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest, r *actionReceipt) {
 	if req.Repository != c.cfg.Inbox {
 		r.Outcome, r.Reason = "rejected", "repository_mismatch"
 		return
@@ -517,6 +531,17 @@ func (c *Coord) deliverAction(ctx context.Context, req actionRequest, r *actionR
 		if status == "done" || status == "unknown" {
 			r.Outcome, r.Reason = "rejected", "agent_not_stoppable"
 			return
+		}
+		// Capture the exact native process identity before the workspace closes.
+		// A failed probe never blocks stop, but cannot create terminal evidence.
+		probeCtx, probeDone := context.WithTimeout(ctx, 12*time.Second)
+		anchor, probeErr := c.actionStopProcess(probeCtx, host, j.Pane, j.Agent)
+		probeDone()
+		if probeErr == nil && anchor != nil {
+			anchor.OperationID, anchor.RequestDigest = req.OperationID, r.RequestDigest
+			if err := actionImmutableJSON(dir, "stop-anchor.json", anchor); err != nil {
+				anchor = nil
+			}
 		}
 		// Fence and remove tracking before closing. A close timeout may still
 		// have taken effect; the persisted block prevents automatic respawn.
