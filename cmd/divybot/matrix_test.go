@@ -94,9 +94,15 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					var binding dispatchBinding
 					var public map[string]json.RawMessage
 					if err != nil || json.Unmarshal(data, &binding) != nil || json.Unmarshal(data, &public) != nil ||
-						public["profileRevision"] == nil || public["matrixRevision"] == nil ||
-						binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" || binding.ProfileRevision != cfg.Matrix.TargetRevisions["example/project"] || binding.MatrixRevision != cfg.Matrix.Revision {
+						public["profileRevision"] == nil || public["matrixSource"] == nil || public["matrixRevision"] == nil ||
+						binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" || binding.ProfileRevision != cfg.Matrix.TargetRevisions["example/project"] || binding.MatrixSource != "rickylabs/harness" || binding.MatrixRevision != cfg.Matrix.Revision {
 						t.Fatal("authoritative inbox issue was not bound before launch")
+					}
+					policyBytes, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "receipt.json"))
+					var policy matrixReceipt
+					if err != nil || json.Unmarshal(policyBytes, &policy) != nil ||
+						policy.Resolution.SourceRepository != "rickylabs/harness" || policy.Resolution.SourceRevision != binding.MatrixRevision {
+						t.Fatal("immutable policy receipt lost the Harness source identity")
 					}
 					private, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "binding.json"))
 					var native struct{ Host string }
@@ -343,8 +349,10 @@ func TestStrictBridgeEnvelope(t *testing.T) {
 func syntheticSource(t *testing.T) MatrixConfig {
 	t.Helper()
 	root := privateTestRoot(t)
-	runtime := filepath.Join(root, ".llm", "tools", "agentic", "runtime")
+	runtime := filepath.Join(root, "packages", "routing", "matrix")
 	writeFixture(t, filepath.Join(runtime, "contract.ts"), `export const EFFORTS=["medium","high"]; export const PROVIDER_KINDS=["invented-router"];`)
+	writeFixture(t, filepath.Join(runtime, "models.ts"), `export const ROUTING_MODEL_IDS={};`)
+	writeFixture(t, filepath.Join(runtime, "versions.ts"), `export const OPENCODE_TOOL={defaultVariant:"high"};`)
 	writeFixture(t, filepath.Join(runtime, "delegation-matrix.ts"), `
 export const WORKLOAD_TIERS=["feature","architecture"];
 export const DELEGATION_ROLES=["implementation","deep_research","plan_evaluation","implementation_evaluation","vision_evaluation"];
@@ -473,6 +481,13 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 			}
 		})
 	}
+	t.Run("revision-mismatch", func(t *testing.T) {
+		wrong := cfg
+		wrong.Revision = strings.Repeat("f", 40)
+		if _, e := resolveMatrix(context.Background(), wrong, base); e == nil {
+			t.Fatal("wrong pinned source revision accepted")
+		}
+	})
 	t.Run("changed-source", func(t *testing.T) {
 		writeFixture(t, filepath.Join(cfg.Source, "untracked"), "changed")
 		if _, e := resolveMatrix(context.Background(), cfg, base); e == nil {
@@ -481,7 +496,7 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 	})
 }
 
-func TestRealNetScriptReadOnlyProbe(t *testing.T) {
+func TestRealHarnessReadOnlyProbe(t *testing.T) {
 	source := os.Getenv("MATRIX_PROBE_SOURCE")
 	revision := os.Getenv("MATRIX_PROBE_REVISION")
 	if source == "" {
@@ -504,7 +519,7 @@ func TestBridgeProcessFailuresRefuse(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := syntheticSource(t)
 			source := map[string]string{"empty": "", "malformed": `console.log("invalid")`, "nonzero": "Deno.exit(1)", "oversized": `console.log("x".repeat(2*1024*1024))`, "timeout": "while(true){}"}[name]
-			writeFixture(t, filepath.Join(cfg.Source, ".llm", "tools", "agentic", "runtime", "cli", "delegation-matrix-table.ts"), source)
+			writeFixture(t, filepath.Join(cfg.Source, "packages", "routing", "matrix", "cli", "delegation-matrix-table.ts"), source)
 			testCommand(t, cfg.Source, "git", "add", ".")
 			msg := filepath.Join(t.TempDir(), "message")
 			writeFixture(t, msg, "Synthetic failure fixture\n")

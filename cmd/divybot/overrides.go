@@ -148,10 +148,10 @@ func parseOverrides(text string) Overrides {
 
 var errCodexEffort = matrixReason("codex-effort-invalid")
 
-// The matrix input vocabulary is NetScript runtime/contract.ts EFFORTS.
+// The matrix input vocabulary is Harness packages/routing/matrix/contract.ts EFFORTS.
 // This validates input, not model capability: independent observation still
 // owns the runtime verdict. Contract source:
-// https://github.com/rickylabs/netscript/blob/f3324909e0896cedc9729005bac5f508e122d6c6/.llm/tools/agentic/runtime/contract.ts
+// packages/routing/matrix/contract.ts in the pinned Harness checkout
 func validCodexEffort(effort string) bool {
 	switch effort {
 	case "", "low", "medium", "high", "xhigh", "max":

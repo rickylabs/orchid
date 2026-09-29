@@ -81,8 +81,8 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 		bad("matrix.source", "dirty-unreadable-or-revision-mismatch")
 	}
 	if filepath.IsAbs(m.Source) {
-		for _, name := range []string{"delegation-matrix.ts", "routing-policy.ts", "contract.ts", "cli/delegation-matrix-table.ts"} {
-			st, err := os.Stat(filepath.Join(m.Source, ".llm", "tools", "agentic", "runtime", name))
+		for _, name := range []string{"delegation-matrix.ts", "routing-policy.ts", "contract.ts", "models.ts", "versions.ts", "cli/delegation-matrix-table.ts"} {
+			st, err := os.Stat(filepath.Join(m.Source, "packages", "routing", "matrix", name))
 			if err != nil || !st.Mode().IsRegular() {
 				bad("matrix.source", "source-contract-files-unavailable")
 				break
@@ -333,7 +333,7 @@ func matrixConfigCLI(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("matrix", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	config := fs.String("config", "", "private dispatcher config")
-	source := fs.String("source", "", "NetScript checkout (build only)")
+	source := fs.String("source", "", "Harness checkout (build only)")
 	receipt := fs.String("receipt-root", "", "existing private receipt directory (build only)")
 	output := fs.String("out", "", "new private candidate config (build only)")
 	grant := fs.String("grant-input", "", "private MatrixGrant without generated binding fields (build only)")
