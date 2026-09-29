@@ -95,6 +95,11 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 	if !repositoryName.MatchString(cfg.Inbox) {
 		bad("inbox", "repository-required")
 	}
+	for i, host := range cfg.Hosts {
+		if !host.validClaudeChildEventRoot() {
+			bad(fmt.Sprintf("hosts[%d].claude_child_event_root", i), "absolute-clean-home-path-required")
+		}
+	}
 	if len(cfg.Targets) == 0 {
 		bad("targets", "at-least-one-target-required")
 	}

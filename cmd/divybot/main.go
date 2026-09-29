@@ -86,6 +86,10 @@ type Host struct {
 	// (gcp/vultr), so codex is pinned to residential hosts (mac) via ["claude"]
 	// on the datacenter boxes. claude auth is unaffected and runs anywhere.
 	Agents []string `json:"agents"`
+
+	// Optional private hook event directory inside this host's agent home.
+	// Only a dispatched Claude pane inherits it.
+	ClaudeChildEventRoot string `json:"claude_child_event_root,omitempty"`
 }
 
 // runsAgent reports whether this host is allowed to place the given agent.
@@ -208,6 +212,11 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	c.withDefaults()
+	for i, host := range c.Hosts {
+		if !host.validClaudeChildEventRoot() {
+			return nil, fmt.Errorf("hosts[%d].claude_child_event_root invalid", i)
+		}
+	}
 	if c.ActionGoalBudgetCeiling < 0 || !goalNumber(c.ActionGoalBudgetCeiling) {
 		return nil, fmt.Errorf("action_goal_budget_ceiling invalid")
 	}
@@ -414,6 +423,24 @@ func (h Host) agentHome() string {
 	return "/root"
 }
 
+func (h Host) validClaudeChildEventRoot() bool {
+	root := h.ClaudeChildEventRoot
+	if root == "" {
+		return true
+	}
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root || strings.ContainsAny(root, "\x00\r\n") {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(h.agentHome()), root)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func configureClaudeChildHookEnvironment(env map[string]string, host Host, agent string) {
+	if agent == "claude" && host.ClaudeChildEventRoot != "" && host.validClaudeChildEventRoot() {
+		env["HARNESS_CLAUDE_CHILD_EVENT_ROOT"] = host.ClaudeChildEventRoot
+	}
+}
+
 func (h Host) sshBase() []string {
 	a := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
 		"-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"}
@@ -590,6 +617,10 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	// pane run does not register it with herdr's agent lifecycle.
 	var b strings.Builder
 	b.WriteString(`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; `)
+	if env == nil {
+		env = map[string]string{}
+	}
+	configureClaudeChildHookEnvironment(env, h, agent)
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
