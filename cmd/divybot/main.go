@@ -2909,6 +2909,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	}
 	if known {
 		c.bindLiveNativeIdentity(ctx, host, j)
+		c.observeClaudeWorking(ctx, host, j)
 		if ref.Status == "working" || ref.Status == "blocked" {
 			c.retryBoundGoal(ctx, host, j)
 		}
@@ -3232,6 +3233,7 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 			}
 		}
 	}
+	c.clearClaudeWorking(j)
 	if ws != "" {
 		// Capture a bound native process before closing the workspace. A failed
 		// capture never prevents teardown, but cannot create terminal evidence.
