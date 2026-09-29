@@ -17,15 +17,15 @@ const (
 )
 
 // Herdr protocol 22 AgentInfo.agent_session is supplied by integrations, not
-// screen detection. The bundled Codex integration v8 accepts SessionStart stdin,
-// checks inherited CODEX_THREAD_ID, and sends pane.report_agent_session over IPC.
+// screen detection. The bundled Codex and Claude SessionStart integrations
+// report native IDs through pane.report_agent_session over IPC.
 // Never accept the path variant, arbitrary sources, or a different pane occupant.
 func nativeSessionFromStart(raw json.RawMessage, kind, label string, location *dispatchLocation) (string, nativeIdentityReason) {
 	return nativeSessionFromResponse(raw, "agent_started", kind, label, location)
 }
 
 func nativeSessionFromResponse(raw json.RawMessage, responseType, kind, label string, location *dispatchLocation) (string, nativeIdentityReason) {
-	if kind != "codex" {
+	if kind != "codex" && kind != "claude" {
 		return "", nativeUnsupported
 	}
 	var response struct {
@@ -55,7 +55,7 @@ func nativeSessionFromResponse(raw json.RawMessage, responseType, kind, label st
 		return "", nativeUnavailable
 	}
 	s := a.Session
-	if s.Source != "herdr:codex" || s.Agent != kind || s.Kind != "id" || !privateNativeID(s.Value) {
+	if s.Source != "herdr:"+kind || s.Agent != kind || s.Kind != "id" || !privateNativeID(s.Value) {
 		return "", nativeInvalid
 	}
 	return s.Value, ""

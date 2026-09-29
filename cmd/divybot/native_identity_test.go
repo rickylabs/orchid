@@ -91,11 +91,54 @@ func TestNativeSessionAuthority(t *testing.T) {
 	}
 }
 
-func nativeFixtureHost(t *testing.T, mode, id string) Host {
+func TestClaudeNativeSessionAuthority(t *testing.T) {
+	for _, test := range []string{"valid", "delayed", "wrong-source", "wrong-agent", "path", "wrong-pane", "wrong-workspace", "wrong-kind"} {
+		t.Run(test, func(t *testing.T) {
+			id := privateTestID(t)
+			v := nativeStartFixture(t, id)
+			a := v["agent"].(map[string]any)
+			s := a["agent_session"].(map[string]any)
+			a["agent"] = "claude"
+			s["agent"] = "claude"
+			s["source"] = "herdr:claude"
+			kind := "claude"
+			expectedResponse := "agent_started"
+			switch test {
+			case "delayed":
+				v["type"] = "agent_info"
+				expectedResponse = "agent_info"
+			case "wrong-source":
+				s["source"] = "herdr:codex"
+			case "wrong-agent":
+				s["agent"] = "codex"
+			case "path":
+				s["kind"] = "path"
+			case "wrong-pane":
+				a["pane_id"] = "w2:p1"
+			case "wrong-workspace":
+				a["workspace_id"] = "w2"
+			case "wrong-kind":
+				kind = "codex"
+			}
+			got, reason := nativeSessionFromResponse(fixtureJSON(t, v), expectedResponse, kind,
+				"fixture-agent", &dispatchLocation{PaneID: "w1:p1", WorkspaceID: "w1"})
+			if test == "valid" || test == "delayed" {
+				if got != id || reason != "" {
+					t.Fatal("authoritative Claude native identity rejected")
+				}
+			} else if got != "" || reason == "" {
+				t.Fatal("unauthoritative Claude native identity accepted")
+			}
+		})
+	}
+}
+
+func nativeFixtureHost(t *testing.T, mode, id, kind string) Host {
 	t.Helper()
 	h, _ := registrationHost(t, "")
 	t.Setenv("NATIVE_FIXTURE_MODE", mode)
 	t.Setenv("NATIVE_FIXTURE_ID", id)
+	t.Setenv("NATIVE_FIXTURE_KIND", kind)
 	script := `#!/usr/bin/env python3
 import json,os,sys
 args=sys.argv[1:];mode=os.environ['NATIVE_FIXTURE_MODE']
@@ -103,9 +146,10 @@ with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write(json.dumps(args)+'\
 if args[:2]==['workspace','create']:
  print(json.dumps({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}}))
 elif args[:2] in [['agent','start'],['agent','get']]:
- a={'agent':'codex','name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','interactive_ready':True}
+ kind=os.environ['NATIVE_FIXTURE_KIND']
+ a={'agent':kind,'name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','interactive_ready':True}
  if mode!='absent' and not (mode=='get' and args[1]=='start'):
-  a['agent_session']={'agent':'codex','source':'herdr:codex','kind':'id','value':os.environ['NATIVE_FIXTURE_ID']}
+  a['agent_session']={'agent':kind,'source':'herdr:'+kind,'kind':'id','value':os.environ['NATIVE_FIXTURE_ID']}
  if mode=='failed-start':
   print(json.dumps({'error':{'code':'agent_not_ready','message':os.environ['NATIVE_FIXTURE_ID']}}));sys.exit(1)
  print(json.dumps({'result':{'type':'agent_started' if args[1]=='start' else 'agent_info','agent':a}}))
@@ -118,60 +162,62 @@ else:print(json.dumps({'result':{}}))
 }
 
 func TestNativeLaunchBinding(t *testing.T) {
-	for _, mode := range []string{"native", "get", "absent", "failed-start"} {
-		t.Run(mode, func(t *testing.T) {
-			id := privateTestID(t)
-			h := nativeFixtureHost(t, mode, id)
-			r := registrationReceipt(t, "codex", Overrides{})
-			var logs bytes.Buffer
-			prior := log.Writer()
-			log.SetOutput(&logs)
-			defer log.SetOutput(prior)
-			_, _, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{}, r)
-			if (err != nil) != (mode == "failed-start") {
-				t.Fatal("identity availability changed launch outcome")
-			}
-			raw, e := os.ReadFile(filepath.Join(filepath.Dir(r.file), "binding.json"))
-			if e != nil {
-				t.Fatal("binding unavailable")
-			}
-			var binding struct{ NativeSessionID *string }
-			if json.Unmarshal(raw, &binding) != nil {
-				t.Fatal("binding invalid")
-			}
-			success := mode == "native" || mode == "get"
-			if success {
-				if binding.NativeSessionID == nil || *binding.NativeSessionID != id {
-					t.Fatal("successful launch lacks native binding")
+	for _, kind := range []string{"codex", "claude"} {
+		for _, mode := range []string{"native", "get", "absent", "failed-start"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				id := privateTestID(t)
+				h := nativeFixtureHost(t, mode, id, kind)
+				r := registrationReceipt(t, kind, Overrides{})
+				var logs bytes.Buffer
+				prior := log.Writer()
+				log.SetOutput(&logs)
+				defer log.SetOutput(prior)
+				_, _, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, kind, Overrides{}, r)
+				if (err != nil) != (mode == "failed-start") {
+					t.Fatal("identity availability changed launch outcome")
 				}
-			} else if binding.NativeSessionID != nil {
-				t.Fatal("inconclusive or failed launch published identity")
-			}
-			if mode == "absent" && (!strings.Contains(logs.String(), "native identity pending first-thread hook") || strings.Contains(logs.String(), "INCONCLUSIVE")) {
-				t.Fatal("early missing thread was reported as invalid rather than pending")
-			}
-			public, e := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
-			if e != nil {
-				t.Fatal("dispatch unavailable")
-			}
-			var dispatch map[string]any
-			if json.Unmarshal(public, &dispatch) != nil || dispatch["parentRunId"] != nil {
-				t.Fatal("public ancestry was repurposed")
-			}
-			if mode == "failed-start" && dispatch["state"] != "uncertain" {
-				t.Fatal("failure lost uncertain state")
-			}
-			calls, _ := os.ReadFile(os.Getenv("REGISTRATION_CALLS"))
-			for _, v := range []string{string(public), logs.String(), string(calls)} {
-				if strings.Contains(v, id) {
-					t.Fatal("native identity leaked to public record, log, or argv")
+				raw, e := os.ReadFile(filepath.Join(filepath.Dir(r.file), "binding.json"))
+				if e != nil {
+					t.Fatal("binding unavailable")
 				}
-			}
-			st, _ := os.Stat(filepath.Join(filepath.Dir(r.file), "binding.json"))
-			if st.Mode().Perm() != 0600 {
-				t.Fatal("binding mode widened")
-			}
-		})
+				var binding struct{ NativeSessionID *string }
+				if json.Unmarshal(raw, &binding) != nil {
+					t.Fatal("binding invalid")
+				}
+				success := mode == "native" || mode == "get"
+				if success {
+					if binding.NativeSessionID == nil || *binding.NativeSessionID != id {
+						t.Fatal("successful launch lacks native binding")
+					}
+				} else if binding.NativeSessionID != nil {
+					t.Fatal("inconclusive or failed launch published identity")
+				}
+				if mode == "absent" && (!strings.Contains(logs.String(), "native identity pending first-thread hook") || strings.Contains(logs.String(), "INCONCLUSIVE")) {
+					t.Fatal("early missing thread was reported as invalid rather than pending")
+				}
+				public, e := os.ReadFile(filepath.Join(filepath.Dir(r.file), "dispatch.json"))
+				if e != nil {
+					t.Fatal("dispatch unavailable")
+				}
+				var dispatch map[string]any
+				if json.Unmarshal(public, &dispatch) != nil || dispatch["parentRunId"] != nil {
+					t.Fatal("public ancestry was repurposed")
+				}
+				if mode == "failed-start" && dispatch["state"] != "uncertain" {
+					t.Fatal("failure lost uncertain state")
+				}
+				calls, _ := os.ReadFile(os.Getenv("REGISTRATION_CALLS"))
+				for _, v := range []string{string(public), logs.String(), string(calls)} {
+					if strings.Contains(v, id) {
+						t.Fatal("native identity leaked to public record, log, or argv")
+					}
+				}
+				st, _ := os.Stat(filepath.Join(filepath.Dir(r.file), "binding.json"))
+				if st.Mode().Perm() != 0600 {
+					t.Fatal("binding mode widened")
+				}
+			})
+		}
 	}
 }
 
