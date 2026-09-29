@@ -26,10 +26,11 @@ func retryActionFixture(t *testing.T) (*Coord, string, string, actionRequest, Is
 	}
 	d := dispatchBinding{SchemaVersion: 1, RunID: runID, Issue: dispatchIssue{Repo: "example/repo", Number: 7},
 		Source: "codex", Provider: "fixture", Model: "fixture-model", Effort: "high", State: "dispatched",
-		Host: "fixture-host", Profile: "leaf", ProfileRevision: strings.Repeat("a", 40), MatrixRevision: strings.Repeat("b", 40),
+		Host: "fixture-host", Profile: "leaf", ProfileRevision: strings.Repeat("a", 40), MatrixSource: matrixSourceRepository, MatrixRevision: strings.Repeat("b", 40),
 		TokenBudget: goalInt(100), BudgetSource: "route", Location: &dispatchLocation{PaneID: "pane-fixture", WorkspaceID: "workspace-fixture"}}
 	var receipt matrixReceipt
 	receipt.SchemaVersion = 1
+	receipt.Resolution.SourceRepository = matrixSourceRepository
 	receipt.Resolution.SourceRevision = d.MatrixRevision
 	receipt.Requested = map[string]string{"transport": "codex", "model": d.Model, "tier": "feature", "role": "implementation"}
 	write := func(name string, value any) {
@@ -100,12 +101,38 @@ func TestRetryBoundFailedRootDispatchesOnceWithExactPins(t *testing.T) {
 }
 
 func TestRetryRefusesMissingPinsOrTerminalProof(t *testing.T) {
-	for _, mode := range []string{"prebinding", "seat-only", "succeeded", "changed-brief", "wrong-identity"} {
+	for _, mode := range []string{"prebinding", "legacy-source", "receipt-source-mismatch", "seat-only", "succeeded", "changed-brief", "wrong-identity"} {
 		t.Run(mode, func(t *testing.T) {
 			c, spool, receipts, req, is, record := retryActionFixture(t)
 			if mode == "prebinding" {
 				if err := os.Remove(filepath.Join(record, "dispatch.json")); err != nil {
 					t.Fatal(err)
+				}
+			}
+			if mode == "legacy-source" {
+				var dispatch dispatchBinding
+				name := filepath.Join(record, "dispatch.json")
+				body, err := os.ReadFile(name)
+				if err != nil || json.Unmarshal(body, &dispatch) != nil {
+					t.Fatal("fixture dispatch")
+				}
+				dispatch.MatrixSource = ""
+				body, _ = json.Marshal(dispatch)
+				if os.WriteFile(name, body, 0600) != nil {
+					t.Fatal("fixture source")
+				}
+			}
+			if mode == "receipt-source-mismatch" {
+				var receipt matrixReceipt
+				name := filepath.Join(record, "receipt.json")
+				body, err := os.ReadFile(name)
+				if err != nil || json.Unmarshal(body, &receipt) != nil {
+					t.Fatal("fixture receipt")
+				}
+				receipt.Resolution.SourceRepository = "example/legacy"
+				body, _ = json.Marshal(receipt)
+				if os.WriteFile(name, body, 0600) != nil {
+					t.Fatal("fixture source")
 				}
 			}
 			if mode == "seat-only" {
@@ -129,7 +156,7 @@ func TestRetryRefusesMissingPinsOrTerminalProof(t *testing.T) {
 			c.actionTick(context.Background())
 			r := actionResult(t, receipts)
 			want := "retry_terminal_unproven"
-			if mode == "prebinding" {
+			if mode == "prebinding" || mode == "legacy-source" || mode == "receipt-source-mismatch" {
 				want = "retry_pins_unavailable"
 			}
 			if mode == "changed-brief" || mode == "wrong-identity" {
@@ -146,7 +173,7 @@ func TestRetryPinTupleRequiresEverySourceField(t *testing.T) {
 	budget := int64(100)
 	base := retryExpectation{OperationID: testActionID, Tier: "feature", Role: "implementation", Dispatch: dispatchBinding{
 		State: "dispatched", Source: "codex", Provider: "fixture", Model: "fixture-model", Effort: "high", Profile: "leaf",
-		ProfileRevision: strings.Repeat("a", 40), MatrixRevision: strings.Repeat("b", 40), Host: "fixture-host", TokenBudget: &budget, BudgetSource: "route"}}
+		ProfileRevision: strings.Repeat("a", 40), MatrixSource: matrixSourceRepository, MatrixRevision: strings.Repeat("b", 40), Host: "fixture-host", TokenBudget: &budget, BudgetSource: "route"}}
 	cfg := MatrixConfig{Revision: strings.Repeat("b", 40)}
 	route := matrixRoute{Transport: "codex", Provider: "fixture", Model: "fixture-model", Effort: "high", Tier: "feature", Role: "implementation", TokenBudget: &budget, BudgetSource: "route"}
 	host := Host{Name: "fixture-host"}
@@ -156,6 +183,7 @@ func TestRetryPinTupleRequiresEverySourceField(t *testing.T) {
 	for _, mutate := range []func(*retryExpectation){
 		func(v *retryExpectation) { v.Dispatch.Model = "other" }, func(v *retryExpectation) { v.Dispatch.Effort = "low" },
 		func(v *retryExpectation) { v.Dispatch.ProfileRevision = strings.Repeat("c", 40) }, func(v *retryExpectation) { v.Dispatch.MatrixRevision = strings.Repeat("c", 40) },
+		func(v *retryExpectation) { v.Dispatch.MatrixSource = "" },
 		func(v *retryExpectation) { v.Dispatch.Host = "other" }, func(v *retryExpectation) { v.Dispatch.TokenBudget = goalInt(101) },
 		func(v *retryExpectation) { v.Tier = "architecture" }, func(v *retryExpectation) { v.Role = "plan" },
 	} {
@@ -179,7 +207,7 @@ func TestRetryMatrixAttemptRefusesDriftBeforePersistence(t *testing.T) {
 	route := syntheticRoute()
 	expected := retryExpectation{OperationID: testActionID, Tier: route.Tier, Role: route.Role, Dispatch: dispatchBinding{
 		State: "dispatched", Source: route.Transport, Provider: route.Provider, Model: route.Model, Effort: route.Effort,
-		Profile: "leaf", ProfileRevision: cfg.Matrix.TargetRevisions[dept.Repo], MatrixRevision: cfg.Matrix.Revision,
+		Profile: "leaf", ProfileRevision: cfg.Matrix.TargetRevisions[dept.Repo], MatrixSource: matrixSourceRepository, MatrixRevision: cfg.Matrix.Revision,
 		Host: "fixture-node", BudgetSource: "unset"}}
 	makeDeps := func(e *retryExpectation, persisted *bool, refusal *matrixRefusal) matrixAttemptDeps {
 		return matrixAttemptDeps{retry: e, preflight: true,

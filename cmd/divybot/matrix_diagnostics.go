@@ -19,7 +19,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"goal-prompt-unconfirmed":      {"launch.prompt", "Agent registration was confirmed, but prompt acceptance was not; inspect the run before any new dispatch."},
 	"codex-effort-invalid":         {"route.effort", "The Codex effort is outside the matrix contract; correct the route before launching."},
 	"receipt-owner-invalid":        {"matrix.receipt_owner_uid/receipt_owner_gid", "Configure both nonnegative numeric owner IDs, or omit both."},
-	"source-missing":               {"matrix.source", "Configure an absolute clean NetScript checkout."},
+	"source-missing":               {"matrix.source", "Configure an absolute clean Harness checkout."},
 	"source-invalid":               {"matrix.source", "Verify the checkout is clean and HEAD equals matrix.revision."},
 	"revision-invalid":             {"matrix.revision", "Configure a full lowercase source commit."},
 	"receipt-root-invalid":         {"matrix.receipt_root", "Use an existing private directory, mode 0700, outside Git and without symlink aliases."},

@@ -37,6 +37,10 @@ type MatrixConfig struct {
 	BudgetDefaults  map[string]map[string]int64 `json:"budget_defaults,omitempty"`
 }
 
+// The identity travels with every new revision pin. An older receipt without this
+// field remains readable as historical evidence, but cannot be retried as Harness.
+const matrixSourceRepository = "rickylabs/harness"
+
 type MatrixPin struct {
 	Model  string `json:"model"`
 	Effort string `json:"effort"`
@@ -458,10 +462,11 @@ type matrixObservation struct {
 type matrixReceipt struct {
 	SchemaVersion int `json:"schemaVersion"`
 	Resolution    struct {
-		SourceRevision string `json:"sourceRevision"`
-		Digest         string `json:"digest"`
-		ResolvedAt     string `json:"resolvedAt"`
-		Selected       struct {
+		SourceRepository string `json:"sourceRepository,omitempty"`
+		SourceRevision   string `json:"sourceRevision"`
+		Digest           string `json:"digest"`
+		ResolvedAt       string `json:"resolvedAt"`
+		Selected         struct {
 			LogicalModel  string `json:"logicalModel"`
 			PhysicalModel string `json:"physicalModel"`
 		} `json:"selected"`
@@ -473,6 +478,7 @@ type matrixReceipt struct {
 func receiptFor(cfg MatrixConfig, route matrixRoute) matrixReceipt {
 	var r matrixReceipt
 	r.SchemaVersion = 1
+	r.Resolution.SourceRepository = matrixSourceRepository
 	r.Resolution.SourceRevision, r.Resolution.Digest = cfg.Revision, route.Digest
 	r.Resolution.ResolvedAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	r.Resolution.Selected.LogicalModel, r.Resolution.Selected.PhysicalModel = route.LogicalModel, route.Model
@@ -506,6 +512,7 @@ type dispatchBinding struct {
 	Host            string            `json:"host,omitempty"`
 	Profile         string            `json:"profile"`
 	ProfileRevision string            `json:"profileRevision"`
+	MatrixSource    string            `json:"matrixSource,omitempty"`
 	MatrixRevision  string            `json:"matrixRevision"`
 	Model           string            `json:"model"`
 	Effort          string            `json:"effort,omitempty"`
@@ -708,7 +715,7 @@ func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, targetRevision,
 	d := expected.Dispatch
 	return actionIDPattern.MatchString(expected.OperationID) && d.State == "dispatched" &&
 		d.Source == route.Transport && d.Provider == route.Provider && d.Model == route.Model && d.Effort == route.Effort &&
-		d.Profile == profile && d.ProfileRevision == targetRevision && d.MatrixRevision == cfg.Revision &&
+		d.Profile == profile && d.ProfileRevision == targetRevision && d.MatrixSource == matrixSourceRepository && d.MatrixRevision == cfg.Revision &&
 		d.Host == host.Name && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
 		expected.Tier == route.Tier && expected.Role == route.Role
 }
@@ -860,7 +867,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
-		Host: host.Name, Profile: o.Profile, ProfileRevision: revision, MatrixRevision: cfg.Revision,
+		Host: host.Name, Profile: o.Profile, ProfileRevision: revision, MatrixSource: matrixSourceRepository, MatrixRevision: cfg.Revision,
 		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	if e := handle.writeDispatch("reserved", nil); e != nil {

@@ -72,7 +72,7 @@ func findRetrySource(root, inbox string, req actionRequest) (*retrySource, strin
 			dispatch.SchemaVersion != 1 || dispatch.State != "dispatched" || dispatch.RunID != runID ||
 			dispatch.Issue.Repo != inbox || dispatch.Issue.Number != req.IssueNumber ||
 			dispatch.Location == nil || dispatch.Source != "codex" ||
-			!sourceRevision.MatchString(dispatch.ProfileRevision) || !sourceRevision.MatchString(dispatch.MatrixRevision) {
+			!sourceRevision.MatchString(dispatch.ProfileRevision) || dispatch.MatrixSource != matrixSourceRepository || !sourceRevision.MatchString(dispatch.MatrixRevision) {
 			return nil, "retry_pins_unavailable"
 		}
 		var fields map[string]json.RawMessage
@@ -95,7 +95,8 @@ func findRetrySource(root, inbox string, req actionRequest) (*retrySource, strin
 		}
 		var policy matrixReceipt
 		if readPrivateActionJSON(filepath.Join(record, "receipt.json"), &policy) != nil ||
-			policy.SchemaVersion != 1 || policy.Resolution.SourceRevision != dispatch.MatrixRevision ||
+			policy.SchemaVersion != 1 || policy.Resolution.SourceRepository != matrixSourceRepository ||
+			policy.Resolution.SourceRevision != dispatch.MatrixRevision ||
 			policy.Requested["transport"] != dispatch.Source || policy.Requested["model"] != dispatch.Model ||
 			policy.Requested["tier"] == "" || policy.Requested["role"] == "" {
 			return nil, "retry_pins_unavailable"

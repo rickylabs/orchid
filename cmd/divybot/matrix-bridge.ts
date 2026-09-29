@@ -1,4 +1,4 @@
-// Process adapter only. Policy and model identities come from the pinned NetScript source.
+// Process adapter only. Policy and model identities come from the pinned Harness source.
 // No provider connection, account discovery or evaluator observation happens here.
 const nonblank = (v: unknown): v is string => typeof v === "string" &&
   v.trim() === v && v.length > 0 && !/[\p{Cc}\u2028\u2029]/u.test(v);
@@ -8,9 +8,9 @@ let failure = "resolution-failed";
 async function main() {
   const input = JSON.parse(await new Response(Deno.stdin.readable).text());
   const base = new URL(`file://${Deno.cwd()}/`);
-  const authority = await import(new URL(".llm/tools/agentic/runtime/delegation-matrix.ts", base).href);
-  const policy = await import(new URL(".llm/tools/agentic/runtime/routing-policy.ts", base).href);
-  const contract = await import(new URL(".llm/tools/agentic/runtime/contract.ts", base).href);
+  const authority = await import(new URL("packages/routing/matrix/delegation-matrix.ts", base).href);
+  const policy = await import(new URL("packages/routing/matrix/routing-policy.ts", base).href);
+  const contract = await import(new URL("packages/routing/matrix/contract.ts", base).href);
   let role = input.role?.replaceAll("-", "_") || "";
   let tier = input.tier || "";
   let coordinator = false;
@@ -79,7 +79,7 @@ async function main() {
   requireValue(contract.EFFORTS.includes(selected.effort));
   requireValue(contract.PROVIDER_KINDS.includes(selected.provider));
 
-  const args = ["run", "--no-config", "--no-lock", ".llm/tools/agentic/runtime/cli/delegation-matrix-table.ts"];
+  const args = ["run", "--no-config", "--no-lock", "packages/routing/matrix/cli/delegation-matrix-table.ts"];
   if (!coordinator) args.push("--tier", tier, "--role", role);
   args.push("--json");
   const child = new Deno.Command("deno", { args, stdout: "piped", stderr: "null" }).spawn();

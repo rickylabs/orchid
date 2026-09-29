@@ -4,7 +4,7 @@
 preflight. `divybot matrix validate` checks an existing file before dispatch. Both exit
 before coordinator construction: no queue polling, host access, credential sync, launch,
 receipt reservation or GitHub write. They reuse the Go types and `briefDigest` in
-`cmd/divybot/matrix.go` and the same pinned NetScript bridge used by dispatch.
+`cmd/divybot/matrix.go` and the same pinned Harness bridge used by dispatch.
 
 ## Template
 
@@ -15,8 +15,8 @@ never commit the resolved file. Copying the example unchanged is not a working d
 ```json
 {
   "matrix": {
-    "source": "<ABSOLUTE_CLEAN_NETSCRIPT_CHECKOUT>",
-    "revision": "<FULL_NETSCRIPT_COMMIT>",
+    "source": "<ABSOLUTE_CLEAN_HARNESS_CHECKOUT>",
+    "revision": "<FULL_HARNESS_COMMIT>",
     "receipt_root": "<ABSOLUTE_PRIVATE_RECEIPT_DIRECTORY>",
     "target_revisions": {
       "<TARGET_OWNER>/<TARGET_REPOSITORY>": "<FULL_TARGET_COMMIT>"
@@ -131,7 +131,7 @@ field and reason, such as `matrix.revision: full-lowercase-commit-required`; no 
 or subprocess diagnostics are echoed. Duplicate/unknown matrix JSON fields, missing source,
 dirty or mismatched revisions, unsafe receipt roots, missing target pins, malformed grants,
 and selected-issue authorization/profile errors refuse. Arbitrary model/effort policy remains
-owned by the pinned NetScript source. Unused pins/grants receive structural checks; selected
+owned by the pinned Harness source. Unused pins/grants receive structural checks; selected
 issue policy is resolved by the bridge.
 
 For structural/source checks alone, omit both `-issue` and `-target`. The output explicitly
