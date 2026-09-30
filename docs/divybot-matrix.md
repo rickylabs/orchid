@@ -90,6 +90,10 @@ subscription windows plus governor capacity. Unknown entitlement is unavailable;
 sibling model cannot refill an exhausted subscription. Agy currently has no qualifying meter
 in this dispatcher, so this change does not claim Agy admission works.
 
+The read-only `matrix evaluator-preflight` command checks the pinned Harness evaluator against
+this host's OpenCode catalog and names a missing selected ID. It copies no model table and does
+not admit a dispatch. See [the operator command](matrix-configuration.md#read-only-evaluator-catalog-preflight-321).
+
 All evaluator roles refuse until a real observed model/session contract is available. No native
 observer is added. The owner approved this boundary. The bridge returns a closed refusal record
 with `status: inconclusive` and `reasonCode: observer-unavailable`; the common attempt records
