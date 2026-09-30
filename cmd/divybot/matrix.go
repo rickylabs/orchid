@@ -776,7 +776,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	now := time.Now()
 	var quotaConditions []string
 	c.gov.mu.Lock()
-	for _, transport := range []string{"claude", "codex", "agy"} {
+	for _, transport := range matrixTransports {
 		q := c.gov.q[transport]
 		cond := transportQuotaCondition(budget[transport], q, now, c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling)
 		if cond == "" {
@@ -794,6 +794,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	if e != nil {
 		if len(req.Available) == 0 && (refusalFor(e).ReasonCode == "resolution-failed" || refusalFor(e).ReasonCode == "route-unavailable") {
+			return refuseQuota(quotaDetail)
+		}
+		// With the pinned route's transport quota-blocked (left out of Available), the resolver
+		// reports what that leaves: a deviation needing an owner override, or no route. The cause
+		// is quota. Resolve once more with every transport offered; when that picks a transport
+		// the quota check blocked, report the quota condition instead.
+		if quotaOnly(ctx, d, cfg, req, len(quotaConditions) > 0) {
 			return refuseQuota(quotaDetail)
 		}
 		report(refusalFor(e))
@@ -895,6 +902,23 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	c.publishLaunchState(n, is, "launched", "")
 	return route.Transport, true
 }
+
+// The transports the governor meters, in the order the quota check reads them.
+var matrixTransports = []string{"claude", "codex", "agy"}
+
+// quotaOnly reports whether a refused request resolves once every transport is offered,
+// to a non-evaluator route on a transport the quota check left out. Only then was quota
+// the sole reason for the refusal.
+func quotaOnly(ctx context.Context, d matrixAttemptDeps, cfg MatrixConfig, req matrixRequest, blocked bool) bool {
+	if !blocked {
+		return false
+	}
+	unconstrained := req
+	unconstrained.Available = append([]string(nil), matrixTransports...)
+	route, e := d.resolve(ctx, cfg, unconstrained)
+	return e == nil && !strings.HasSuffix(route.Role, "_evaluation") && !containsString(req.Available, route.Transport)
+}
+
 func containsString(xs []string, value string) bool {
 	for _, x := range xs {
 		if x == value {
