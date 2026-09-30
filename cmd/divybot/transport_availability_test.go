@@ -56,7 +56,7 @@ func TestTransportAvailabilityReasons(t *testing.T) {
 }
 
 func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
-	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 9, 30, 12, 0, 0, 123456789, time.UTC)
 	later := now.Add(time.Hour).Unix()
 	quotas := map[string]quota{
 		"claude": {ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: later}, seven: RateLimit{UsedPct: 95, ResetsAt: later}},
@@ -64,7 +64,8 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 	}
 	budget := map[string]int{"claude": 2, "codex": 1, "agy": 0}
 	snapshot := buildTransportAvailability(budget, quotas, now, 90*time.Second, 92, time.Minute)
-	if snapshot.SchemaVersion != 1 || snapshot.ObservedAt != "2026-09-30T12:00:00Z" || snapshot.ValidUntil != "2026-09-30T12:01:00Z" {
+	// Millisecond UTC, whatever the clock's precision: the contract reads at most three digits.
+	if snapshot.SchemaVersion != 1 || snapshot.ObservedAt != "2026-09-30T12:00:00.123Z" || snapshot.ValidUntil != "2026-09-30T12:01:00.123Z" {
 		t.Fatalf("snapshot header %+v", snapshot)
 	}
 	want := map[string]string{"claude": "weekly-ceiling", "codex": "", "agy": "no-capacity"}

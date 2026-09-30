@@ -25,6 +25,10 @@ type transportAvailabilitySnapshot struct {
 	Transports    []transportAvailabilityRow `json:"transports"`
 }
 
+// Millisecond UTC times: the governance contract reads at most three fractional
+// digits, so the snapshot never needs rounding on the way through.
+const transportAvailabilityTime = "2006-01-02T15:04:05.000Z07:00"
+
 func transportAvailabilityPath(receiptRoot string) string {
 	return filepath.Join(receiptRoot, "governance", "transport-availability.json")
 }
@@ -41,8 +45,8 @@ func buildTransportAvailability(budget map[string]int, quotas map[string]quota, 
 		rows = append(rows, row)
 	}
 	return transportAvailabilitySnapshot{SchemaVersion: 1,
-		ObservedAt: now.UTC().Format(time.RFC3339Nano),
-		ValidUntil: now.Add(validFor).UTC().Format(time.RFC3339Nano),
+		ObservedAt: now.UTC().Format(transportAvailabilityTime),
+		ValidUntil: now.Add(validFor).UTC().Format(transportAvailabilityTime),
 		Transports: rows}
 }
 
