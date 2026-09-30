@@ -10,7 +10,10 @@ import (
 )
 
 // This is a current observation, not a terminal event. It is replaced on every
-// verified working tick and removed whenever that observation cannot be made.
+// verified tick with herdr's status for the bound session: "working" while the
+// agent works, "idle" or "done" once it has stopped at its prompt, so a finished
+// root reads as not running rather than unknown. It is removed whenever that
+// observation cannot be made, including "blocked" and "unknown".
 type claudeStatusObservation struct {
 	SchemaVersion   int    `json:"schemaVersion"`
 	RunID           string `json:"runId"`
@@ -55,9 +58,11 @@ func writeClaudeStatus(path string, owner *receiptOwner, row claudeStatusObserva
 	return syncDirectory(dir)
 }
 
-// A bound Claude session can use Herdr's exact-pane status as running evidence.
-// The lookup and receipt are rechecked before publication; no screen status is
-// promoted to terminal evidence, and a failed read cannot preserve "working".
+// A bound Claude session can use Herdr's exact-pane status as running evidence:
+// "working" is running, and "idle" or "done" is stopped at the prompt (not ended:
+// the agent can be prompted again). The lookup and receipt are rechecked before
+// publication; no screen status is promoted to terminal evidence, and a failed
+// read cannot preserve any status. It reports whether a row was written.
 func observeClaudeWorking(ctx context.Context, root, inbox string, owner *receiptOwner, j *Job,
 	read func(context.Context, string) (json.RawMessage, error), now time.Time) bool {
 	if j == nil || j.Agent != "claude" || !digestPattern.MatchString(j.DispatchKey) || !privateReceiptRoot(root) {
@@ -89,7 +94,12 @@ func observeClaudeWorking(ctx context.Context, root, inbox string, owner *receip
 			Status string `json:"agent_status"`
 		} `json:"agent"`
 	}
-	if decodeNativeJSON(raw, &response) != nil || response.Agent.Status != "working" {
+	if decodeNativeJSON(raw, &response) != nil {
+		return false
+	}
+	switch response.Agent.Status {
+	case "working", "idle", "done":
+	default:
 		return false
 	}
 	verified, currentID, err := loadNativeBindingReceipt(root, j.DispatchKey, j, inbox, owner, "claude")
@@ -98,7 +108,7 @@ func observeClaudeWorking(ctx context.Context, root, inbox string, owner *receip
 	}
 	row := claudeStatusObservation{SchemaVersion: 1, RunID: r.dispatch.RunID,
 		NativeSessionID: id, Host: j.Host, PaneID: j.Pane, WorkspaceID: j.Workspace,
-		Status: "working", ObservedAt: now.UTC().Format(time.RFC3339Nano)}
+		Status: response.Agent.Status, ObservedAt: now.UTC().Format(time.RFC3339Nano)}
 	if writeClaudeStatus(path, owner, row) != nil {
 		return false
 	}
