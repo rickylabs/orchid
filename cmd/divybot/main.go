@@ -2986,12 +2986,11 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	c.pollPR(ctx, n, j, host, ref.Status)
 
 	// Stranded: persistently idle with no PR → re-inject the goal (a poke that
-	// re-delivers the task, not a bare Enter — fixes the gcp strandings). Debounced
-	// to once per 10m and gated to idle only (not "done", which is often just
-	// between-turns) so we never poke-storm healthy sessions.
-	if known && (ref.Status == "idle" || ref.Status == "done") && j.PR == 0 && j.Pane != "" && time.Since(j.LastPoke) > 10*time.Minute {
+	// re-delivers the task, not a bare Enter — fixes the gcp strandings). See
+	// strandedPoke for when it is due and what it says.
+	if poke := strandedPoke(j, ref.Status, time.Now()); known && poke != "" {
 		gctx, gcancel := context.WithTimeout(ctx, 15*time.Second)
-		if host.send(gctx, j.Pane, "continue — implement the assigned issue fully, then open a PR. "+j.Goal) == nil {
+		if host.send(gctx, j.Pane, poke) == nil {
 			j.LastPoke = time.Now()
 		}
 		gcancel()
@@ -3003,6 +3002,34 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)
 		c.notify(fmt.Sprintf("issue #%d blocked — needs input", n))
 	}
+}
+
+// strandedPokeInterval: an idle job with no PR is re-sent its brief at most this
+// often, counted from spawn as well as from the last poke.
+const strandedPokeInterval = 10 * time.Minute
+
+// strandedPoke is the text re-sent to a persistently idle job with no PR, or ""
+// when none is due. Gated to idle/done and debounced so healthy sessions are
+// never poke-stormed.
+//
+// RUN-453 (2026-09-30, harness #504): LastPoke starts at zero, so the first idle
+// tick after launch poked at once. The poke became the root's first task turn,
+// and its fixed "then open a PR" contradicted a read-only brief that forbade a
+// PR. The codex root asked a question nothing in a dispatched pane answers, and
+// sat blocked for 15 minutes. The interval now also runs from SpawnedAt, and the
+// poke re-delivers the brief without adding a deliverable of its own.
+func strandedPoke(j *Job, status string, now time.Time) string {
+	if (status != "idle" && status != "done") || j.PR != 0 || j.Pane == "" {
+		return ""
+	}
+	last := j.LastPoke
+	if j.SpawnedAt.After(last) {
+		last = j.SpawnedAt
+	}
+	if now.Sub(last) <= strandedPokeInterval {
+		return ""
+	}
+	return "continue — work the assigned issue as its brief says. " + j.Goal
 }
 
 func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status string) {
