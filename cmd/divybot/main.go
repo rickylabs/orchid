@@ -763,13 +763,20 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		return st == "working" || st == "blocked"
 	}
 	// Wait for the TUI to render + be ready for input. codex boots into a
-	// directory-trust prompt (status "blocked" with "Yes, continue" selected);
-	// an Enter accepts it and the agent flips to idle/done.
+	// directory-trust prompt; an Enter accepts its selected default and the
+	// agent flips to idle/done. Older herdr reported that prompt as "blocked".
+	// codex 0.159.2's "Folder access / Trust this folder?" dialog is reported
+	// idle by herdr 0.9.1 (default fallback, no rule), so readiness also reads
+	// the screen: while the dialog shows, it is accepted and never counts as
+	// ready. (#509, RUN-453: the goal was typed into the dialog and lost, the
+	// Enter that followed accepted it, and codex's boot-time "working" was
+	// taken as the goal being accepted, leaving an empty composer.)
 	for i := 0; i < 30; i++ {
-		if ready() {
+		if codexTrustDialog(h.screen(ctx, target)) {
+			h.herdr(ctx, "pane", "send-keys", target, "Enter")
+		} else if ready() {
 			break
-		}
-		if h.agentStatusOf(ctx, target) == "blocked" {
+		} else if h.agentStatusOf(ctx, target) == "blocked" {
 			h.herdr(ctx, "pane", "send-keys", target, "Enter")
 		}
 		select {
@@ -824,6 +831,32 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		}
 	}
 	return fmt.Errorf("goal did not register after retries")
+}
+
+// codexTrustDialog reports codex's folder-trust dialog on the visible screen
+// (codex 0.159.2: "Trust this folder?" with "1. Trust and continue" selected).
+func codexTrustDialog(screen string) bool {
+	return strings.Contains(screen, "Trust this folder?") && strings.Contains(screen, "Trust and continue")
+}
+
+// screen is the pane's visible text. `agent read --source recent` does not show
+// codex's trust dialog; `pane read` does.
+func (h Host) screen(ctx context.Context, target string) string {
+	out, err := h.herdr(ctx, "pane", "read", target, "--lines", "30")
+	if err != nil {
+		return ""
+	}
+	raw, err := herdrUnwrap(out)
+	if err != nil {
+		return ""
+	}
+	var r struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &r) != nil {
+		return ""
+	}
+	return r.Text
 }
 
 func (h Host) read(ctx context.Context, target string, lines int) string {
