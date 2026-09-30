@@ -57,6 +57,30 @@ table CLI invents a default named pin. Historical NetScript receipts lack the ne
 `sourceRepository`/`matrixSource` identity and remain readable as history. They cannot
 be retried as Harness-pinned dispatches.
 
+## Codex default rollout (2026-09-30)
+
+The owner-selected Codex default is `gpt-6.1-sol` at `xhigh` for ordinary work and every
+coordinator scope. Former Luna cells, including trivial tasks and Codex research
+fallbacks, use Sol 6.1 at `low`. Complex and architecture implementation retain
+`gpt-6-astra` at their existing matrix efforts. Opus and Fable routing is unchanged; any remaining native Sonnet default
+uses `claude-sonnet-5-5`.
+Luna remains a catalog capability and is no longer the simple-task default.
+
+This policy lives in Harness, so divybot needs a clean checkout of the reviewed
+Harness routing commit and `matrix.revision` set to that exact commit. Keep
+`matrix.source` pointed at that checkout; do not add a model table to this daemon.
+When optional named pins select the ordinary Codex route, their value is
+`{"model":"sol","effort":"xhigh"}` for ordinary work and
+`{"model":"sol","effort":"low"}` for trivial work (or the matching physical model
+`gpt-6.1-sol`). Unpinned briefs use the new defaults automatically. A stale pin
+requesting Luna, an older physical Sol ID, or the wrong effort conflicts with the
+selected route and still requires the existing owner-override authority.
+Existing grants remain immutable and cannot be silently rewritten by a rollout.
+
+The operator applies the reviewed private candidate and restarts at active zero.
+The read-only matrix probe checks model, effort and the resulting Codex argv
+against the pinned source; it does not launch an agent or change live configuration.
+
 ## Admission and observation limits
 
 Only the existing native Claude, Codex and Agy mechanics are advertised. Codex's existing
