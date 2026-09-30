@@ -2274,20 +2274,7 @@ func (c *Coord) tick(ctx context.Context) {
 	// Admission budget = per-account governor cap − that account's running count.
 	// claude and codex pace independently against their own real meters, so a hot
 	// claude window never throttles codex (and vice-versa) — proper agent routing.
-	caps := c.curCaps()
-	c.st.mu.Lock()
-	running := map[string]int{}
-	for n, j := range c.st.Jobs {
-		ref, known := status[n]
-		if occupiesAdmissionSlot(j, ref, known) {
-			running[accountKey(j.Agent)]++
-		}
-	}
-	c.st.mu.Unlock()
-	budget := map[string]int{}
-	for a, cp := range caps {
-		budget[a] = cp - running[a]
-	}
+	budget := c.admissionBudget(status)
 
 	// Admit in target-priority order (high first) so a small high-value target
 	// isn't starved behind a large backlog when spawns are serialized. Within a
@@ -2402,6 +2389,27 @@ type agentRef struct {
 // prompt resumes it, the next fleet snapshot counts it again. Unknown status or
 // changed handles remain counted so a stale/mismatched observation cannot free
 // someone else's capacity.
+// admissionBudget is each account's governor cap less its running count. It also
+// publishes the transport availability this tick's admission will act on.
+func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
+	caps := c.curCaps()
+	c.st.mu.Lock()
+	running := map[string]int{}
+	for n, j := range c.st.Jobs {
+		ref, known := status[n]
+		if occupiesAdmissionSlot(j, ref, known) {
+			running[accountKey(j.Agent)]++
+		}
+	}
+	c.st.mu.Unlock()
+	budget := map[string]int{}
+	for a, cp := range caps {
+		budget[a] = cp - running[a]
+	}
+	c.publishTransportAvailability(budget, time.Now())
+	return budget
+}
+
 func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
 	if !known || j == nil || j.Pane == "" || j.Workspace == "" {
 		return true
