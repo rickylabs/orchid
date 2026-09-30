@@ -496,15 +496,87 @@ func TestFirstPartyBridgeBoundary(t *testing.T) {
 	})
 }
 
+// Model identities are fixture input, not compiled dispatcher policy. Check that
+// the new default crosses the bridge and reaches the real Codex argument builder.
+func TestMatrixBridgeSol61Efforts(t *testing.T) {
+	for _, effort := range []string{"low", "xhigh"} {
+		t.Run(effort, func(t *testing.T) { testMatrixBridgeSol61Effort(t, effort) })
+	}
+}
+
+func testMatrixBridgeSol61Effort(t *testing.T, effort string) {
+	cfg := syntheticSource(t)
+	runtime := filepath.Join(cfg.Source, "packages", "routing", "matrix")
+	for _, name := range []string{"contract.ts", "delegation-matrix.ts", "routing-policy.ts", "cli/delegation-matrix-table.ts"} {
+		path := filepath.Join(runtime, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.ReplaceAll(string(data), "invented-primary", "sol")
+		text = strings.ReplaceAll(text, `effort:"medium"`, `effort:"`+effort+`"`)
+		if name == "contract.ts" {
+			text = strings.ReplaceAll(text, `["medium","high"]`, `["low","medium","high","xhigh"]`)
+		}
+		if name == "routing-policy.ts" {
+			text = strings.ReplaceAll(text, `r.role==="deep_research"?"codex":"claude"`, `"codex"`)
+			text = strings.ReplaceAll(text, `route.model+"-physical"`, `"gpt-6.1-sol"`)
+		}
+		writeFixture(t, path, text)
+	}
+	testCommand(t, cfg.Source, "git", "add", ".")
+	msg := filepath.Join(t.TempDir(), "commit-message")
+	writeFixture(t, msg, "Synthetic Codex default rollout\n")
+	testCommand(t, cfg.Source, "git", "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "-q", "-F", msg)
+	cfg.Revision = testCommand(t, cfg.Source, "git", "rev-parse", "HEAD")
+	req := matrixRequest{Tier: "feature", Role: "implementation", Available: []string{"codex"}}
+	for _, pin := range []*MatrixPin{nil, {"sol", effort}, {"gpt-6.1-sol", effort}} {
+		req.Pin = pin
+		route, err := resolveMatrix(context.Background(), cfg, req)
+		if err != nil || route.Model != "gpt-6.1-sol" || route.LogicalModel != "sol" || route.Effort != effort || route.RequestedEffort != effort || route.Transport != "codex" {
+			t.Fatalf("Codex default was rewritten or refused: %v", err)
+		}
+		kind, args, err := interactiveAgentArgs("codex", Overrides{Model: route.Model, Effort: route.Effort})
+		if err != nil || kind != "codex" || strings.Join(args, " ") != `--dangerously-bypass-approvals-and-sandbox -m gpt-6.1-sol -c model_reasoning_effort="`+effort+`"` {
+			t.Fatal("Codex argv lost the selected model or effort")
+		}
+	}
+	for _, pin := range []MatrixPin{{"gpt-6-sol", "xhigh"}, {"sol", "high"}, {"luna", "max"}} {
+		req.Pin = &pin
+		if _, err := resolveMatrix(context.Background(), cfg, req); err == nil || refusalFor(err).ReasonCode != "override-required" {
+			t.Fatal("stale default pin bypassed owner-override authority")
+		}
+	}
+}
+
 func TestRealHarnessReadOnlyProbe(t *testing.T) {
 	source := os.Getenv("MATRIX_PROBE_SOURCE")
 	revision := os.Getenv("MATRIX_PROBE_REVISION")
 	if source == "" {
 		t.Skip("optional real-source acceptance; synthetic bridge gate still runs")
 	}
-	route, e := resolveMatrix(context.Background(), MatrixConfig{Source: source, Revision: revision}, matrixRequest{Tier: "feature", Role: "implementation", Available: []string{"claude", "codex"}})
-	if e != nil || route.Model == "" {
-		t.Fatal("real first-party resolution failed")
+	for _, tier := range []string{"simple", "straightforward", "feature", "complex", "architecture", "small_project", "project", "framework", "milestone"} {
+		t.Run(tier, func(t *testing.T) {
+			req := matrixRequest{Tier: tier, Role: "implementation", Available: []string{"claude", "codex"}}
+			model, effort := "gpt-6.1-sol", "xhigh"
+			switch tier {
+			case "simple":
+				effort = "low"
+			case "complex", "architecture":
+				req.Authorization = &MatrixAuthority{"owner", "Read-only routing rollout probe"}
+				model = "gpt-6-astra"
+				if tier == "complex" {
+					effort = "medium"
+				}
+			case "small_project", "project", "framework", "milestone":
+				req.Role = "coordinator"
+				req.ProfileText = "| `routing` | coordinator matrix `" + tier + "` |"
+			}
+			route, err := resolveMatrix(context.Background(), MatrixConfig{Source: source, Revision: revision}, req)
+			if err != nil || route.Model != model || route.Effort != effort || route.RequestedEffort != effort || route.Transport != "codex" {
+				t.Fatal("real first-party model or effort does not match the rollout policy")
+			}
+		})
 	}
 	if output := os.Getenv("MATRIX_SYNTHETIC_RECEIPT"); output != "" {
 		b, e := json.Marshal(receiptFor(MatrixConfig{Revision: strings.Repeat("a", 40)}, syntheticRoute()))
