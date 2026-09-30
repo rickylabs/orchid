@@ -26,12 +26,17 @@ type claudeStatusObservation struct {
 }
 
 func writeClaudeStatus(path string, owner *receiptOwner, row claudeStatusObservation) error {
+	return writePrivateJSON(path, ".claude-status-", owner, row)
+}
+
+// writePrivateJSON replaces path atomically with an owner-only JSON document.
+func writePrivateJSON(path, tempPrefix string, owner *receiptOwner, value any) error {
 	dir := filepath.Dir(path)
-	data, err := json.Marshal(row)
+	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, ".claude-status-")
+	f, err := os.CreateTemp(dir, tempPrefix)
 	if err != nil {
 		return err
 	}

@@ -927,44 +927,82 @@ func containsString(xs []string, value string) bool {
 	}
 	return false
 }
-func quotaHeadroomCondition(q quota, now time.Time, ceiling float64) string {
+
+// Transport availability reasons: one machine code per way a transport can be
+// unavailable to admission. Admission and the published snapshot
+// (transport_availability.go) read the same codes, so they cannot disagree.
+const (
+	availabilityNoCapacity           = "no-capacity"
+	availabilityMeterUnread          = "meter-unread"
+	availabilityMeterStale           = "meter-stale"
+	availabilityWindowExpired        = "window-expired"
+	availabilityFiveHourCeiling      = "5h-ceiling"
+	availabilityWeeklyCeiling        = "weekly-ceiling"
+	availabilityCeilingMisconfigured = "ceiling-misconfigured"
+)
+
+// The operator-facing words each reason had before the codes existed. Refusal
+// details keep them; the 5h/weekly split is in the codes.
+var availabilityConditions = map[string]string{
+	availabilityNoCapacity:           "blocked by capacity",
+	availabilityMeterUnread:          "absent",
+	availabilityMeterStale:           "stale",
+	availabilityWindowExpired:        "expired",
+	availabilityFiveHourCeiling:      "over ceiling",
+	availabilityWeeklyCeiling:        "over ceiling",
+	availabilityCeilingMisconfigured: "over ceiling",
+}
+
+func quotaHeadroomReason(q quota, now time.Time, ceiling float64) string {
 	if ceiling <= 0 || ceiling > 100 {
-		return "over ceiling"
+		return availabilityCeilingMisconfigured
 	}
 	// A zero reset means the meter did not publish this window. Every published
 	// window must be fresh and under ceiling; an empty meter grants no headroom.
 	published := 0
-	for _, r := range []RateLimit{q.five, q.seven} {
+	for _, window := range []struct {
+		limit  RateLimit
+		reason string
+	}{{q.five, availabilityFiveHourCeiling}, {q.seven, availabilityWeeklyCeiling}} {
+		r := window.limit
 		if r.ResetsAt == 0 {
 			continue
 		}
 		published++
 		if r.ResetsAt <= now.Unix() {
-			return "expired"
+			return availabilityWindowExpired
 		}
 		if r.UsedPct < 0 || r.UsedPct >= ceiling {
-			return "over ceiling"
+			return window.reason
 		}
 	}
 	if published == 0 {
-		return "absent"
+		return availabilityMeterUnread
 	}
 	return ""
+}
+
+func quotaHeadroomCondition(q quota, now time.Time, ceiling float64) string {
+	return availabilityConditions[quotaHeadroomReason(q, now, ceiling)]
 }
 
 func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
 	return quotaHeadroomCondition(q, now, ceiling) == ""
 }
 
-func transportQuotaCondition(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
+func transportAvailabilityReason(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
 	if budget <= 0 {
-		return "blocked by capacity"
+		return availabilityNoCapacity
 	}
 	if !q.ok {
-		return "absent"
+		return availabilityMeterUnread
 	}
 	if q.at.After(now) || now.Sub(q.at) > 3*sampleInterval {
-		return "stale"
+		return availabilityMeterStale
 	}
-	return quotaHeadroomCondition(q, now, ceiling)
+	return quotaHeadroomReason(q, now, ceiling)
+}
+
+func transportQuotaCondition(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
+	return availabilityConditions[transportAvailabilityReason(budget, q, now, sampleInterval, ceiling)]
 }
