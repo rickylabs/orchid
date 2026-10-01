@@ -8,6 +8,8 @@ import (
 	"io"
 	"os/exec"
 	"reflect"
+	"strings"
+	"time"
 )
 
 // Closed diagnostics only: native protocol bodies and process errors are private.
@@ -176,6 +178,51 @@ func (p *goalRPC) lastTurnFailed() (bool, error) {
 	default:
 		return false, goalError("goal-turn-source-unavailable")
 	}
+}
+
+// Installed native schema: newest completed turn, full items and an explicit
+// final_answer agent message. Commentary, failed turns and pending questions
+// never prove assignment completion. Native text remains private.
+func (p *goalRPC) lastTurnCompleted() (bool, error) {
+	raw, err := p.request("thread/turns/list", map[string]any{
+		"threadId": p.thread, "limit": 1, "sortDirection": "desc", "itemsView": "full",
+	})
+	if err != nil {
+		return false, err
+	}
+	var result struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if decodeNativeJSON(raw, &result) != nil || len(result.Data) != 1 {
+		return false, goalError("goal-turn-source-unavailable")
+	}
+	var turn struct {
+		ID          string `json:"id"`
+		Status      string `json:"status"`
+		ItemsView   string `json:"itemsView"`
+		CompletedAt *int64 `json:"completedAt"`
+		Items       []struct {
+			Type      string            `json:"type"`
+			Phase     string            `json:"phase"`
+			Text      string            `json:"text"`
+			Questions []json.RawMessage `json:"questions"`
+		} `json:"items"`
+	}
+	if decodeNativeJSON(result.Data[0], &turn) != nil || turn.ID == "" || turn.Status != "completed" ||
+		turn.ItemsView != "full" || turn.CompletedAt == nil || *turn.CompletedAt <= 0 || *turn.CompletedAt > time.Now().Unix() ||
+		len(turn.Items) == 0 || len(turn.Items) > 512 {
+		return false, nil
+	}
+	final := false
+	for _, item := range turn.Items {
+		if len(item.Questions) != 0 {
+			return false, nil
+		}
+		if item.Type == "agentMessage" && item.Phase == "final_answer" && strings.TrimSpace(item.Text) != "" {
+			final = true
+		}
+	}
+	return final, nil
 }
 func decodeGoal(raw json.RawMessage, thread string) (*nativeGoal, error) {
 	var fields map[string]json.RawMessage

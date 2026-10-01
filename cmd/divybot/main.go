@@ -243,23 +243,25 @@ type tracker struct {
 }
 
 type Job struct {
-	GoalDelivery string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
-	NativeGoal   *dispatchGoal `json:"native_goal,omitempty"`
-	DispatchKey  string        `json:"dispatch_key,omitempty"` // private launch receipt key
-	Issue        int           `json:"issue"`
-	Host         string        `json:"host"`
-	Label        string        `json:"label"`     // display name (claude-<n>)
-	Pane         string        `json:"pane"`      // herdr send/read target (pane id)
-	Workspace    string        `json:"workspace"` // herdr teardown handle
-	Target       string        `json:"target"`
-	Repo         string        `json:"repo"`
-	Branch       string        `json:"branch"`
-	Agent        string        `json:"agent"`
-	Title        string        `json:"title"`
-	Goal         string        `json:"goal"`
-	PR           int           `json:"pr"`
-	SpawnedAt    time.Time     `json:"spawned_at"`
-	LastPoke     time.Time     `json:"last_poke"`
+	OwnerMismatchNotice   string        `json:"owner_mismatch_notice,omitempty"`
+	CompletionUnprovenSeq *uint64       `json:"completion_unproven_seq,omitempty"`
+	GoalDelivery          string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
+	NativeGoal            *dispatchGoal `json:"native_goal,omitempty"`
+	DispatchKey           string        `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue                 int           `json:"issue"`
+	Host                  string        `json:"host"`
+	Label                 string        `json:"label"`     // display name (claude-<n>)
+	Pane                  string        `json:"pane"`      // herdr send/read target (pane id)
+	Workspace             string        `json:"workspace"` // herdr teardown handle
+	Target                string        `json:"target"`
+	Repo                  string        `json:"repo"`
+	Branch                string        `json:"branch"`
+	Agent                 string        `json:"agent"`
+	Title                 string        `json:"title"`
+	Goal                  string        `json:"goal"`
+	PR                    int           `json:"pr"`
+	SpawnedAt             time.Time     `json:"spawned_at"`
+	LastPoke              time.Time     `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -286,9 +288,10 @@ type Job struct {
 }
 
 type State struct {
-	MatrixNotices map[int]string      `json:"matrix_notices,omitempty"`
-	LaunchBlocks  map[int]launchBlock `json:"launch_blocks,omitempty"`
-	RetryFlights  map[int]retryFlight `json:"retry_flights,omitempty"`
+	CompletedRuns map[int]completedRun `json:"completed_runs,omitempty"`
+	MatrixNotices map[int]string       `json:"matrix_notices,omitempty"`
+	LaunchBlocks  map[int]launchBlock  `json:"launch_blocks,omitempty"`
+	RetryFlights  map[int]retryFlight  `json:"retry_flights,omitempty"`
 	mu            sync.Mutex
 	Jobs          map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
@@ -309,6 +312,7 @@ func loadState(path string) *State {
 	s := &State{Jobs: map[int]*Job{}, Continued: map[string]int{}, QuotaSamples: map[string][]QuotaSample{}, PrevCap: map[string]int{}, path: path}
 	if b, err := os.ReadFile(path); err == nil {
 		var raw struct {
+			CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
 			MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
 			Jobs          map[int]*Job             `json:"jobs"`
 			LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
@@ -318,6 +322,7 @@ func loadState(path string) *State {
 			PrevCap       map[string]int           `json:"prev_cap"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
+			s.CompletedRuns = raw.CompletedRuns
 			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
 			s.RetryFlights = raw.RetryFlights
@@ -347,6 +352,7 @@ func (s *State) save() error {
 // saveLocked commits launch fences before an external effect can occur.
 func (s *State) saveLocked() error {
 	b, err := json.MarshalIndent(struct {
+		CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
 		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
 		Jobs          map[int]*Job             `json:"jobs"`
 		Continued     map[string]int           `json:"continued"`
@@ -354,7 +360,7 @@ func (s *State) saveLocked() error {
 		PrevCap       map[string]int           `json:"prev_cap"`
 		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
 		RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
-	}{s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights}, "", "  ")
+	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1945,6 +1951,12 @@ type Coord struct {
 // and records it WITHOUT spawning — so a cutover or restart supervises existing
 // sessions instead of duplicating them.
 func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
+	c.st.mu.Lock()
+	_, completed := c.st.CompletedRuns[n]
+	c.st.mu.Unlock()
+	if completed {
+		return nil, false
+	}
 	tgt, ok := c.targetFor(is)
 	if !ok {
 		return nil, false
@@ -2207,6 +2219,9 @@ func (c *Coord) tick(ctx context.Context) {
 	if pollOK {
 		c.st.mu.Lock()
 		for n, j := range c.st.Jobs {
+			if _, completing := c.st.CompletedRuns[n]; completing {
+				continue // completion owns cleanup and paired absence, even if the issue closes
+			}
 			if _, ok := allOpen[n]; !ok {
 				jc := j
 				c.st.mu.Unlock()
@@ -2236,6 +2251,18 @@ func (c *Coord) tick(ctx context.Context) {
 	}
 
 	status, up := c.fleetStatus(ctx)
+	// Completion cleanup precedes admission and every possible continuation send.
+	c.st.mu.Lock()
+	finishing := make(map[int]*Job, len(c.st.Jobs))
+	for n, j := range c.st.Jobs {
+		finishing[n] = j
+	}
+	c.st.mu.Unlock()
+	for n, j := range finishing {
+		ref, known := status[n]
+		c.retireCompleted(ctx, n, j, ref, known)
+	}
+	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return ghIssueStateByNum(ctx, c.cfg.Inbox, n) })
 
 	// A persistently absent agent is an abandoned launch, not permission to retry.
 	// Fence it durably before removing tracking so a restart cannot respawn it.
@@ -2248,6 +2275,9 @@ func (c *Coord) tick(ctx context.Context) {
 	var dead []deadJob
 	c.st.mu.Lock()
 	for n, j := range c.st.Jobs {
+		if _, completing := c.st.CompletedRuns[n]; completing {
+			continue // an uncertain cleanup is never a disappeared launch
+		}
 		if _, alive := status[n]; alive {
 			j.Misses = 0 // present this tick — clear any flicker count
 			continue
@@ -2333,10 +2363,14 @@ func (c *Coord) tick(ctx context.Context) {
 	for _, n := range nums {
 		is := open[n]
 		c.st.mu.Lock()
+		_, completed := c.st.CompletedRuns[n]
 		j, live := c.st.Jobs[n]
 		c.st.mu.Unlock()
+		if completed {
+			continue // the durable fence also prevents adoption after job removal
+		}
 		if live {
-			c.supervise(ctx, n, j, status, is)
+			c.superviseActive(ctx, n, j, status, is)
 			continue
 		}
 		c.st.mu.Lock()
@@ -2411,11 +2445,12 @@ func (c *Coord) pollIssues(ctx context.Context) (open map[int]Issue, all map[int
 // agentRef is a live herdr agent resolved to an issue number, with the handles
 // needed to drive it (pane for send/read, workspace for close).
 type agentRef struct {
-	Host      string
-	Agent     string // claude | codex
-	Status    string // idle|working|blocked|done|unknown
-	Pane      string // send/read target
-	Workspace string // teardown handle
+	Host           string
+	Agent          string // claude | codex
+	Status         string // idle|working|blocked|done|unknown
+	Pane           string // send/read target
+	Workspace      string // teardown handle
+	StateChangeSeq uint64
 }
 
 // A completed herdr turn remains a warm, supervised job. It no longer consumes
@@ -2431,7 +2466,8 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 	running := map[string]int{}
 	for n, j := range c.st.Jobs {
 		ref, known := status[n]
-		if occupiesAdmissionSlot(j, ref, known) {
+		_, completing := c.st.CompletedRuns[n]
+		if completing || occupiesAdmissionSlot(j, ref, known) {
 			running[accountKey(j.Agent)]++
 		}
 	}
@@ -2492,7 +2528,7 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 			if n == 0 {
 				continue
 			}
-			out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID}
+			out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq}
 		}
 	}
 	return out, up
@@ -2877,6 +2913,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
+	goal += finalCommentInstruction(strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"))
 	if pre := ovr.goalPreamble(); pre != "" {
 		goal = pre + "\n" + goal
 	}
@@ -3020,20 +3057,36 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 }
 
 func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
+	ref, known := status[n]
+	if c.retireCompleted(ctx, n, j, ref, known) {
+		return
+	}
+	c.superviseActive(ctx, n, j, status, is)
+}
+
+// tick already checked completion before admission; do not repeat native reads.
+func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
+	c.st.mu.Lock()
+	_, fenced := c.st.CompletedRuns[n]
+	c.st.mu.Unlock()
+	if fenced {
+		return // completion owns every remaining effect for this run
+	}
 	host, ok := c.hosts[j.Host]
 	if !ok {
 		return
 	}
 	ref, known := status[n]
-	if known {
-		// Refresh the live handles each tick (pane/workspace survive across a
-		// herdr restart by re-resolving from the agent's cwd).
-		j.Pane, j.Workspace = ref.Pane, ref.Workspace
-	}
+	matched := known && ref.Host == j.Host && ref.Pane == j.Pane && ref.Workspace == j.Workspace && accountKey(ref.Agent) == accountKey(j.Agent)
 	if c.dry {
 		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
 		return
 	}
+	if known && !matched {
+		c.noteOwnerMismatch(j, ref)
+	}
+	suppressInput := !matched || ref.Status == "done"
+
 	if j.Agent == "opencode" {
 		if j.OpenCode == nil || j.OpenCode.Failure != "" {
 			if j.OpenCode == nil {
@@ -3069,7 +3122,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 		c.reportBlockedLaunch(ctx, n)
 		return
 	}
-	if known {
+	if !suppressInput {
 		c.bindLiveNativeIdentity(ctx, host, j)
 		c.observeClaudeWorking(ctx, host, j)
 		if ref.Status == "working" || ref.Status == "blocked" {
@@ -3100,7 +3153,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	// string match on pane scrollback is far too fragile to kill a live session
 	// over (stale 401s sit deep in scrollback; central auth-sync prevents real
 	// auth-death anyway). Read only the last few lines, and only when idle/blocked.
-	if known && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
+	if matched && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
 		rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 		txt := host.read(rctx, j.Pane, 4)
 		rcancel()
@@ -3114,12 +3167,13 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	}
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
-	c.pollPR(ctx, n, j, host, ref.Status)
+	// PR events may resume a matched, unfenced done worker; goal replays may not.
+	c.pollPR(ctx, n, j, host, ref.Status, !matched)
 
 	// Stranded: persistently idle with no PR → re-inject the goal (a poke that
 	// re-delivers the task, not a bare Enter — fixes the gcp strandings). See
 	// strandedPoke for when it is due and what it says.
-	if poke := strandedPoke(j, ref.Status, time.Now()); known && poke != "" {
+	if poke := strandedPoke(j, ref.Status, time.Now()); !suppressInput && poke != "" {
 		gctx, gcancel := context.WithTimeout(ctx, 15*time.Second)
 		if host.send(gctx, j.Pane, poke) == nil {
 			j.LastPoke = time.Now()
@@ -3128,7 +3182,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	}
 
 	// Blocked: agent waiting for input it can't get in the swarm → escalate.
-	if known && ref.Status == "blocked" {
+	if matched && ref.Status == "blocked" {
 		c.transitionGoal(ctx, j, "blocked")
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)
 		c.notify(fmt.Sprintf("issue #%d blocked — needs input", n))
@@ -3140,7 +3194,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 const strandedPokeInterval = 10 * time.Minute
 
 // strandedPoke is the text re-sent to a persistently idle job with no PR, or ""
-// when none is due. Gated to idle/done and debounced so healthy sessions are
+// when none is due. Gated to idle and debounced so healthy sessions are
 // never poke-stormed.
 //
 // RUN-453 (2026-09-30, harness #504): LastPoke starts at zero, so the first idle
@@ -3150,7 +3204,7 @@ const strandedPokeInterval = 10 * time.Minute
 // sat blocked for 15 minutes. The interval now also runs from SpawnedAt, and the
 // poke re-delivers the brief without adding a deliverable of its own.
 func strandedPoke(j *Job, status string, now time.Time) string {
-	if (status != "idle" && status != "done") || j.PR != 0 || j.Pane == "" {
+	if status != "idle" || j.PR != 0 || j.Pane == "" {
 		return ""
 	}
 	last := j.LastPoke
@@ -3163,7 +3217,8 @@ func strandedPoke(j *Job, status string, now time.Time) string {
 	return "continue — work the assigned issue as its brief says. " + j.Goal
 }
 
-func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status string) {
+func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status string, inputSuppressed ...bool) {
+	suppressInput := len(inputSuppressed) != 0 && inputSuppressed[0]
 	if j.PR == 0 {
 		if pr := ghPRByBranch(ctx, j.Repo, j.Branch, c.cfg.BotLogin); pr != 0 {
 			j.PR = pr
@@ -3188,7 +3243,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 		merged := v.State == "MERGED"
 		j.PR = 0
 		j.Track = tracker{}
-		if merged && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 5*time.Minute {
+		if !suppressInput && merged && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 5*time.Minute {
 			msg := "Your PR merged ✅. Keep the loop going: per the tracker, pick the NEXT subtask in scope (or split remaining work into sibling inbox issues so they run in parallel), implement it, and open the next PR. Don't stop while the tracker still has unfinished cells."
 			rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
 			if host.send(rctx, j.Pane, msg) == nil {
@@ -3243,7 +3298,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	// This is what made the swarm need hourly hand-nudging. Re-engage the idle
 	// worker each tick (debounced 15m) with the concrete blocker so the autonomous
 	// loop self-heals instead of waiting on a human.
-	if (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 15*time.Minute {
+	if !suppressInput && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 15*time.Minute {
 		if msg := stuckPRNudge(v); msg != "" {
 			rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
 			if host.send(rctx, j.Pane, msg) == nil {
@@ -3255,6 +3310,9 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 		}
 	}
 
+	if suppressInput {
+		return // polling/merge may proceed, but no native continuation or relay
+	}
 	lines, changed := diff(&j.Track, v, c.cfg.BotLogin)
 	if !changed {
 		return

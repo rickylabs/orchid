@@ -63,6 +63,8 @@ type actionReceipt struct {
 }
 
 type actionCalls struct {
+	completionPR      func(context.Context, *Job) (bool, error)
+	completed         func(context.Context, Host, *Job, string) (bool, error)
 	list              func(context.Context, Host) ([]AgentInfo, error)
 	send              func(context.Context, Host, string, string) error
 	close             func(context.Context, Host, string) error
@@ -478,7 +480,12 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	}
 	c.st.mu.Lock()
 	j := c.st.Jobs[req.IssueNumber]
+	_, completing := c.st.CompletedRuns[req.IssueNumber]
 	c.st.mu.Unlock()
+	if completing {
+		r.Outcome, r.Reason = "rejected", "agent_not_live"
+		return
+	}
 	if j == nil {
 		r.Reason = "job_not_found"
 		return

@@ -32,11 +32,11 @@ func TestStrandedPokeWaitsFromSpawnAndKeepsTheBrief(t *testing.T) {
 	if got := strandedPoke(job(now.Add(-time.Hour), now.Add(-5*time.Minute)), "done", now); got != "" {
 		t.Fatalf("poked %q five minutes after the last poke", got)
 	}
-	if got := strandedPoke(job(now.Add(-time.Hour), now.Add(-11*time.Minute)), "done", now); got == "" {
-		t.Fatal("no poke eleven minutes after the last one")
+	if got := strandedPoke(job(now.Add(-time.Hour), now.Add(-11*time.Minute)), "done", now); got != "" {
+		t.Fatal("completed turn was re-poked")
 	}
 	// Never while working or blocked, with a PR, or without a pane.
-	for _, status := range []string{"working", "blocked", "unknown"} {
+	for _, status := range []string{"working", "blocked", "unknown", "done"} {
 		if got := strandedPoke(job(now.Add(-time.Hour), time.Time{}), status, now); got != "" {
 			t.Fatalf("poked %q while %s", got, status)
 		}
@@ -56,7 +56,7 @@ func TestStrandedPokeIsTheOnlyStrandedSend(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(src)
-	if !strings.Contains(text, "if poke := strandedPoke(j, ref.Status, time.Now()); known && poke != \"\" {") {
+	if !strings.Contains(text, "if poke := strandedPoke(j, ref.Status, time.Now()); !suppressInput && poke != \"\" {") {
 		t.Fatal("the stranded tick does not use strandedPoke")
 	}
 	if strings.Contains(text, "implement the assigned issue fully, then open a PR") {
