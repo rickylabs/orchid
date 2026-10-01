@@ -3072,15 +3072,15 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 	ref, known := status[n]
 	matched := known && ref.Host == j.Host && ref.Pane == j.Pane && ref.Workspace == j.Workspace && accountKey(ref.Agent) == accountKey(j.Agent)
+	if c.dry {
+		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
+		return
+	}
 	if known && !matched {
 		c.noteOwnerMismatch(j, ref)
 	}
 	suppressInput := !matched || ref.Status == "done"
 
-	if c.dry {
-		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
-		return
-	}
 	if j.Agent == "opencode" {
 		if j.OpenCode == nil || j.OpenCode.Failure != "" {
 			if j.OpenCode == nil {

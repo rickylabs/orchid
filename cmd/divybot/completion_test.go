@@ -723,3 +723,31 @@ func TestCompletionMismatchedIdleSeatNeverReceivesInput(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletionDrySupervisionDoesNotPersistOwnerNotice(t *testing.T) {
+	ghLog, sshLog := completionSupervisionCommands(t)
+	c, j, _, _, _ := completionFixture(t)
+	h := c.hosts[j.Host]
+	h.SSH = "fixture-host"
+	c.hosts[j.Host] = h
+	ref := completionRef(j)
+	ref.Pane = "replacement-pane"
+	before, err := os.ReadFile(c.st.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.dry = true
+	c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+	after, err := os.ReadFile(c.st.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.OwnerMismatchNotice != "" || !bytes.Equal(before, after) {
+		t.Fatal("dry run persisted a mismatch notice")
+	}
+	for _, file := range []string{ghLog, sshLog} {
+		if calls, _ := os.ReadFile(file); len(calls) != 0 {
+			t.Fatal("dry run executed supervision effects")
+		}
+	}
+}
