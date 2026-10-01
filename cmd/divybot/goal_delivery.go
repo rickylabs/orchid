@@ -4,6 +4,7 @@ package main
 // jobs cannot acquire a completion verdict from an operator deadline either.
 func goalDeliveryUnconfirmed(j *Job) bool {
 	return j != nil && !j.RunMode && (j.GoalDelivery == "pending" || j.GoalDelivery == "blocked" ||
+		(j.Agent == "codex" && j.GoalDelivery != "confirmed") ||
 		(j.NativeGoal != nil && (j.GoalDelivery != "confirmed" || !j.NativeGoal.PromptConfirmed)))
 }
 

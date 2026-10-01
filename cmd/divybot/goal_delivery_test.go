@@ -11,11 +11,14 @@ import (
 )
 
 func TestGoalDeliveryBlockSurvivesRestartAndNeverClosesAtDeadline(t *testing.T) {
-	for _, delivery := range []string{"pending", "blocked", ""} {
+	for _, delivery := range []string{"pending", "blocked", "", "adopted-without-native-goal"} {
 		t.Run("delivery-"+delivery, func(t *testing.T) {
 			root, j, receipt := liveBindingFixture(t)
 			j.Host = "fixture-host"
 			j.GoalDelivery = delivery
+			if delivery == "adopted-without-native-goal" {
+				j.Agent, j.GoalDelivery, j.NativeGoal = "codex", "", nil
+			}
 			j.SpawnedAt = time.Now().Add(-2 * time.Hour)
 			j.Deadline = time.Now().Add(-time.Minute)
 			bin := filepath.Join(t.TempDir(), "bin")
@@ -55,7 +58,7 @@ print('{}')
 					t.Fatal("unconfirmed issue was torn down")
 				}
 				c.supervise(context.Background(), j.Issue, j, status, is)
-				if j.GoalDelivery != "blocked" || j.NativeGoal.PromptConfirmed || c.st.LaunchBlocks[j.Issue].Reason != "goal-prompt-unconfirmed" {
+				if j.GoalDelivery != "blocked" || (j.NativeGoal != nil && j.NativeGoal.PromptConfirmed) || c.st.LaunchBlocks[j.Issue].Reason != "goal-prompt-unconfirmed" {
 					t.Fatal("failed delivery was not durably fenced")
 				}
 			}
