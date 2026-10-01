@@ -579,7 +579,7 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt) (pane, ws string, err error) {
 	ctx, cancel, startBudget, budgetErr := h.agentSpawnContext(ctx, agent)
 	if budgetErr != nil {
-		return "", "", matrixSite("spawn.registration-render", budgetErr)
+		return "", "", matrixSite("spawn.registration-budget", budgetErr)
 	}
 	defer cancel()
 	command, renderErr := buildAgentCmd(agent, ovr)
