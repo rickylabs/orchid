@@ -86,6 +86,8 @@ type Host struct {
 	// (gcp/vultr), so codex is pinned to residential hosts (mac) via ["claude"]
 	// on the datacenter boxes. claude auth is unaffected and runs anywhere.
 	Agents []string `json:"agents"`
+	// Herdr waits for interactive readiness separately from detecting the process.
+	AgentStartTimeout string `json:"agent_start_timeout,omitempty"`
 
 	// Optional private hook event directory inside this host's agent home.
 	// Only a dispatched Claude pane inherits it.
@@ -213,6 +215,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	c.withDefaults()
 	for i, host := range c.Hosts {
+		if _, err := host.agentStartBudget(); err != nil {
+			return nil, fmt.Errorf("hosts[%d].agent_start_timeout invalid", i)
+		}
 		if !host.validClaudeChildEventRoot() {
 			return nil, fmt.Errorf("hosts[%d].claude_child_event_root invalid", i)
 		}
@@ -572,6 +577,11 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 // spawnAgent creates an isolated workspace, prepares its shell environment, then
 // registers an interactive agent in that exact pane before accepting goal delivery.
 func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt) (pane, ws string, err error) {
+	ctx, cancel, startBudget, budgetErr := h.agentSpawnContext(ctx, agent)
+	if budgetErr != nil {
+		return "", "", matrixSite("spawn.registration-budget", budgetErr)
+	}
+	defer cancel()
 	command, renderErr := buildAgentCmd(agent, ovr)
 	if renderErr != nil {
 		return "", "", matrixSite("spawn.command-render", renderErr)
@@ -649,15 +659,15 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if renderErr != nil {
 			return pane, ws, matrixSite("spawn.registration-render", renderErr)
 		}
-		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", "30000", "--"}
+		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", strconv.FormatInt(startBudget.Milliseconds(), 10), "--"}
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)
 		if e != nil {
-			return pane, ws, matrixSite("spawn.agent-start", errAgentRegistration)
+			return pane, ws, matrixSite("spawn.agent-start", registrationFailure(out, ctx.Err()))
 		}
 		raw, e := herdrUnwrap(out)
 		if e != nil {
-			return pane, ws, matrixSite("spawn.agent-envelope", errAgentRegistration)
+			return pane, ws, matrixSite("spawn.agent-envelope", registrationFailure(out, ctx.Err()))
 		}
 		var nativeID string
 		nativeID, identityReason = nativeSessionFromStart(raw, kind, label, location)
@@ -2858,15 +2868,12 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	}
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
-	sctx, scancel := context.WithTimeout(ctx, 40*time.Second)
 	if !c.st.reserveLaunch(n) {
-		scancel()
 		return matrixSite("launch.fence", errMatrix)
 	}
-	pane, ws, err := host.spawnAgent(sctx, label, workdir, env, agent, ovr, receipt)
+	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt)
 	if err != nil {
-		scancel()
-		log.Printf("issue #%d: agent registration failed; automatic launch abandoned", n)
+		log.Printf("issue #%d: agent registration failed; reason=%s; automatic launch abandoned", n, registrationFailureKind(err))
 		c.st.blockLaunch(n, "registration_failed")
 		if ws != "" {
 			cleanup, cancel := context.WithTimeout(ctx, 12*time.Second)
@@ -2876,7 +2883,6 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		c.reportBlockedLaunch(ctx, n)
 		return matrixSite("launch.registration", err)
 	}
-	scancel()
 
 	// herdr's agent-start result doesn't always carry the pane id; resolve it from
 	// the live fleet by cwd so the goal Enter lands on a real pane (send-keys needs

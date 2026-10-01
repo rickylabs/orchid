@@ -37,7 +37,7 @@ func registrationHost(t *testing.T, fail string) (Host, func() [][]string) {
 	t.Setenv("REGISTRATION_CALLS", logPath)
 	t.Setenv("REGISTRATION_FAILURE", fail)
 	script := `#!/usr/bin/env python3
-import json,os,sys
+import json,os,sys,time
 args=sys.argv[1:]
 with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
 if args[:2]==['workspace','create']:
@@ -48,6 +48,14 @@ elif args[:2]==['agent','start'] and os.environ.get('REGISTRATION_FAILURE')=='en
  print(json.dumps({'error':{'code':'agent_not_ready','message':'synthetic not ready'}}))
 elif args[:2]==['agent','start'] and os.environ.get('REGISTRATION_FAILURE')=='malformed':
  print('not a response')
+elif args[:2]==['agent','start'] and os.environ.get('REGISTRATION_FAILURE')=='timeout':
+ print(json.dumps({'error':{'code':'timeout','message':'PRIVATE-STARTUP-CANARY'}}));sys.exit(1)
+elif args[:2]==['agent','start'] and os.environ.get('REGISTRATION_FAILURE')=='delayed':
+ # Scale a cold startup: the old budget expires before readiness, without a live agent or 30s sleep.
+ if int(args[args.index('--timeout')+1]) < 120000:
+  print(json.dumps({'error':{'code':'timeout','message':'synthetic cold startup'}}));sys.exit(1)
+ time.sleep(.05)
+ print(json.dumps({'result':{}}))
 else:print(json.dumps({'result':{}}))
 `
 	if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0700); err != nil {
@@ -96,7 +104,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			if strings.Contains(got[1][3], "exec ") || !strings.Contains(got[1][3], "export FIXTURE_ENV=") {
 				t.Fatal("environment preparation must leave the shell available")
 			}
-			expected := append([]string{"agent", "start", "fixture-agent", "--kind", kind, "--pane", "w1:p1", "--timeout", "30000", "--"}, configuredArgs...)
+			expected := append([]string{"agent", "start", "fixture-agent", "--kind", kind, "--pane", "w1:p1", "--timeout", "120000", "--"}, configuredArgs...)
 			if !reflect.DeepEqual(got[2], expected) {
 				t.Fatalf("argv lost identity or quoting: %q", got[2])
 			}
@@ -105,7 +113,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 }
 
 func TestRegistrationRefusesBusyNotReadyAndMalformedResponses(t *testing.T) {
-	for _, failure := range []string{"busy", "envelope", "malformed"} {
+	for _, failure := range []string{"busy", "envelope", "malformed", "timeout"} {
 		t.Run(failure, func(t *testing.T) {
 			h, calls := registrationHost(t, failure)
 			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{}, registrationReceipt(t, "codex", Overrides{}))
@@ -117,6 +125,9 @@ func TestRegistrationRefusesBusyNotReadyAndMalformedResponses(t *testing.T) {
 			}
 			if len(calls()) != 3 {
 				t.Fatal("registration failure retried or delivered a goal")
+			}
+			if failure == "timeout" && registrationFailureKind(err) != "startup_timeout" {
+				t.Fatal("startup timeout lost its safe classification")
 			}
 		})
 	}
