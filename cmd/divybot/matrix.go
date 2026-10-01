@@ -777,8 +777,17 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	var quotaConditions []string
 	c.gov.mu.Lock()
 	for _, transport := range matrixTransports {
+		if transport == "opencode" && len(c.cfg.OpenCode.Providers) == 0 {
+			continue // A disabled adapter is not a blocked subscription quota.
+		}
 		q := c.gov.q[transport]
 		cond := transportQuotaCondition(budget[transport], q, now, c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling)
+		if transport == "opencode" {
+			cond = "blocked by capacity"
+			if c.cfg.OpenCode.valid() && budget[transport] > 0 && len(c.cfg.OpenCode.Providers) > 0 {
+				cond = ""
+			}
+		}
 		if cond == "" {
 			req.Available = append(req.Available, transport)
 		} else {
@@ -817,9 +826,17 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 			return refuse("harness-conflict")
 		}
 	}
-	if o.Router != "" {
-		return refuse("router-unsupported")
-	} // no gateway adapter or native router substitution
+	if err := routeRouterError(route, o); err != nil {
+		return refuse(string(err.(matrixReason)))
+	}
+	var openCodeProvider string
+	if agent == "opencode" {
+		native, _ := resolveOpenCodeRoute(Overrides{Model: route.Model, Router: o.Router, Effort: route.Effort})
+		openCodeProvider = native.Provider
+		if c.cfg.OpenCode.Providers[openCodeProvider].MaxActive < 1 || budget["opencode:"+openCodeProvider] < 1 {
+			return refuse("opencode-provider-capacity")
+		}
+	}
 	resolvedBudget, budgetSource, budgetErr := resolveRouteBudget(cfg, route.Tier, o.Profile, o)
 	if budgetErr != nil {
 		return refuse(closedGoalReason(budgetErr))
@@ -884,6 +901,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	// Supersede an earlier refusal before any launch effects. A failed launch
 	// remains inconclusive; it cannot revive a false no-agent refusal.
 	c.publishLaunchState(n, is, "launching", "")
+	if openCodeProvider != "" {
+		budget["opencode:"+openCodeProvider]-- // no refund after an ambiguous launch effect
+	}
 	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
 		var reason matrixReason
 		if errors.As(e, &reason) && reason == "goal-prompt-unconfirmed" {
@@ -903,8 +923,12 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	return route.Transport, true
 }
 
-// The transports the governor meters, in the order the quota check reads them.
-var matrixTransports = []string{"claude", "codex", "agy"}
+// Native subscription meters keep their published v1 contract. OpenCode
+// admission uses explicit provider capacity, not one fabricated vendor meter.
+var meteredTransports = []string{"claude", "codex", "agy"}
+
+// Adapters supported by the matrix dispatcher.
+var matrixTransports = []string{"claude", "codex", "agy", "opencode"}
 
 // quotaOnly reports whether a refused request resolves once every transport is offered,
 // to a non-evaluator route on a transport the quota check left out. Only then was quota

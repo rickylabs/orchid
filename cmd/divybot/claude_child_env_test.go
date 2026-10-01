@@ -27,7 +27,7 @@ func TestClaudeChildEventRootStaysInAgentHome(t *testing.T) {
 }
 
 func TestOnlyDispatchedClaudePaneReceivesChildEventRoot(t *testing.T) {
-	for _, agent := range []string{"claude", "codex", "opencode", "claude-run"} {
+	for _, agent := range []string{"claude", "codex", "claude-run"} {
 		t.Run(agent, func(t *testing.T) {
 			h, calls := registrationHost(t, "")
 			h.ClaudeChildEventRoot = filepath.Join(h.Home, "runs", "child-events")

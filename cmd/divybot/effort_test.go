@@ -104,7 +104,7 @@ func TestCodexEffortOtherTransports(t *testing.T) {
 		"agy":      {"agy", []string{"--dangerously-skip-permissions", "--model", "fixture-model", "--effort", "fixture-effort"}},
 		"claude":   {"claude", []string{"--dangerously-skip-permissions", "--model", "fixture-model"}},
 		"default":  {"claude", []string{"--dangerously-skip-permissions", "--model", "fixture-model"}},
-		"opencode": {"opencode", []string{"--model", "fixture-provider/fixture-model"}},
+		"opencode": {"opencode", []string{"--pure", "--agent", "build", "--model", "fixture-provider/fixture-model"}},
 	}
 	for transport, want := range wants {
 		kind, args, err := interactiveAgentArgs(transport, Overrides{Model: "fixture-model", Router: "fixture-provider", Effort: "fixture-effort"})
