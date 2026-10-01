@@ -161,3 +161,24 @@ the native agent.
 - [SKILL.md](SKILL.md) — operating a live swarm
 
 MIT License
+
+## AGY seats and source provider pools
+
+AGY has no native quota source. Admission requires an explicit static concurrency
+cap: `{"unmetered_transports":{"agy":{"max_active":1}}}`. Omitted or zero caps
+disable AGY; only `agy` is permitted, with an integer cap from 0 through 256.
+AGY never samples or consumes Claude's meter. Claude and Codex retain their native
+quota admission. Operator logs identify AGY as `meter=unmetered`.
+
+OpenCode provider aliases in the pinned routing catalog are normalized to the
+physical `opencode` transport only when the selected executor, exact model prefix,
+configured provider pool and source role restriction agree. Provider defaults
+remain native defaults; the dispatcher does not guess a concrete variant.
+
+Each admission tick writes `openCodeProviderPools` alongside the availability
+rows: sorted records `{provider,maxActive,active}` from configured pools and
+managed jobs. Unbound OpenCode jobs count in every pool. An absent list in older
+snapshots means unknown per-provider availability; an empty list means no pools.
+These are concurrency seats, without quota, credit or model-readiness claims.
+Upgrade the Harness reader and contracts decoder to **0.32.0 before deploying this
+emitter**: earlier strict readers reject the additive field.

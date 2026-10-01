@@ -60,6 +60,11 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 			return nil, nil, configProblem("matrix", "invalid-or-unknown-field")
 		}
 	}
+	if block, ok := raw["unmetered_transports"]; ok {
+		if string(block) == "null" || strictJSON(block, &cfg.UnmeteredTransports) != nil {
+			return nil, nil, configProblem("unmetered_transports", "invalid-or-unknown-field")
+		}
+	}
 	cfg.withDefaults()
 	return &cfg, raw, nil
 }
@@ -68,6 +73,9 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 	var out []matrixConfigProblem
 	bad := func(field, reason string) { out = append(out, matrixConfigProblem{field, reason}) }
 	m := cfg.Matrix
+	if !cfg.UnmeteredTransports.valid() {
+		bad("unmetered_transports", "agy-max-active-0-to-256-required")
+	}
 	if !cfg.OpenCode.valid() {
 		bad("opencode.providers", "provider-id-and-max-active-0-to-256-required")
 	}
@@ -241,6 +249,11 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 		}
 	}
 	req.Available = append([]string(nil), matrixTransports...)
+	for provider, limit := range cfg.OpenCode.Providers {
+		if limit.MaxActive > 0 {
+			req.OpenCodeProviders = append(req.OpenCodeProviders, provider)
+		}
+	}
 	route, err := d.resolve(ctx, cfg.Matrix, req)
 	if err != nil {
 		r := refusalFor(err)

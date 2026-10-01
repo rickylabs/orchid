@@ -7,10 +7,9 @@ import (
 )
 
 // A private, current snapshot of which matrix transports admission would offer
-// right now, and why each other one is unavailable. It uses the exact predicate
-// subscription admission uses (transportAvailabilityReason), plus aggregate
+// right now, and why each other one is unavailable. It uses the exact native-quota or explicit-seat admission predicate, plus aggregate
 // configured OpenCode provider capacity. Exact route discovery is still required.
-// The governance reader (contracts 0.31.0 `transportAvailability`) publishes it;
+// The governance reader (contracts 0.32.0 `transportAvailability`) publishes it;
 // the file carries no identity, path or quota figure.
 type transportAvailabilityRow struct {
 	Transport string  `json:"transport"`
@@ -19,10 +18,11 @@ type transportAvailabilityRow struct {
 }
 
 type transportAvailabilitySnapshot struct {
-	SchemaVersion int                        `json:"schemaVersion"`
-	ObservedAt    string                     `json:"observedAt"`
-	ValidUntil    string                     `json:"validUntil"`
-	Transports    []transportAvailabilityRow `json:"transports"`
+	SchemaVersion         int                        `json:"schemaVersion"`
+	ObservedAt            string                     `json:"observedAt"`
+	ValidUntil            string                     `json:"validUntil"`
+	Transports            []transportAvailabilityRow `json:"transports"`
+	OpenCodeProviderPools []openCodeProviderPool     `json:"openCodeProviderPools"`
 }
 
 // Millisecond UTC times: the governance contract reads at most three fractional
@@ -34,27 +34,23 @@ func transportAvailabilityPath(receiptRoot string) string {
 }
 
 func buildTransportAvailability(budget map[string]int, quotas map[string]quota, now time.Time,
-	sampleInterval time.Duration, ceiling float64, validFor time.Duration) transportAvailabilitySnapshot {
-	// Reader-first rollout: contracts 0.31.0 accepts the legacy subscription
+	sampleInterval time.Duration, ceiling float64, validFor time.Duration, limits UnmeteredTransportLimits, pools []openCodeProviderPool) transportAvailabilitySnapshot {
+	// Reader-first rollout: contracts 0.32.0 accepts the legacy subscription
 	// prefix and this fourth row. OpenCode has explicit provider seats; never
 	// infer a subscription/credit meter or model readiness from that capacity.
 	rows := make([]transportAvailabilityRow, 0, len(matrixTransports))
 	for _, transport := range matrixTransports {
-		reason := ""
-		if transport == "opencode" {
-			if budget[transport] <= 0 {
-				reason = availabilityNoCapacity
-			}
-		} else {
-			reason = transportAvailabilityReason(budget[transport], quotas[transport], now, sampleInterval, ceiling)
-		}
+		reason := admissionTransportReason(transport, budget[transport], quotas[transport], now, sampleInterval, ceiling, limits)
 		row := transportAvailabilityRow{Transport: transport, Available: reason == ""}
 		if reason != "" {
 			row.Reason = &reason
 		}
 		rows = append(rows, row)
 	}
-	return transportAvailabilitySnapshot{SchemaVersion: 1,
+	if pools == nil {
+		pools = []openCodeProviderPool{}
+	}
+	return transportAvailabilitySnapshot{SchemaVersion: 1, OpenCodeProviderPools: pools,
 		ObservedAt: now.UTC().Format(transportAvailabilityTime),
 		ValidUntil: now.Add(validFor).UTC().Format(transportAvailabilityTime),
 		Transports: rows}
@@ -80,7 +76,7 @@ func publishTransportAvailability(receiptRoot string, owner *receiptOwner, snaps
 	return writePrivateJSON(transportAvailabilityPath(receiptRoot), ".transport-availability-", owner, snapshot)
 }
 
-func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Time) {
+func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Time, pools []openCodeProviderPool) {
 	root := c.cfg.Matrix.ReceiptRoot
 	if root == "" || c.dry {
 		return
@@ -95,7 +91,7 @@ func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Tim
 		c.gov.mu.Unlock()
 		// Valid for two poll intervals: one missed tick does not blank it.
 		snapshot := buildTransportAvailability(budget, quotas, now, c.cfg.Governor.sampleIntervalDur(),
-			c.cfg.Governor.WeeklyCeiling, 2*durOr(c.cfg.PollInterval, 30*time.Second))
+			c.cfg.Governor.WeeklyCeiling, 2*durOr(c.cfg.PollInterval, 30*time.Second), c.cfg.UnmeteredTransports, pools)
 		err = publishTransportAvailability(root, owner, snapshot)
 	}
 	if err != nil && privateReceiptRoot(root) {

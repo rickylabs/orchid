@@ -46,7 +46,25 @@ async function main() {
   if (!auth) failure = "authorization-required";
   if (!coordinator) authority.assertPrivilegedTierAuthorization(tier, auth);
   failure = "resolution-failed";
-  const unavailableTransports = authority.MODEL_TRANSPORTS.filter((x: string) => !input.availableTransports.includes(x));
+  // Policy names billing/provider aliases; the dispatcher owns physical seats.
+  // Derive aliases and exact CLI prefixes from the pinned catalog, not a model list.
+  const providerOf = (model: unknown): string | null => {
+    if (typeof model !== "string") return null;
+    const match = /^([a-z0-9][a-z0-9._-]{0,63})\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.exec(model);
+    return match?.[1] ?? null;
+  };
+  const providerList = input.openCodeProviders ?? [];
+  requireValue(Array.isArray(providerList) && providerList.length <= 128 &&
+    providerList.every((x: unknown) => typeof x === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(x)) &&
+    new Set(providerList).size === providerList.length);
+  const providers = new Set(providerList);
+  const capabilities = Object.values(authority.MODEL_CATALOG).flatMap((m: any) => m.capabilities ?? []);
+  const aliases = new Set(capabilities.filter((c: any) => providerOf(c.model) &&
+    (!c.launch || c.launch.harness === "opencode")).map((c: any) => c.transport));
+  const unavailableTransports = authority.MODEL_TRANSPORTS.filter((x: string) => aliases.has(x)
+    ? !input.availableTransports.includes("opencode") || !capabilities.some((c: any) =>
+      c.transport === x && providers.has(providerOf(c.model)) && (!c.launch || c.launch.harness === "opencode"))
+    : !input.availableTransports.includes(x));
   // worktree is only echoed by this resolver; host placement binds the actual directory later.
   const request = { tier, role, worktree: ".", unavailableTransports, privilegedTierAuthorization: auth };
   const resolve = coordinator ? policy.resolveCoordinatorRoute : policy.resolveWorkloadRoute;
@@ -73,7 +91,23 @@ async function main() {
   failure = "resolution-failed";
   // The upstream override path omits the role restriction; it never waives this profile gate.
   requireValue(coordinator || authority.isTransportAllowedForRole(role, selected.transport, selected.family));
-  requireValue(input.availableTransports.includes(selected.transport));
+  let transport = selected.transport;
+  let provider = selected.provider;
+  let effort = selected.effort;
+  if (aliases.has(transport)) {
+    const physicalProvider = providerOf(selected.model);
+    const capability = authority.MODEL_CATALOG[selected.logicalModel]?.capabilities?.find((c: any) =>
+      c.transport === transport && c.model === selected.model);
+    requireValue(selected.agent === "opencode" && capability && physicalProvider &&
+      input.availableTransports.includes("opencode") && providers.has(physicalProvider) &&
+      (!capability.launch || (capability.launch.harness === "opencode" && capability.launch.router === physicalProvider)));
+    transport = "opencode";
+    provider = physicalProvider;
+    // A provider default is not the source resolver's historical concrete default variant.
+    if (selected.requestedEffort === "provider_default") effort = "provider_default";
+  } else {
+    requireValue(selected.agent !== "opencode" && input.availableTransports.includes(transport));
+  }
   for (const key of ["provider", "model", "logicalModel", "effort", "requestedEffort", "transport", "family"])
     requireValue(nonblank(selected[key]));
   requireValue(contract.EFFORTS.includes(selected.effort));
@@ -108,8 +142,8 @@ async function main() {
   requireValue(Array.isArray(routes));
   if (!selected.ownerMatrixOverride) requireValue(routes.some((x: any) => x.model === selected.logicalModel && x.effort === selected.requestedEffort));
   const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", raw)), (x) => x.toString(16).padStart(2, "0")).join("");
-  console.log(JSON.stringify({ provider: selected.provider, model: selected.model, logicalModel: selected.logicalModel,
-    effort: selected.effort, requestedEffort: selected.requestedEffort, transport: selected.transport,
+  console.log(JSON.stringify({ provider, model: selected.model, logicalModel: selected.logicalModel,
+    effort, requestedEffort: selected.requestedEffort, transport,
     family: selected.family, tier, role, digest }));
 }
 

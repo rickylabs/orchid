@@ -400,7 +400,7 @@ func TestOpenCodeAvailabilityUsesOnlyExplicitProviderCapacity(t *testing.T) {
 	now := time.Now()
 	for _, capacity := range []int{-1, 0, 1} {
 		for _, nativeQuota := range []quota{{}, {ok: true, at: now, seven: RateLimit{UsedPct: 100, ResetsAt: now.Add(time.Hour).Unix()}}} {
-			s := buildTransportAvailability(map[string]int{"opencode": capacity}, map[string]quota{"opencode": nativeQuota}, now, time.Minute, 92, time.Minute)
+			s := buildTransportAvailability(map[string]int{"opencode": capacity}, map[string]quota{"opencode": nativeQuota}, now, time.Minute, 92, time.Minute, nil, nil)
 			if len(s.Transports) != 4 || s.Transports[3].Transport != "opencode" {
 				t.Fatal("OpenCode capacity row is missing or out of order")
 			}
