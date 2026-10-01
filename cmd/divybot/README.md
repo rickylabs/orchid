@@ -104,16 +104,19 @@ privacy, uncertainty and the live verification gate.
 Codex interactive launch separates registration, assignment delivery and native goal ownership.
 The visible pane read accepts Herdr's plain text surface and legacy JSON `result.text`; malformed
 read envelopes fail confirmation. A fresh Codex composer must report `interactive_ready` and
-remain stable on the exact registered occupant before submission. The submitted assignment text
-must then be observed with working/blocked activity or before a later composer. A boot-time `done`
+remain stable on the exact registered occupant before submission. A fresh private delivery marker brackets the submitted text, so confirmation never requires
+the whole worker template or issue body in the last 60 visible lines. The marker must be observed
+with a newer state sequence and working/blocked activity, or before a later ready composer after
+a fast completed turn. Marker matching tolerates terminal wraps, including a split inside its nonce. A boot-time `done`
 sequence by itself is insufficient, including on Codex 0.159.2 and 0.159.3.
 
-There is at most one repair: an observed retained assignment gets Enter only; an unchanged empty
+There is at most one repair: an observed retained assignment gets Enter only (including the exact known-size collapsed-paste label); an unchanged empty
 composer can receive the text once more after repeated observations over ten seconds. Any changed
 occupant, state sequence, native-session report, screen or failed read prevents text replay.
 Unconfirmed delivery persists a launch fence and blocked job. Supervision reports the block, leaves
 the issue open and suppresses idle pokes, PR relay and timeout-completed closure. Restart cannot
-license another submission or spawn. Native goal creation remains behind durable prompt confirmation.
+license another submission or spawn. A placeholder alone never confirms delivery, and a hidden or wrong marker cannot license replay.
+Native goal creation remains behind durable prompt confirmation.
 
 Post-launch blocking uses the bounded six-field launch observation with `schemaVersion: 2`,
 `state: "blocked"` and closed `reasonCode: "goal-prompt-unconfirmed"`. Existing pre-launch

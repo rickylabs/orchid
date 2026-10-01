@@ -10,7 +10,7 @@ import (
 )
 
 func TestCodexPromptUsesInstalledPlainReadContractAndExactPane(t *testing.T) {
-	for _, format := range []string{"plain", "json"} {
+	for _, format := range []string{"plain", "json", "long-tail"} {
 		t.Run(format, func(t *testing.T) {
 			root := t.TempDir()
 			bin := filepath.Join(root, ".local", "bin")
@@ -30,7 +30,12 @@ if args[:2]==['agent','get']:
 elif args[:2]==['pane','read']:
  if '--source' not in args or args[args.index('--source')+1]!='visible':sys.exit(1)
  text='› '+open(path).read()+'\n• Reading fixture assignment\n' if submitted else 'OpenAI Codex (v0.159.3)\n› Anything interesting on the docket?\n'
- if os.environ['CODEx_PROMPT_FORMAT']=='plain':print(text)
+ if os.environ['CODEx_PROMPT_FORMAT']=='long-tail' and submitted:
+  rows=[]
+  for line in text.split('\n'):
+   rows.extend(line[i:i+100] for i in range(0,len(line),100))
+  text='\n'.join(rows[-60:])
+ if os.environ['CODEx_PROMPT_FORMAT']!='json':print(text)
  else:print(json.dumps({'result':{'text':text}}))
 elif args[:2]==['agent','prompt']:
  if args[2]!='w1:p1' or submitted:sys.exit(1)
@@ -42,7 +47,11 @@ else:sys.exit(1)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := (Host{Home: root}).injectGoal(ctx, "w1:p1", promptFixtureGoal, true); err != nil {
+			goal := promptFixtureGoal
+			if format == "long-tail" {
+				goal = realisticPromptGoal()
+			}
+			if err := (Host{Home: root}).injectGoal(ctx, "w1:p1", goal, true); err != nil {
 				t.Fatal("real-format native delivery was not confirmed", err)
 			}
 			calls, err := os.ReadFile(filepath.Join(root, "calls"))
@@ -58,7 +67,7 @@ func TestCodexPromptTrustDialogDoesNotReceiveTheGoal(t *testing.T) {
 		if h.enters == 0 {
 			s.Screen = "Folder access\nTrust this folder?\n› 1. Trust and continue\n"
 		} else if h.submits > 0 {
-			return consumedPrompt(), nil
+			return consumedPrompt(h.sent), nil
 		}
 		return s, nil
 	}}

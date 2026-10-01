@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const promptFixtureGoal = "Read the staged fixture assignment in full and carry it out."
@@ -19,23 +22,35 @@ type promptHarness struct {
 	time                          time.Time
 	read                          func(*promptHarness) (promptSnapshot, error)
 	limit                         int
+	goal, sent                    string
 }
 
 func (h *promptHarness) run() error {
 	h.time = time.Unix(100, 0)
-	return deliverCodexPrompt(context.Background(), promptFixture().Agent, promptFixtureGoal, promptCalls{
+	goal := h.goal
+	if goal == "" {
+		goal = promptFixtureGoal
+	}
+	return deliverCodexPrompt(context.Background(), promptFixture().Agent, goal, promptCalls{
 		observe: func(context.Context) (promptSnapshot, error) { h.reads++; return h.read(h) },
-		submit:  func(context.Context, string) error { h.submits++; return nil },
-		enter:   func(context.Context) error { h.enters++; return nil },
-		wait:    func(context.Context) bool { h.waits++; h.time = h.time.Add(2 * time.Second); return h.waits < h.limit },
-		now:     func() time.Time { return h.time },
+		submit: func(_ context.Context, text string) error {
+			h.submits++
+			if h.sent != "" && h.sent != text {
+				return errors.New("changed repair nonce")
+			}
+			h.sent = text
+			return nil
+		},
+		enter: func(context.Context) error { h.enters++; return nil },
+		wait:  func(context.Context) bool { h.waits++; h.time = h.time.Add(2 * time.Second); return h.waits < h.limit },
+		now:   func() time.Time { return h.time },
 	})
 }
-func consumedPrompt() promptSnapshot {
+func consumedPrompt(sent string) promptSnapshot {
 	s := promptFixture()
 	s.Agent.AgentStatus = "working"
 	s.Agent.StateChangeSeq++
-	s.Screen = "› " + promptFixtureGoal + "\n• Reading the fixture assignment\n"
+	s.Screen = "› " + sent + "\n• Reading the fixture assignment\n"
 	return s
 }
 func TestCodexPromptRequiresComposerAndInteractiveReadiness(t *testing.T) {
@@ -79,7 +94,7 @@ func TestCodexPromptBootDoneDoesNotConfirmOrReplay(t *testing.T) {
 func TestCodexPromptLostFirstSubmissionRetriesOnce(t *testing.T) {
 	h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
 		if h.submits == 2 {
-			return consumedPrompt(), nil
+			return consumedPrompt(h.sent), nil
 		}
 		return promptFixture(), nil
 	}}
@@ -90,11 +105,11 @@ func TestCodexPromptLostFirstSubmissionRetriesOnce(t *testing.T) {
 func TestCodexPromptRetainedComposerGetsOnlyEnter(t *testing.T) {
 	h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
 		if h.enters > 0 {
-			return consumedPrompt(), nil
+			return consumedPrompt(h.sent), nil
 		}
 		s := promptFixture()
 		if h.submits > 0 {
-			s.Screen = "› " + promptFixtureGoal
+			s.Screen = "› " + h.sent
 		}
 		return s, nil
 	}}
@@ -160,7 +175,7 @@ func TestCodexPromptVersionsAndFastTurn(t *testing.T) {
 			s.Screen = screen
 			if h.submits > 0 {
 				s.Agent.StateChangeSeq++
-				s.Screen = "› " + promptFixtureGoal + "\n• Fixture work completed\n› Ask Codex to do anything\n"
+				s.Screen = "› " + h.sent + "\n• Fixture work completed\n› Ask Codex to do anything\n"
 			}
 			return s, nil
 		}}
@@ -173,10 +188,10 @@ func TestCodexPromptDelayedRealConsumptionNeverDoubleSubmits(t *testing.T) {
 	h := &promptHarness{limit: 30, read: func(h *promptHarness) (promptSnapshot, error) {
 		s := promptFixture()
 		if h.submits > 0 {
-			s.Screen = "› " + promptFixtureGoal
+			s.Screen = "› " + h.sent
 			s.Agent.AgentStatus = "unknown"
 			if h.waits > 12 {
-				return consumedPrompt(), nil
+				return consumedPrompt(h.sent), nil
 			}
 		}
 		return s, nil
@@ -188,8 +203,128 @@ func TestCodexPromptDelayedRealConsumptionNeverDoubleSubmits(t *testing.T) {
 
 func TestCodexPromptFooterCannotCertifyRetainedComposer(t *testing.T) {
 	s := promptFixture()
-	s.Screen = "› " + promptFixtureGoal + "\n• Startup tip after the input box\n"
-	if codexPromptConsumed(s, promptFixtureGoal) {
+	sent, marker, err := markedCodexPrompt(promptFixtureGoal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Screen = "› " + sent + "\n• Startup tip after the input box\n"
+	if codexPromptConsumed(s, promptFixture(), marker) {
 		t.Fatal("unrelated footer certified a retained composer")
+	}
+}
+
+// This is the actual worker template with the permitted 4000-character body,
+// not the short one-line fixture used by the earlier delivery controls.
+func realisticPromptGoal() string {
+	body := strings.Repeat("Read the fixture implementation and its evidence before changing behavior.\n", 80)
+	return renderGoal("fixture/inbox", "fixture/project", "fixture", "Fixture long goal", body, "/fixture/project", "fixture-branch", "", 42)
+}
+func wrapPromptAndTakeTail(text string, width, lines int) string {
+	var rows []string
+	for _, line := range strings.Split(text, "\n") {
+		chars := []rune(line)
+		for len(chars) > width {
+			rows = append(rows, string(chars[:width]))
+			chars = chars[width:]
+		}
+		rows = append(rows, string(chars))
+	}
+	if len(rows) > lines {
+		rows = rows[len(rows)-lines:]
+	}
+	return strings.Join(rows, "\n")
+}
+func TestCodexPromptRealisticLongWrappedGoalAndVisibleTail(t *testing.T) {
+	for _, width := range []int{100, 17} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			goal := realisticPromptGoal()
+			if len(goal) < 4000 || strings.Count(goal, "\n") < 40 {
+				t.Fatal("long-goal control is not realistic")
+			}
+			h := &promptHarness{goal: goal, limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
+				if h.submits == 0 {
+					return promptFixture(), nil
+				}
+				s := consumedPrompt(h.sent)
+				s.Screen = wrapPromptAndTakeTail(s.Screen, width, 60)
+				if strings.Contains(s.Screen, goal) {
+					t.Fatal("fixture did not cut/wrap the whole goal")
+				}
+				return s, nil
+			}}
+			if err := h.run(); err != nil || h.submits != 1 || h.enters != 0 {
+				t.Fatal("long wrapped consumed assignment was falsely blocked/replayed", err)
+			}
+		})
+	}
+}
+func TestCodexPromptCollapsedLongPasteGetsEnterWithoutRepaste(t *testing.T) {
+	h := &promptHarness{goal: realisticPromptGoal() + " Unicode fixture é", limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
+		if h.submits == 0 {
+			return promptFixture(), nil
+		}
+		if h.enters > 0 {
+			s := consumedPrompt(h.sent)
+			s.Screen = wrapPromptAndTakeTail(s.Screen, 100, 60)
+			return s, nil
+		}
+		s := promptFixture()
+		s.Screen = fmt.Sprintf("› [Pasted Content %d chars]\n", utf8.RuneCountInString(h.sent))
+		return s, nil
+	}}
+	if err := h.run(); err != nil || h.submits != 1 || h.enters != 1 {
+		t.Fatal("retained collapsed paste was blocked or double pasted", err)
+	}
+}
+func TestCodexPromptMarkerAndNewSequenceAreBothRequired(t *testing.T) {
+	sent, marker, err := markedCodexPrompt(realisticPromptGoal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := promptFixture()
+	s := consumedPrompt(sent)
+	s.Agent.StateChangeSeq = before.Agent.StateChangeSeq
+	if codexPromptConsumed(s, before, marker) {
+		t.Fatal("unchanged working state certified a prompt")
+	}
+	s.Agent.StateChangeSeq++
+	s.Screen = "› [Pasted Content 5684 chars]\n• Working\n"
+	if codexPromptConsumed(s, before, marker) {
+		t.Fatal("generic paste placeholder certified unseen assignment")
+	}
+	s.Screen = "› Assignment delivery marker: orch-goal-wrong\n• Working\n"
+	if codexPromptConsumed(s, before, marker) {
+		t.Fatal("another marker certified this assignment")
+	}
+	s.Screen = "› " + sent
+	s.Agent.AgentStatus = "done"
+	if codexPromptConsumed(s, before, marker) {
+		t.Fatal("retained marked composer certified a completed turn")
+	}
+}
+func TestCodexPromptHiddenMarkerNeverCertifiesOrReplays(t *testing.T) {
+	h := &promptHarness{goal: realisticPromptGoal(), limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
+		s := promptFixture()
+		if h.submits > 0 {
+			s.Agent.StateChangeSeq++
+			s.Agent.AgentStatus = "working"
+			s.Screen = "› [Pasted Content 5684 chars]\n• Working\n"
+		}
+		return s, nil
+	}}
+	if h.run() == nil || h.submits != 1 || h.enters != 0 {
+		t.Fatal("unseen nonce was accepted or ambiguous active turn was replayed")
+	}
+}
+
+func TestCodexPromptRetainedBodyComposerGlyphIsNotALaterComposer(t *testing.T) {
+	sent, marker, err := markedCodexPrompt(realisticPromptGoal() + "\n› Ask Codex to do anything\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := consumedPrompt(sent)
+	s.Agent.AgentStatus = "done"
+	if codexPromptConsumed(s, promptFixture(), marker) {
+		t.Fatal("composer glyph inside unsubmitted text certified delivery")
 	}
 }

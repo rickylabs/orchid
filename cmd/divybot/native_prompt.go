@@ -3,10 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var errPromptUnconfirmed = errors.New("goal-prompt-unconfirmed")
@@ -49,25 +53,48 @@ func codexReady(s promptSnapshot) bool {
 		(s.Agent.AgentStatus == "idle" || s.Agent.AgentStatus == "done") && emptyCodexComposer(s.Screen)
 }
 
-func normalizedPrompt(s string) string { return strings.Join(strings.Fields(s), " ") }
-func promptVisible(screen, goal string) bool {
-	return goal != "" && strings.Contains(normalizedPrompt(screen), normalizedPrompt(goal))
+// The nonce is confined to the submitted prompt and private screen proof. Put it
+// at both ends so a long wrapped message can lose its head from the visible tail.
+func markedCodexPrompt(goal string) (string, string, error) {
+	if strings.TrimSpace(goal) == "" || len(goal) > 32*1024 {
+		return "", "", errPromptUnconfirmed
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", "", errPromptUnconfirmed
+	}
+	marker := "orch-goal-" + hex.EncodeToString(nonce[:])
+	line := "Assignment delivery marker: " + marker
+	return line + "\n" + goal + "\n" + line, marker, nil
+}
+func markerVisible(screen, marker string) bool {
+	// Terminal wrapping can split the nonce mid-word. Only this fresh nonce, not
+	// arbitrary goal prose, is matched after stripping display whitespace.
+	return marker != "" && strings.Contains(strings.Join(strings.Fields(screen), ""), marker)
+}
+func collapsedPromptRetained(s promptSnapshot, sent string) bool {
+	at := strings.LastIndex(s.Screen, "›")
+	if at < 0 {
+		return false
+	}
+	line := strings.TrimSpace(strings.SplitN(s.Screen[at+len("›"):], "\n", 2)[0])
+	// Codex0.159.3 uses Unicode scalar count, not bytes, for this exact label.
+	// A matching placeholder can license Enter only; it never confirms a turn.
+	return line == fmt.Sprintf("[Pasted Content %d chars]", utf8.RuneCountInString(sent))
 }
 
-// A boot-time done transition is not a turn. Require the actual submitted text
-// plus working/blocking evidence or a later composer.
-func codexPromptConsumed(s promptSnapshot, goal string) bool {
-	if !promptVisible(s.Screen, goal) {
+// Boot-time done, a placeholder, or the assignment text alone is not a turn.
+// Require the fresh marker plus a newer sequence and consumed-turn evidence.
+func codexPromptConsumed(s, before promptSnapshot, marker string) bool {
+	if s.Agent.StateChangeSeq <= before.Agent.StateChangeSeq || !markerVisible(s.Screen, marker) {
 		return false
 	}
 	if s.Agent.AgentStatus == "working" || s.Agent.AgentStatus == "blocked" {
 		return true
 	}
 	at := strings.LastIndex(s.Screen, "›")
-	if at >= 0 && promptVisible(s.Screen[:at], goal) {
-		return true
-	}
-	return false
+	return s.Agent.InteractiveReady && s.Agent.AgentStatus == "done" && at >= 0 && emptyCodexComposer(s.Screen) &&
+		markerVisible(s.Screen[:at], marker) && !markerVisible(s.Screen[at:], marker)
 }
 
 // One submission and at most one evidence-safe repair. Uncertain delivery never
@@ -101,7 +128,11 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 			return errPromptUnconfirmed
 		}
 	}
-	if err := d.submit(ctx, goal); err != nil {
+	sent, marker, err := markedCodexPrompt(goal)
+	if err != nil || markerVisible(before.Screen, marker) {
+		return errPromptUnconfirmed
+	}
+	if err := d.submit(ctx, sent); err != nil {
 		return errPromptUnconfirmed
 	}
 	started := d.now()
@@ -111,15 +142,17 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 		if err != nil || !samePromptOccupant(before.Agent, after.Agent) {
 			return errPromptUnconfirmed
 		}
-		if codexPromptConsumed(after, goal) {
+		if codexPromptConsumed(after, before, marker) {
 			return nil
 		}
-		if promptVisible(after.Screen, goal) {
+		at := strings.LastIndex(after.Screen, "›")
+		markedComposer := at >= 0 && markerVisible(after.Screen[at:], marker)
+		placeholder := after.Stable && after.Agent.StateChangeSeq == before.Agent.StateChangeSeq && collapsedPromptRetained(after, sent)
+		if markerVisible(after.Screen, marker) || placeholder {
 			seen = true
-			// Text landed but Enter did not: submit the existing composer once,
-			// never paste another copy into it.
-			at := strings.LastIndex(after.Screen, "›")
-			if !repaired && at >= 0 && promptVisible(after.Screen[at:], goal) && after.Agent.InteractiveReady && (after.Agent.AgentStatus == "idle" || after.Agent.AgentStatus == "done") {
+			// Text landed but Enter did not. A known-size collapsed paste can
+			// receive Enter once; it never licenses a second copy or completion.
+			if !repaired && (markedComposer || placeholder) && after.Stable && after.Agent.InteractiveReady && (after.Agent.AgentStatus == "idle" || after.Agent.AgentStatus == "done") {
 				if err := d.enter(ctx); err != nil {
 					return errPromptUnconfirmed
 				}
@@ -134,7 +167,7 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 			seen = true
 		}
 		if !repaired && !seen && unchanged >= 3 && d.now().Sub(started) >= 10*time.Second {
-			if err := d.submit(ctx, goal); err != nil {
+			if err := d.submit(ctx, sent); err != nil {
 				return errPromptUnconfirmed
 			}
 			repaired = true
