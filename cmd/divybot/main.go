@@ -3066,6 +3066,12 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 
 // tick already checked completion before admission; do not repeat native reads.
 func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
+	c.st.mu.Lock()
+	_, fenced := c.st.CompletedRuns[n]
+	c.st.mu.Unlock()
+	if fenced {
+		return // completion owns every remaining effect for this run
+	}
 	host, ok := c.hosts[j.Host]
 	if !ok {
 		return
@@ -3161,7 +3167,8 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
-	c.pollPR(ctx, n, j, host, ref.Status, suppressInput)
+	// PR events may resume a matched, unfenced done worker; goal replays may not.
+	c.pollPR(ctx, n, j, host, ref.Status, !matched)
 
 	// Stranded: persistently idle with no PR → re-inject the goal (a poke that
 	// re-delivers the task, not a bare Enter — fixes the gcp strandings). See

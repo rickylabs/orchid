@@ -568,7 +568,7 @@ func TestCompletionPRScopeRequiresConfirmedAbsence(t *testing.T) {
 }
 
 func TestCompletionUnprovenSupervisionPollsAndMergesWithoutInput(t *testing.T) {
-	for _, name := range []string{"no-final", "receipt-missing", "open-pr", "merge-pr", "merged-pr", "stuck-draft"} {
+	for _, name := range []string{"no-final", "receipt-missing", "merge-pr"} {
 		t.Run(name, func(t *testing.T) {
 			ghLog, sshLog := completionSupervisionCommands(t)
 			c, j, _, _, closes := completionFixture(t)
@@ -581,15 +581,9 @@ func TestCompletionUnprovenSupervisionPollsAndMergesWithoutInput(t *testing.T) {
 			if name == "receipt-missing" {
 				os.Remove(filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record", "binding.json"))
 			}
-			if name == "open-pr" || name == "merge-pr" || name == "merged-pr" || name == "stuck-draft" {
+			if name == "merge-pr" {
 				j.PR = 8
 				c.actions.completionPR = func(context.Context, *Job) (bool, error) { return true, nil }
-			}
-			if name == "merged-pr" {
-				t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"MERGED"}`)
-			}
-			if name == "stuck-draft" {
-				t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","isDraft":true,"statusCheckRollup":[{"name":"check","conclusion":"SUCCESS"}]}`)
 			}
 			if name == "merge-pr" {
 				c.cfg.Targets = []Target{{Repo: j.Repo, AutoMerge: true}}
@@ -748,6 +742,131 @@ func TestCompletionDrySupervisionDoesNotPersistOwnerNotice(t *testing.T) {
 	for _, file := range []string{ghLog, sshLog} {
 		if calls, _ := os.ReadFile(file); len(calls) != 0 {
 			t.Fatal("dry run executed supervision effects")
+		}
+	}
+}
+
+func completionPRWorker(t *testing.T, agent, event string) (*Coord, *Job, string, string) {
+	t.Helper()
+	ghLog, sshLog := completionSupervisionCommands(t)
+	c, j, _, _, _ := completionFixture(t)
+	j.Agent = agent
+	j.PR = 8
+	j.Branch = "fixture-branch"
+	j.LastPoke = time.Now()
+	h := c.hosts[j.Host]
+	h.SSH = "fixture-host"
+	c.hosts[j.Host] = h
+	c.actions.completionPR = nil // exercise the real early pending-PR path
+	c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { return false, nil }
+	var view string
+	switch event {
+	case "red-relay", "red-nudge":
+		view = `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"check","conclusion":"FAILURE"}]}`
+	case "review-relay":
+		view = `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","reviews":[{"id":"review-one","author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","body":"Fix the parser."}]}`
+	case "draft-nudge":
+		view = `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","isDraft":true,"statusCheckRollup":[{"name":"check","conclusion":"SUCCESS"}]}`
+	case "merged":
+		view = `{"number":8,"state":"MERGED"}`
+	default:
+		t.Fatal("unknown PR fixture")
+	}
+	t.Setenv("COMPLETION_PR_VIEW", view)
+	if event == "merged" {
+		j.LastPoke = time.Now().Add(-time.Hour)
+	}
+	if strings.HasSuffix(event, "nudge") {
+		j.LastPoke = time.Now().Add(-time.Hour)
+		v, err := ghPRView(context.Background(), j.Repo, j.PR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		diff(&j.Track, v, c.cfg.BotLogin) // unchanged known blocker needs the debounced nudge
+	}
+	return c, j, ghLog, sshLog
+}
+
+func TestCompletionDoneWorkerReceivesPRDrivenInput(t *testing.T) {
+	for _, agent := range []string{"codex", "claude"} {
+		for _, event := range []string{"red-relay", "review-relay", "red-nudge", "draft-nudge", "merged"} {
+			t.Run(agent+"/"+event, func(t *testing.T) {
+				c, j, _, sshLog := completionPRWorker(t, agent, event)
+				status := map[int]agentRef{7: completionRef(j)}
+				c.supervise(context.Background(), 7, j, status, Issue{Number: 7})
+				sent, err := os.ReadFile(sshLog)
+				if err != nil {
+					t.Fatal("done PR worker received no input", err)
+				}
+				if strings.Count(string(sent), "'agent' 'prompt' 'pane-fixture'") != 1 {
+					t.Fatalf("expected exactly one PR-driven prompt: %s", sent)
+				}
+				want := "New activity on your PR"
+				if event == "red-nudge" {
+					want = "CI is RED"
+				}
+				if event == "draft-nudge" {
+					want = "still a DRAFT"
+				}
+				if event == "merged" {
+					want = "Your PR merged"
+				}
+				if !strings.Contains(string(sent), want) || strings.Contains(string(sent), "continue — work the assigned issue") {
+					t.Fatalf("wrong input source: %s", sent)
+				}
+				if len(c.st.CompletedRuns) != 0 {
+					t.Fatal("pending/unproven PR worker was completion fenced")
+				}
+				c.supervise(context.Background(), 7, j, status, Issue{Number: 7})
+				repeated, _ := os.ReadFile(sshLog)
+				if strings.Count(string(repeated), "'agent' 'prompt'") != 1 {
+					t.Fatal("same PR state repeated the input without a new event or debounce interval")
+				}
+				if event == "review-relay" {
+					t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","reviews":[{"id":"review-one","author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","body":"Fix the parser."},{"id":"review-two","author":{"login":"reviewer"},"state":"CHANGES_REQUESTED","body":"Cover the edge case."}]}`)
+					c.supervise(context.Background(), 7, j, status, Issue{Number: 7})
+					changed, _ := os.ReadFile(sshLog)
+					if strings.Count(string(changed), "'agent' 'prompt'") != 2 {
+						t.Fatal("new review did not produce one new relay")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCompletionPRInputHonorsOwnerAndCompletionFence(t *testing.T) {
+	for _, event := range []string{"red-relay", "review-relay", "red-nudge", "draft-nudge", "merged"} {
+		for _, block := range []string{"owner-mismatch", "unknown-owner", "fenced"} {
+			t.Run(event+"/"+block, func(t *testing.T) {
+				c, j, ghLog, sshLog := completionPRWorker(t, "codex", event)
+				ref := completionRef(j)
+				status := map[int]agentRef{7: ref}
+				switch block {
+				case "owner-mismatch":
+					ref.Pane = "replacement-pane"
+					status[7] = ref
+				case "unknown-owner":
+					delete(status, 7)
+				case "fenced":
+					c.st.CompletedRuns = map[int]completedRun{7: {DispatchKey: j.DispatchKey, Phase: "retiring"}}
+				}
+				beforeGH, _ := os.ReadFile(ghLog)
+				// Fresh fence check also protects the tick's cached-completion entry.
+				c.superviseActive(context.Background(), 7, j, status, Issue{Number: 7})
+				if sent, _ := os.ReadFile(sshLog); len(sent) != 0 {
+					t.Fatalf("blocked PR event produced input: %s", sent)
+				}
+				if block == "fenced" {
+					afterGH, _ := os.ReadFile(ghLog)
+					if !bytes.Equal(beforeGH, afterGH) {
+						t.Fatal("completion fence did not stop PR supervision")
+					}
+				}
+				if j.Pane != "pane-fixture" || j.Workspace != "workspace-fixture" {
+					t.Fatal("PR event replaced recorded owner")
+				}
+			})
 		}
 	}
 }

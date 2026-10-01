@@ -47,17 +47,19 @@ Changing the deadline never bypasses native identity or confirmed goal delivery.
 
 ## Finished runs
 
-Completed turns are never automatically re-prompted. A managed run retires only
+Completed turns never receive automatic assigned-goal replays. A managed run retires only
 after its recorded occupant is unchanged across fresh reads and an independent
 completion source confirms it: the newest native Codex turn has a final answer,
 or the bot posted this run's marked final comment. A turn without that evidence
 logs `completion-unproven`, notifies the operator once per state change, and
-receives no automatic continuation. When a Codex run has a native goal, that
+receives no automatic assigned-goal continuation. When a Codex run has a native goal, that
 goal must also match the assignment and report `complete`. Pending or unreadable
 PRs keep the worker supervised for review; branch-scoped PR absence is checked
-before retirement. Unproven completion and mismatched seat handles suppress
-automatic input while retaining PR polling, eligible merging and the existing
-operator deadline. Handle mismatches notify the operator once per observed change
+before retirement. Matched, unfenced done workers still receive PR-state-driven
+review/CI relays, debounced stuck-PR nudges and merged-PR continuation. These
+inputs depend on PR events; they never replay the assigned goal. Owner mismatch
+and completion fences suppress PR input. PR polling, eligible merging and the
+existing operator deadline remain supervised for unfenced jobs. Handle mismatches notify the operator once per observed change
 and never replace the recorded owner. Completion is checked once per poll tick.
 
 The dispatcher persists a completion fence before cleanup. It retains the job
