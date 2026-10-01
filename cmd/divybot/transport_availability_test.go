@@ -68,7 +68,7 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 	if snapshot.SchemaVersion != 1 || snapshot.ObservedAt != "2026-09-30T12:00:00.123Z" || snapshot.ValidUntil != "2026-09-30T12:01:00.123Z" {
 		t.Fatalf("snapshot header %+v", snapshot)
 	}
-	want := map[string]string{"claude": "weekly-ceiling", "codex": "", "agy": "no-capacity"}
+	want := map[string]string{"claude": "weekly-ceiling", "codex": "", "agy": "no-capacity", "opencode": "no-capacity"}
 	var order []string
 	for _, row := range snapshot.Transports {
 		order = append(order, row.Transport)
@@ -80,13 +80,16 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 			t.Fatalf("%s: available=%v reason=%q, want reason %q", row.Transport, row.Available, reason, want[row.Transport])
 		}
 		// The published answer is admission's answer.
-		admitted := transportQuotaCondition(budget[row.Transport], quotas[row.Transport], now, 90*time.Second, 92) == ""
+		admitted := budget[row.Transport] > 0
+		if row.Transport != "opencode" {
+			admitted = transportQuotaCondition(budget[row.Transport], quotas[row.Transport], now, 90*time.Second, 92) == ""
+		}
 		if admitted != row.Available {
 			t.Fatalf("%s: snapshot says available=%v, admission says %v", row.Transport, row.Available, admitted)
 		}
 	}
-	if !reflect.DeepEqual(order, meteredTransports) {
-		t.Fatalf("transports %v, want every subscription transport in order %v", order, meteredTransports)
+	if !reflect.DeepEqual(order, matrixTransports) {
+		t.Fatalf("transports %v, want every matrix transport in order %v", order, matrixTransports)
 	}
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -105,7 +108,7 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 		t.Fatalf("snapshot fields %v", keys)
 	}
 	var rows []map[string]any
-	if err := json.Unmarshal(fields["transports"], &rows); err != nil || len(rows) != 3 || len(rows[0]) != 3 || rows[1]["reason"] != nil {
+	if err := json.Unmarshal(fields["transports"], &rows); err != nil || len(rows) != 4 || len(rows[0]) != 3 || rows[1]["reason"] != nil {
 		t.Fatalf("rows %s (%v)", fields["transports"], err)
 	}
 }
@@ -192,7 +195,7 @@ func TestAdmissionBudgetPublishesTransportAvailability(t *testing.T) {
 	if err := readPrivateActionJSON(transportAvailabilityPath(root), &got); err != nil {
 		t.Fatal("admission budget did not publish the snapshot", err)
 	}
-	if len(got.Transports) != len(meteredTransports) {
+	if len(got.Transports) != len(matrixTransports) {
 		t.Fatalf("snapshot rows %+v", got.Transports)
 	}
 	for _, row := range got.Transports {
@@ -200,5 +203,36 @@ func TestAdmissionBudgetPublishesTransportAvailability(t *testing.T) {
 		if budget[row.Transport] > 0 || row.Available || row.Reason == nil || *row.Reason != availabilityNoCapacity {
 			t.Fatalf("%s: %+v with budget %d", row.Transport, row, budget[row.Transport])
 		}
+	}
+}
+
+func TestOpenCodeAvailabilityPublishedFromConfiguredProviderBudget(t *testing.T) {
+	for _, mode := range []string{"unconfigured", "free", "occupied", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			root := privateTestRoot(t)
+			c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, st: &State{Jobs: map[int]*Job{}}}
+			c.gov.q = map[string]quota{}
+			if mode != "unconfigured" {
+				limit := 1
+				if mode == "disabled" {
+					limit = 0
+				}
+				c.cfg.OpenCode = OpenCodeConfig{Providers: map[string]OpenCodeProvider{"fixture-provider": {MaxActive: limit}}}
+			}
+			if mode == "occupied" {
+				// Unbound/unknown native seats consume each configured pool.
+				c.st.Jobs[7] = &Job{Issue: 7, Agent: "opencode"}
+			}
+			budget := c.admissionBudget(nil)
+			var got transportAvailabilitySnapshot
+			if readPrivateActionJSON(transportAvailabilityPath(root), &got) != nil || len(got.Transports) != 4 {
+				t.Fatal("tick did not publish the four-row contract")
+			}
+			row := got.Transports[3]
+			want := mode == "free"
+			if row.Transport != "opencode" || row.Available != want || row.Available != (budget["opencode"] > 0) || (want && row.Reason != nil) || (!want && (row.Reason == nil || *row.Reason != availabilityNoCapacity)) {
+				t.Fatal("published OpenCode capacity differs from configured admission budget")
+			}
+		})
 	}
 }
