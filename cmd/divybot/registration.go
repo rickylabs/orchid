@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -61,10 +62,15 @@ func (c *Coord) reportBlockedLaunch(ctx context.Context, n int) bool {
 	switch block.Reason {
 	case "registration_failed", "agent_disappeared", "goal-prompt-unconfirmed":
 		reason = block.Reason
+	case "opencode-empty-answer", "opencode-output-unconfirmed", "opencode-route-mismatch", "opencode-provider-error":
+		reason = block.Reason
 	}
 	body := fmt.Sprintf("divybot: automatic launch abandoned (%s). The agent was not confirmed ready, or disappeared after supervision. No automatic respawn will occur for this inbox issue, including after dispatcher restart. Inspect the failed launch before requesting a new dispatch in a new inbox issue.", reason)
 	if reason == "goal-prompt-unconfirmed" {
 		body = "divybot: goal delivery BLOCKED (`goal-prompt-unconfirmed`). A registered agent may exist, but its assignment was not confirmed delivered. This issue remains open and needs inspection; automatic prompt replay, idle pokes and timeout-completed closure are disabled, including after restart. Inspect the existing agent before explicitly requesting another attempt."
+	}
+	if strings.HasPrefix(reason, "opencode-") {
+		body = fmt.Sprintf("divybot: OpenCode run BLOCKED (`%s`). Native route/output evidence failed. A completed empty answer is a failure, never a verdict. The issue stays open; automatic prompt replay, PR supervision/merge, idle pokes and timeout-completed closure are disabled, including after restart. Inspect this run before explicitly requesting a new dispatch.", reason)
 	}
 	commentCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()

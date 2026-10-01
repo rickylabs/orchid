@@ -39,20 +39,21 @@ import (
 // ============================ config ============================
 
 type Config struct {
-	Matrix                  MatrixConfig `json:"matrix"`
-	ActionRequestRoot       string       `json:"action_request_root,omitempty"`        // separate private maildir mount
-	ActionGoalBudgetCeiling int64        `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
-	Inbox                   string       `json:"inbox"`                                // e.g. "denoland/divybot"
-	BotLogin                string       `json:"bot_login"`                            // PR author login (for review attribution)
-	BotEmail                string       `json:"bot_email"`                            // git committer email
-	PollInterval            string       `json:"poll_interval"`                        // e.g. "30s"
-	BranchPrefix            string       `json:"branch_prefix"`                        // e.g. "orch/divybot-"
-	StateFile               string       `json:"state_file"`                           // private state location
-	NtfyTopic               string       `json:"ntfy_topic"`                           // ntfy.sh topic for escalation (optional)
-	Hosts                   []Host       `json:"hosts"`
-	Targets                 []Target     `json:"targets"`
-	Governor                Gov          `json:"governor"`
-	Memory                  Mem          `json:"memory"`
+	Matrix                  MatrixConfig   `json:"matrix"`
+	ActionRequestRoot       string         `json:"action_request_root,omitempty"`        // separate private maildir mount
+	ActionGoalBudgetCeiling int64          `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
+	Inbox                   string         `json:"inbox"`                                // e.g. "denoland/divybot"
+	BotLogin                string         `json:"bot_login"`                            // PR author login (for review attribution)
+	BotEmail                string         `json:"bot_email"`                            // git committer email
+	PollInterval            string         `json:"poll_interval"`                        // e.g. "30s"
+	BranchPrefix            string         `json:"branch_prefix"`                        // e.g. "orch/divybot-"
+	StateFile               string         `json:"state_file"`                           // private state location
+	NtfyTopic               string         `json:"ntfy_topic"`                           // ntfy.sh topic for escalation (optional)
+	Hosts                   []Host         `json:"hosts"`
+	Targets                 []Target       `json:"targets"`
+	Governor                Gov            `json:"governor"`
+	OpenCode                OpenCodeConfig `json:"opencode,omitempty"`
+	Memory                  Mem            `json:"memory"`
 }
 
 // Mem configures the git-backed shared memory. Reuses the inbox repo
@@ -273,8 +274,9 @@ type Job struct {
 	// RunMode: the agent is a non-interactive `opencode run` process, invisible
 	// to herdr's agent detection — never declare it "gone"; supervise via the
 	// PR path and the deadline instead.
-	RunMode bool    `json:"run_mode,omitempty"`
-	Track   tracker `json:"track"`
+	RunMode  bool         `json:"run_mode,omitempty"`
+	OpenCode *openCodeRun `json:"opencode_run,omitempty"`
+	Track    tracker      `json:"track"`
 	// Misses counts consecutive ticks the agent was absent from a successful
 	// fleetStatus while its host was up. herdr's agent detection is screen-scrape
 	// based, so a live agent can transiently drop out of the list (mid-render,
@@ -602,6 +604,26 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if !receipt.claim(command) {
 		return "", "", matrixSite("spawn.receipt-claim", errMatrix)
 	}
+	if agent == "opencode" {
+		route, routeErr := resolveOpenCodeRoute(ovr)
+		if routeErr != nil {
+			return "", "", matrixSite("spawn.opencode-route", routeErr)
+		}
+		overlay, overlayErr := openCodeEnvironment(cwd, route)
+		if overlayErr != nil {
+			return "", "", matrixSite("spawn.opencode-environment", overlayErr)
+		}
+		if prepareErr := h.prepareOpenCodeLaunch(ctx, cwd, route, overlay); prepareErr != nil {
+			return "", "", matrixSite("spawn.opencode-preflight", prepareErr)
+		}
+		if env == nil {
+			env = map[string]string{}
+		}
+		for key, value := range overlay {
+			env[key] = value
+		}
+		env["HOME"] = h.agentHome()
+	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", matrixSite("spawn.workspace-create", errMatrix)
@@ -642,7 +664,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	// Environment setup leaves the shell alive. Never exec an interactive agent here:
 	// pane run does not register it with herdr's agent lifecycle.
 	var b strings.Builder
-	b.WriteString(`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; `)
+	b.WriteString(`export PATH="$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH"; `)
 	if env == nil {
 		env = map[string]string{}
 	}
@@ -1536,14 +1558,13 @@ const (
 
 func govHours(d time.Duration) float64 { return float64(d) / float64(time.Hour) }
 
-// accountKey normalizes a job/target agent to its pacing account. opencode is
-// the launcher for "codex" agents (codex's own TUI is undriveable through herdr
-// on Linux), so herdr's detected "opencode" maps back to the codex account.
+// Native OpenCode provider pools are separate from the Codex subscription.
+// Preserve only the explicit legacy noninteractive aliases.
 func accountKey(agent string) string {
 	switch agent {
 	case "", "claude":
 		return "claude"
-	case "opencode", "opencode-run", "codex-run":
+	case "opencode-run", "codex-run":
 		return "codex"
 	default:
 		return agent
@@ -1943,8 +1964,8 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 	if !found {
 		return nil, false
 	}
-	// herdr reports a codex-via-opencode job as agent "opencode"; normalize it
-	// back to the logical "codex" account (accountKey does the mapping).
+	// Preserve native OpenCode identity; legacy run aliases retain their mapping.
+	// An adopted OpenCode seat has no launch correlation and must fail closed.
 	agent := accountKey(ref.Agent)
 	if agent == "" {
 		agent = "claude"
@@ -2453,6 +2474,11 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 	for a, cp := range caps {
 		budget[a] = cp - running[a]
 	}
+	c.st.mu.Lock()
+	for key, value := range openCodeCapacityBudget(c.cfg.OpenCode, c.st.Jobs, status) {
+		budget[key] = value
+	}
+	c.st.mu.Unlock()
 	c.publishTransportAvailability(budget, time.Now())
 	return budget
 }
@@ -2952,6 +2978,13 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	if !runMode {
 		j.GoalDelivery = "pending"
 	}
+	if agent == "opencode" {
+		route, routeErr := resolveOpenCodeRoute(ovr)
+		if routeErr != nil {
+			return matrixSite("launch.opencode-route", routeErr)
+		}
+		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir}
+	}
 	if agent == "codex" {
 		j.NativeGoal = &dispatchGoal{ReceiptKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"), Intent: intent, Reason: "native-session-unavailable"}
 	}
@@ -2991,8 +3024,21 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			inject = runPointer
 		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
-		if err := host.injectGoal(gctx, target, inject, opencodeClass); err != nil {
+		var deliveryErr error
+		if agent == "opencode" {
+			deliveryErr = host.injectOpenCodeGoal(gctx, j, func() error {
+				c.st.mu.Lock()
+				defer c.st.mu.Unlock()
+				return c.st.saveLocked()
+			})
+		} else {
+			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
+		}
+		if deliveryErr != nil {
 			c.blockGoalDelivery(n, j)
+			if agent == "opencode" {
+				c.blockOpenCode(n, j, deliveryErr)
+			}
 			log.Printf("issue #%d: launch-effect-failed", n)
 			gcancel()
 			return matrixReason("goal-prompt-unconfirmed")
@@ -3028,6 +3074,33 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	if c.dry {
 		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
 		return
+	}
+	if j.Agent == "opencode" {
+		if j.OpenCode == nil || j.OpenCode.Failure != "" {
+			if j.OpenCode == nil {
+				c.blockOpenCode(n, j, matrixReason("opencode-output-unconfirmed"))
+			}
+			c.reportBlockedLaunch(ctx, n)
+			return
+		}
+		if j.GoalDelivery == "confirmed" {
+			if !known {
+				return // no route/output proof: never supervise a PR or close as complete
+			}
+			confirmed, completed, observationErr := host.observeOpenCode(ctx, j)
+			deadlineExpired := !j.Deadline.IsZero() && !time.Now().Before(j.Deadline)
+			if observationErr == matrixReason("opencode-output-unconfirmed") && ref.Status != "idle" && ref.Status != "done" && !deadlineExpired {
+				return // an in-flight state change is uncertainty, not provider failure
+			}
+			if observationErr != nil || ((!confirmed || !completed) && (ref.Status == "idle" || ref.Status == "done" || deadlineExpired)) {
+				c.blockOpenCode(n, j, observationErr)
+				c.reportBlockedLaunch(ctx, n)
+				return
+			}
+			if !confirmed || !completed {
+				return // No completion action may use an unfinished or missing native answer.
+			}
+		}
 	}
 	// A pending/blocked prompt is never a completed run. Keep its real registered
 	// binding and issue open; retries here report only, never send input or close.
