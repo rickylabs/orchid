@@ -68,6 +68,9 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 	var out []matrixConfigProblem
 	bad := func(field, reason string) { out = append(out, matrixConfigProblem{field, reason}) }
 	m := cfg.Matrix
+	if !cfg.OpenCode.valid() {
+		bad("opencode.providers", "provider-id-and-max-active-0-to-256-required")
+	}
 	if _, err := configuredReceiptOwner(m); err != nil {
 		bad("matrix.receipt_owner_uid/receipt_owner_gid", "both-valid-numeric-ids-required")
 	}
@@ -237,7 +240,7 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 			return configProblem("matrix.grants.ownerMatrixOverride.worklogPath", "override-worklog-unavailable")
 		}
 	}
-	req.Available = []string{"claude", "codex", "agy"}
+	req.Available = append([]string(nil), matrixTransports...)
 	route, err := d.resolve(ctx, cfg.Matrix, req)
 	if err != nil {
 		r := refusalFor(err)
@@ -246,8 +249,8 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 	if strings.HasSuffix(route.Role, "_evaluation") {
 		return configProblem("route.observed", "observer-unavailable")
 	}
-	if o.Router != "" {
-		return configProblem("issue.router", "router-unsupported")
+	if routerErr := routeRouterError(route, o); routerErr != nil {
+		return configProblem("issue.router", string(routerErr.(matrixReason)))
 	}
 	if o.Harness != "" && o.Harness != route.Transport && !(o.Harness == "codex-run" && route.Transport == "codex") {
 		return configProblem("issue.harness", "harness-conflict")

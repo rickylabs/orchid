@@ -114,15 +114,25 @@ func TestNativeGoalLaunchOwnershipWiring(t *testing.T) {
 			}
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			condition, ok := n.(*ast.IfStmt)
-			if !ok || condition.Init == nil || !strings.Contains(render(condition.Init), "host.injectGoal(") {
+			block, ok := n.(*ast.BlockStmt)
+			if !ok {
 				return true
 			}
-			if render(condition.Cond) != "err != nil" || len(condition.Body.List) == 0 {
-				return true
+			delivered, fenced := false, false
+			for _, stmt := range block.List {
+				condition, isIf := stmt.(*ast.IfStmt)
+				if isIf && strings.Contains(render(condition), "deliveryErr = host.injectGoal(") &&
+					strings.Contains(render(condition), "deliveryErr = host.injectOpenCodeGoal(") {
+					delivered = true
+				}
+				if isIf && delivered && render(condition.Cond) == "deliveryErr != nil" && len(condition.Body.List) > 0 {
+					ret, isReturn := condition.Body.List[len(condition.Body.List)-1].(*ast.ReturnStmt)
+					fenced = isReturn && render(ret) == `return matrixReason("goal-prompt-unconfirmed")`
+				}
+				if strings.Contains(render(stmt), "c.startDispatchGoal(") && delivered && fenced {
+					foundPromptFence = true
+				}
 			}
-			ret, ok := condition.Body.List[len(condition.Body.List)-1].(*ast.ReturnStmt)
-			foundPromptFence = ok && render(ret) == `return matrixReason("goal-prompt-unconfirmed")`
 			return true
 		})
 	}

@@ -48,7 +48,7 @@ func TestManagedCodexRejectsUnscopedPathsBeforeWorkspace(t *testing.T) {
 
 func TestManagedTrustSettingDoesNotChangeOtherTransports(t *testing.T) {
 	for _, agent := range []string{"claude", "agy", "opencode"} {
-		o := Overrides{Model: "fixture-model", Effort: "high"}
+		o := Overrides{Model: "fixture-model", Effort: "high", Router: "fixture-provider"}
 		kind, args, err := managedInteractiveAgentArgs(agent, o, "")
 		wantKind, wantArgs, wantErr := interactiveAgentArgs(agent, o)
 		if err != wantErr || kind != wantKind || !reflect.DeepEqual(args, wantArgs) {

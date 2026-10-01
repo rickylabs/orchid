@@ -13,6 +13,12 @@ import (
 // Only this fixed vocabulary crosses the public log/comment boundary. No native
 // error strings, configuration values, source output or issue prose are copied.
 var matrixReasons = map[string]struct{ field, hint string }{
+	"opencode-route-invalid":       {"route.provider/model", "Use an exact qualified OpenCode model; router may agree with its provider prefix, never substitute it."},
+	"opencode-variant-unavailable": {"route.effort", "The native catalog must list the exact requested variant; no default or lower effort is substituted."},
+	"opencode-catalog-unavailable": {"route.discovery", "The dispatch host's bounded native OpenCode catalog is unavailable or invalid."},
+	"opencode-model-unavailable":   {"route.model", "The dispatch host's native catalog does not list the exact configured model."},
+	"opencode-state-unavailable":   {"launch.state", "Private per-launch OpenCode state could not be prepared; inspect the existing fence."},
+	"opencode-provider-capacity":   {"opencode.providers", "The exact provider requires an explicit positive concurrency limit and a free slot."},
 	"goal-budget-invalid":          {"issue.max-tokens", "Use an exact nonnegative token count or decimal k/m suffix within the supported integer range; omit the key for unknown."},
 	"goal-objective-invalid":       {"issue.title", "Provide a nonempty assignment title within the native goal length bound."},
 	"goal-prompt-delivery-failed":  {"launch.prompt", "Agent registration was confirmed, but prompt acceptance was not; inspect the run before any new dispatch."},
@@ -40,7 +46,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"retry-pins-unavailable":       {"matrix", "The original dispatch pins no longer resolve exactly; start a new issue for a changed route."},
 	"routing-invalid":              {"issue.tier/role", "Specify a workload tier and a role allowed by the selected profile."},
 	"resolution-failed":            {"matrix", "Verify Deno, the pinned source contract and matrix CLI; resolution could not complete."},
-	"quota-unavailable":            {"governor", "No transport has both fresh subscription windows, headroom and available capacity."},
+	"quota-unavailable":            {"governor", "Native transports require fresh quota, headroom and capacity; OpenCode requires explicit free provider capacity and native discovery."},
 	"harness-conflict":             {"issue.harness", "The requested harness conflicts with the selected matrix transport."},
 	"router-unsupported":           {"issue.router", "Router substitution has no supported adapter."},
 	"host-unavailable":             {"hosts", "No eligible host has capacity for the selected transport and target."},
@@ -57,9 +63,10 @@ func (e matrixReason) Error() string { return string(e) }
 func (e matrixReason) Unwrap() error { return errMatrix }
 
 var validQuotaTransports = map[string]bool{
-	"claude": true,
-	"codex":  true,
-	"agy":    true,
+	"claude":   true,
+	"codex":    true,
+	"agy":      true,
+	"opencode": true,
 }
 
 var validQuotaConditions = map[string]bool{
@@ -233,6 +240,7 @@ func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post 
 }
 
 var matrixSites = map[string]bool{
+	"spawn.opencode-route": true, "spawn.opencode-environment": true, "spawn.opencode-preflight": true, "launch.opencode-route": true,
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-budget": true,
 	"spawn.registration-render": true,
 	"spawn.native-binding":      true, "dispatch.native-clear": true,

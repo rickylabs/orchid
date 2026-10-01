@@ -45,6 +45,47 @@ fence and loud refusal, with no automatic respawn. Logs classify startup timeout
 blocked, busy or cancellation without printing native output or environment values.
 Changing the deadline never bypasses native identity or confirmed goal delivery.
 
+## OpenCode transport
+
+OpenCode routes use an exact `provider/model` from the pinned Harness matrix.
+An issue's `router` may name that same CLI provider; it cannot replace the prefix.
+Provider IDs and models are configuration/catalog data, with no compiled model
+allowlist. Off-matrix overrides and evaluator restrictions remain enforced.
+
+Opt in to provider seats in private dispatcher configuration, for example:
+
+```json
+{"opencode":{"providers":{"example-provider":{"max_active":2}}}}
+```
+
+Each provider limit is an integer from 0 through 256; omitted or zero disables
+that pool. This is a concurrency ceiling for registered seats, not a vendor credit
+or subscription meter. OpenCode never spends the Codex subscription's admission
+budget. An unbound OpenCode seat conservatively consumes a slot in every provider
+pool. Eligible hosts must permit the `opencode` agent and have free host capacity.
+
+Before seat creation, read-only native catalog and resolved-agent commands on the
+dispatch host must confirm the provider, exact model, and requested variant. A
+missing variant refuses instead of lowering effort. The full TUI receives a
+process-local model overlay and a private `.divybot-opencode/` state tree with the
+variant seeded explicitly; provider default seeds an empty selection. This avoids
+the native TUI's unavailable-model fallback and inherited variant preferences.
+Existing permission rules remain in effect; no standing user configuration changes.
+
+Goal delivery uses one Herdr prompt and the existing durable registration fence.
+Bounded native session/export reads must agree on the exact occupant, checkout,
+fresh session, first prompt, variant, and assistant provider/model. Native API
+response attestation is not inferred from argv or the startup display. A completed
+empty/whitespace answer, provider error, route mismatch, or missing terminal
+evidence blocks the run loudly and durably. Blocked runs keep the issue open and
+cannot replay the prompt, poke an idle worker, supervise/merge a PR, or close as
+completed after a deadline. Existing sessions without this binding need inspection.
+
+The published v1 subscription availability snapshot retains its three native
+rows for existing strict Harness readers. Provider availability projection and
+config/discovery admission of matrix alternates are separate follow-up work;
+this adapter does not certify app picker availability or evaluator verdicts.
+
 ## More
 
 - [docs/architecture.md](docs/architecture.md) — what runs where

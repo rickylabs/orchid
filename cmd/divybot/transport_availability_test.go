@@ -85,8 +85,8 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 			t.Fatalf("%s: snapshot says available=%v, admission says %v", row.Transport, row.Available, admitted)
 		}
 	}
-	if !reflect.DeepEqual(order, matrixTransports) {
-		t.Fatalf("transports %v, want every matrix transport in order %v", order, matrixTransports)
+	if !reflect.DeepEqual(order, meteredTransports) {
+		t.Fatalf("transports %v, want every subscription transport in order %v", order, meteredTransports)
 	}
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
@@ -192,7 +192,7 @@ func TestAdmissionBudgetPublishesTransportAvailability(t *testing.T) {
 	if err := readPrivateActionJSON(transportAvailabilityPath(root), &got); err != nil {
 		t.Fatal("admission budget did not publish the snapshot", err)
 	}
-	if len(got.Transports) != len(matrixTransports) {
+	if len(got.Transports) != len(meteredTransports) {
 		t.Fatalf("snapshot rows %+v", got.Transports)
 	}
 	for _, row := range got.Transports {

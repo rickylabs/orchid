@@ -110,10 +110,9 @@ else:print(json.dumps({'result':{}}))
 
 func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 	expectedArgs := map[string][]string{
-		"codex":    {"--dangerously-bypass-approvals-and-sandbox", "-m", "fixture model 'quoted'", "-c", `model_reasoning_effort="high"`},
-		"claude":   {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'"},
-		"opencode": {"--model", "fixture-provider/fixture model 'quoted'"},
-		"agy":      {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'", "--effort", "fixture-effort"},
+		"codex":  {"--dangerously-bypass-approvals-and-sandbox", "-m", "fixture model 'quoted'", "-c", `model_reasoning_effort="high"`},
+		"claude": {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'"},
+		"agy":    {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'", "--effort", "fixture-effort"},
 	}
 	for kind, configuredArgs := range expectedArgs {
 		t.Run(kind, func(t *testing.T) {

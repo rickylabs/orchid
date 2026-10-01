@@ -35,8 +35,11 @@ func transportAvailabilityPath(receiptRoot string) string {
 
 func buildTransportAvailability(budget map[string]int, quotas map[string]quota, now time.Time,
 	sampleInterval time.Duration, ceiling float64, validFor time.Duration) transportAvailabilitySnapshot {
-	rows := make([]transportAvailabilityRow, 0, len(matrixTransports))
-	for _, transport := range matrixTransports {
+	// Published v1 is the exact three-subscription contract consumed by Harness
+	// 0.30.0. Provider capacity is not a subscription meter; do not add a fourth
+	// row and make existing strict readers discard all native availability.
+	rows := make([]transportAvailabilityRow, 0, len(meteredTransports))
+	for _, transport := range meteredTransports {
 		reason := transportAvailabilityReason(budget[transport], quotas[transport], now, sampleInterval, ceiling)
 		row := transportAvailabilityRow{Transport: transport, Available: reason == ""}
 		if reason != "" {
@@ -78,8 +81,8 @@ func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Tim
 	owner, err := configuredReceiptOwner(c.cfg.Matrix)
 	if err == nil {
 		c.gov.mu.Lock()
-		quotas := make(map[string]quota, len(matrixTransports))
-		for _, transport := range matrixTransports {
+		quotas := make(map[string]quota, len(meteredTransports))
+		for _, transport := range meteredTransports {
 			quotas[transport] = c.gov.q[transport]
 		}
 		c.gov.mu.Unlock()

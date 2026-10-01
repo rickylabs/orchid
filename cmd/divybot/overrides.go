@@ -179,13 +179,11 @@ func interactiveAgentArgs(agent string, o Overrides) (string, []string, error) {
 			args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(o.Effort))
 		}
 	case "opencode":
-		model := o.Model
-		if model != "" && o.Router != "" && !strings.Contains(model, "/") {
-			model = o.Router + "/" + model
+		route, err := resolveOpenCodeRoute(o)
+		if err != nil {
+			return "", nil, err
 		}
-		if model != "" {
-			args = append(args, "--model", model)
-		}
+		args = append(args, "--pure", "--agent", "build", "--model", route.qualifiedModel())
 	case "agy":
 		args = []string{"--dangerously-skip-permissions"}
 		if o.Model != "" {
