@@ -167,3 +167,39 @@ The existing receipt root is never chowned by this setting. Deployment must prov
 shared directory with mode 0700 and the intended reader owner, accessible to both processes.
 The writer needs permission to perform the configured transfer and continue updating files.
 Shared mounts and live configuration remain operator-owned deployment work.
+
+## Read-only evaluator catalog preflight (#321)
+
+After selecting a clean reviewed Harness checkout, run:
+
+```sh
+"$PRIVATE/divybot" matrix evaluator-preflight \
+  -source "$HARNESS_CHECKOUT" \
+  -revision "$HARNESS_COMMIT" \
+  -request "$PRIVATE/evaluator-request.json"
+```
+
+The request contains `tier`, an evaluation `role`, and `generatorModel` (the logical model
+already selected for the author). It can include existing `authorization` for a privileged
+tier and explicit `unavailableTransports`. It cannot supply a concrete evaluator ID, worktree,
+session, credentials or an owner override. Model IDs, family checks, cells and provider order
+come from the pinned Harness configuration document; no daemon model list is introduced.
+The pinned source adapter remains interim under [Harness #270](https://github.com/rickylabs/harness/issues/270).
+
+This command checks the source pin and clean state before and after importing Harness's
+read-only OpenCode preflight. It invokes only `opencode models <provider>` on this host, with
+the upstream output bound and deadline. It never starts a turn, contacts a dispatch host,
+changes configuration, reserves a receipt, polls issues or posts to GitHub. The request is
+bounded to 64 KiB and unknown/duplicate JSON fields are refused.
+
+Exit 0 reports catalog membership for the selected exact provider/model ID. A missing ID
+returns exit 2 with `launcher-model-absent`, the exact selected model and launcher. An
+unavailable catalog is also named; generic invalid-input/source failures expose fixed codes.
+No source path, authorization rationale, session reference or native exception is projected.
+
+Every catalog result also reports `dispatchStatus: inconclusive` and
+`dispatchReasonCode: observer-unavailable`. Catalog membership is not successful reachability,
+quota, effort support or independent observed identity. The normal evaluator-dispatch guard
+stays in force. Applying a reviewed source pin to private live configuration remains an
+operator action; this PR changes neither the daemon's native transport admission nor that
+configuration.

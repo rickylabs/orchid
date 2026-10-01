@@ -326,6 +326,9 @@ func addMatrixGrant(cfg *Config, is Issue, repo string, data []byte) []matrixCon
 }
 
 func matrixConfigCLI(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "evaluator-preflight" {
+		return evaluatorCatalogCLI(args[1:], stdout)
+	}
 	problems := func(p []matrixConfigProblem) int {
 		for _, x := range p {
 			fmt.Fprintf(stderr, "%s: %s\n", x.Field, x.Reason)
