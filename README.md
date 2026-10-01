@@ -45,6 +45,39 @@ fence and loud refusal, with no automatic respawn. Logs classify startup timeout
 blocked, busy or cancellation without printing native output or environment values.
 Changing the deadline never bypasses native identity or confirmed goal delivery.
 
+## Finished runs
+
+Completed turns are never automatically re-prompted. A managed run retires only
+after its recorded occupant is unchanged across fresh reads and an independent
+completion source confirms it: the newest native Codex turn has a final answer,
+or the bot posted this run's marked final comment. A turn without that evidence
+logs `completion-unproven`, notifies the operator once per state change, and
+receives no automatic continuation. When a Codex run has a native goal, that
+goal must also match the assignment and report `complete`.
+
+The dispatcher persists a completion fence before cleanup. It retains the job
+and capacity until both the recorded workspace and its captured native process
+are independently observed absent. Close failures get at most three attempts;
+uncertain cleanup stays counted. A successful close is delivery evidence only.
+The fence survives restart and job removal, so an open inbox issue cannot
+automatically launch or adopt the completed run again. A new assignment needs
+a new inbox issue. A bounded scan prunes fences only after confirmed inbox
+closure and observed cleanup. Ordinary teardown receipts keep their existing cause.
+
+When an assignment requires a final GitHub comment, its launch prompt supplies
+an exact hidden `orchid-run` marker containing the public opaque assignment and
+agent IDs. The visible comment format and destination come from the brief.
+Missing or altered markers provide no completion evidence; readers must also
+verify bot authorship and dispatch time before accepting a marked comment.
+
+The completion reader follows the installed Codex 0.159.3 protocol generated
+with `codex app-server generate-json-schema --experimental --out <output-directory>`.
+It requests the newest turn with full items and requires `completed`, an explicit
+`final_answer` message, a completion timestamp, and no pending structured questions.
+A message without a phase provides no native completion evidence; it needs the
+independent marked-comment source. A completed turn is a neutral completion
+observation, and does not certify the quality or success of the assignment.
+
 ## More
 
 - [docs/architecture.md](docs/architecture.md) — what runs where

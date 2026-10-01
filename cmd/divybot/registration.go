@@ -20,6 +20,9 @@ type launchBlock struct {
 func (s *State) reserveLaunch(n int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, completed := s.CompletedRuns[n]; completed {
+		return false
+	}
 	if s.LaunchBlocks == nil {
 		s.LaunchBlocks = map[int]launchBlock{}
 	}

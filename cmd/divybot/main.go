@@ -242,23 +242,24 @@ type tracker struct {
 }
 
 type Job struct {
-	GoalDelivery string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
-	NativeGoal   *dispatchGoal `json:"native_goal,omitempty"`
-	DispatchKey  string        `json:"dispatch_key,omitempty"` // private launch receipt key
-	Issue        int           `json:"issue"`
-	Host         string        `json:"host"`
-	Label        string        `json:"label"`     // display name (claude-<n>)
-	Pane         string        `json:"pane"`      // herdr send/read target (pane id)
-	Workspace    string        `json:"workspace"` // herdr teardown handle
-	Target       string        `json:"target"`
-	Repo         string        `json:"repo"`
-	Branch       string        `json:"branch"`
-	Agent        string        `json:"agent"`
-	Title        string        `json:"title"`
-	Goal         string        `json:"goal"`
-	PR           int           `json:"pr"`
-	SpawnedAt    time.Time     `json:"spawned_at"`
-	LastPoke     time.Time     `json:"last_poke"`
+	CompletionUnprovenSeq *uint64       `json:"completion_unproven_seq,omitempty"`
+	GoalDelivery          string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
+	NativeGoal            *dispatchGoal `json:"native_goal,omitempty"`
+	DispatchKey           string        `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue                 int           `json:"issue"`
+	Host                  string        `json:"host"`
+	Label                 string        `json:"label"`     // display name (claude-<n>)
+	Pane                  string        `json:"pane"`      // herdr send/read target (pane id)
+	Workspace             string        `json:"workspace"` // herdr teardown handle
+	Target                string        `json:"target"`
+	Repo                  string        `json:"repo"`
+	Branch                string        `json:"branch"`
+	Agent                 string        `json:"agent"`
+	Title                 string        `json:"title"`
+	Goal                  string        `json:"goal"`
+	PR                    int           `json:"pr"`
+	SpawnedAt             time.Time     `json:"spawned_at"`
+	LastPoke              time.Time     `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -284,9 +285,10 @@ type Job struct {
 }
 
 type State struct {
-	MatrixNotices map[int]string      `json:"matrix_notices,omitempty"`
-	LaunchBlocks  map[int]launchBlock `json:"launch_blocks,omitempty"`
-	RetryFlights  map[int]retryFlight `json:"retry_flights,omitempty"`
+	CompletedRuns map[int]completedRun `json:"completed_runs,omitempty"`
+	MatrixNotices map[int]string       `json:"matrix_notices,omitempty"`
+	LaunchBlocks  map[int]launchBlock  `json:"launch_blocks,omitempty"`
+	RetryFlights  map[int]retryFlight  `json:"retry_flights,omitempty"`
 	mu            sync.Mutex
 	Jobs          map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
@@ -307,6 +309,7 @@ func loadState(path string) *State {
 	s := &State{Jobs: map[int]*Job{}, Continued: map[string]int{}, QuotaSamples: map[string][]QuotaSample{}, PrevCap: map[string]int{}, path: path}
 	if b, err := os.ReadFile(path); err == nil {
 		var raw struct {
+			CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
 			MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
 			Jobs          map[int]*Job             `json:"jobs"`
 			LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
@@ -316,6 +319,7 @@ func loadState(path string) *State {
 			PrevCap       map[string]int           `json:"prev_cap"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
+			s.CompletedRuns = raw.CompletedRuns
 			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
 			s.RetryFlights = raw.RetryFlights
@@ -345,6 +349,7 @@ func (s *State) save() error {
 // saveLocked commits launch fences before an external effect can occur.
 func (s *State) saveLocked() error {
 	b, err := json.MarshalIndent(struct {
+		CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
 		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
 		Jobs          map[int]*Job             `json:"jobs"`
 		Continued     map[string]int           `json:"continued"`
@@ -352,7 +357,7 @@ func (s *State) saveLocked() error {
 		PrevCap       map[string]int           `json:"prev_cap"`
 		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
 		RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
-	}{s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights}, "", "  ")
+	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1924,6 +1929,12 @@ type Coord struct {
 // and records it WITHOUT spawning — so a cutover or restart supervises existing
 // sessions instead of duplicating them.
 func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
+	c.st.mu.Lock()
+	_, completed := c.st.CompletedRuns[n]
+	c.st.mu.Unlock()
+	if completed {
+		return nil, false
+	}
 	tgt, ok := c.targetFor(is)
 	if !ok {
 		return nil, false
@@ -2186,6 +2197,9 @@ func (c *Coord) tick(ctx context.Context) {
 	if pollOK {
 		c.st.mu.Lock()
 		for n, j := range c.st.Jobs {
+			if _, completing := c.st.CompletedRuns[n]; completing {
+				continue // completion owns cleanup and paired absence, even if the issue closes
+			}
 			if _, ok := allOpen[n]; !ok {
 				jc := j
 				c.st.mu.Unlock()
@@ -2215,6 +2229,18 @@ func (c *Coord) tick(ctx context.Context) {
 	}
 
 	status, up := c.fleetStatus(ctx)
+	// Completion cleanup precedes admission and every possible continuation send.
+	c.st.mu.Lock()
+	finishing := make(map[int]*Job, len(c.st.Jobs))
+	for n, j := range c.st.Jobs {
+		finishing[n] = j
+	}
+	c.st.mu.Unlock()
+	for n, j := range finishing {
+		ref, known := status[n]
+		c.retireCompleted(ctx, n, j, ref, known)
+	}
+	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return ghIssueStateByNum(ctx, c.cfg.Inbox, n) })
 
 	// A persistently absent agent is an abandoned launch, not permission to retry.
 	// Fence it durably before removing tracking so a restart cannot respawn it.
@@ -2227,6 +2253,9 @@ func (c *Coord) tick(ctx context.Context) {
 	var dead []deadJob
 	c.st.mu.Lock()
 	for n, j := range c.st.Jobs {
+		if _, completing := c.st.CompletedRuns[n]; completing {
+			continue // an uncertain cleanup is never a disappeared launch
+		}
 		if _, alive := status[n]; alive {
 			j.Misses = 0 // present this tick — clear any flicker count
 			continue
@@ -2312,8 +2341,12 @@ func (c *Coord) tick(ctx context.Context) {
 	for _, n := range nums {
 		is := open[n]
 		c.st.mu.Lock()
+		_, completed := c.st.CompletedRuns[n]
 		j, live := c.st.Jobs[n]
 		c.st.mu.Unlock()
+		if completed {
+			continue // the durable fence also prevents adoption after job removal
+		}
 		if live {
 			c.supervise(ctx, n, j, status, is)
 			continue
@@ -2410,7 +2443,8 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 	running := map[string]int{}
 	for n, j := range c.st.Jobs {
 		ref, known := status[n]
-		if occupiesAdmissionSlot(j, ref, known) {
+		_, completing := c.st.CompletedRuns[n]
+		if completing || occupiesAdmissionSlot(j, ref, known) {
 			running[accountKey(j.Agent)]++
 		}
 	}
@@ -2851,6 +2885,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
+	goal += finalCommentInstruction(strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"))
 	if pre := ovr.goalPreamble(); pre != "" {
 		goal = pre + "\n" + goal
 	}
@@ -2979,7 +3014,13 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 		return
 	}
 	ref, known := status[n]
+	if c.retireCompleted(ctx, n, j, ref, known) {
+		return
+	}
 	if known {
+		if ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || accountKey(ref.Agent) != accountKey(j.Agent) {
+			return // live handles cannot replace the recorded dispatch owner
+		}
 		// Refresh the live handles each tick (pane/workspace survive across a
 		// herdr restart by re-resolving from the agent's cwd).
 		j.Pane, j.Workspace = ref.Pane, ref.Workspace
@@ -3077,7 +3118,7 @@ const strandedPokeInterval = 10 * time.Minute
 // sat blocked for 15 minutes. The interval now also runs from SpawnedAt, and the
 // poke re-delivers the brief without adding a deliverable of its own.
 func strandedPoke(j *Job, status string, now time.Time) string {
-	if (status != "idle" && status != "done") || j.PR != 0 || j.Pane == "" {
+	if status != "idle" || j.PR != 0 || j.Pane == "" {
 		return ""
 	}
 	last := j.LastPoke
