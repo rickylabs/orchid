@@ -94,6 +94,15 @@ dialog. Missing proof retains `startup_timeout`. The diagnostic never submits
 input, retries registration, or exposes screen text, paths, or native errors.
 Registration, native identity and goal-delivery confirmation remain required.
 
+AGY checks effective settings and existing onboarding-cache readability before
+creating a native workspace. Unreadable files produce the fixed
+`agy-settings-unreadable` blocked log, durable fence and issue comment; no agent
+or task delivery is claimed, and the same inbox issue never automatically
+respawns after an ownership repair or dispatcher restart. Missing, malformed,
+uncertain or post-start failures retain their existing conservative handling.
+This diagnostic does not extend the shared reader's closed `issue.launchBlock`
+vocabulary; app projection requires a separate reader and decoder change.
+
 For new Codex dispatches, divybot reads the official session report again after
 prompt delivery and records the authoritative identity in the existing private
 binding. It then creates an active native goal using the assignment title and

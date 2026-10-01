@@ -3,11 +3,38 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
+
+const agySettingsUnreadable matrixReason = "agy-settings-unreadable"
+
+// Only this named pre-workspace site proves that no native agent was started.
+func agySettingsBlocked(err error) bool {
+	return errors.Is(err, agySettingsUnreadable) && matrixCause(err) == "spawn.agy-trust"
+}
+
+// Report permissions without reading or exposing settings or credential bytes.
+// Missing/non-regular optional state retains the existing preparation checks.
+func (h Host) agyUnreadableFile(ctx context.Context, path string) (bool, error) {
+	script := "if test -f " + shq(path) + "; then if test -r " + shq(path) +
+		"; then printf 'readable'; else printf 'unreadable'; fi; else printf 'unavailable'; fi"
+	raw, err := h.agyTrustCommand(ctx, script)
+	if err != nil {
+		return false, matrixReason("agy-settings-unavailable")
+	}
+	switch string(raw) {
+	case "unreadable":
+		return true, nil
+	case "readable", "unavailable":
+		return false, nil
+	default:
+		return false, matrixReason("agy-settings-unavailable")
+	}
+}
 
 // AGY 1.2.14 uses exact-path trustedWorkspaces entries. Its registered hidden
 // gemini_dir/app_data_dir flags resolve CLI settings independently of HOME.
@@ -34,6 +61,15 @@ func (h Host) prepareAGYTrust(ctx context.Context, cwd string) ([]string, error)
 	settings := filepath.Join(gemini, "antigravity-cli", "settings.json")
 	credential := filepath.Join(gemini, "antigravity-cli", "antigravity-oauth-token")
 	onboarding := filepath.Join(gemini, "antigravity-cli", "cache", "onboarding.json")
+	for _, path := range []string{settings, onboarding} {
+		unreadable, err := h.agyUnreadableFile(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		if unreadable {
+			return nil, agySettingsUnreadable
+		}
+	}
 	raw, err := h.agyTrustCommand(ctx, "exec head -c 1048577 "+shq(settings)+" 2>/dev/null")
 	if err != nil {
 		return nil, bad
