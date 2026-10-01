@@ -45,6 +45,12 @@ func codexStartupTrustDialog(screen string) bool {
 // Keep cancellation/busy/native blocked errors and uncertain screens unchanged.
 func (h Host) registrationStartFailure(ctx context.Context, output, agent, label, cwd, pane, ws string) error {
 	failure := registrationFailure(output, ctx.Err())
+	if agent == "agy" && registrationFailureKind(failure) == "startup_timeout" && ctx.Err() == nil {
+		if blocked := h.agyRegistrationCheck(ctx, label, cwd, pane, ws, false); registrationFailureKind(blocked) == "startup_blocked" {
+			return blocked
+		}
+		return failure
+	}
 	if agent != "codex" || registrationFailureKind(failure) != "startup_timeout" || ctx.Err() != nil {
 		return failure
 	}

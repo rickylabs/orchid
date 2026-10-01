@@ -19,6 +19,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"opencode-model-unavailable":   {"route.model", "The dispatch host's native catalog does not list the exact configured model."},
 	"opencode-state-unavailable":   {"launch.state", "Private per-launch OpenCode state could not be prepared; inspect the existing fence."},
 	"opencode-provider-capacity":   {"opencode.providers", "The exact provider requires an explicit positive concurrency limit and a free slot."},
+	"agy-settings-unavailable":     {"launch.trust", "AGY needs readable valid effective settings and private trust for the exact checkout; inspect this launch before retrying."},
 	"goal-budget-invalid":          {"issue.max-tokens", "Use an exact nonnegative token count or decimal k/m suffix within the supported integer range; omit the key for unknown."},
 	"goal-objective-invalid":       {"issue.title", "Provide a nonempty assignment title within the native goal length bound."},
 	"goal-prompt-delivery-failed":  {"launch.prompt", "Agent registration was confirmed, but prompt acceptance was not; inspect the run before any new dispatch."},
@@ -241,6 +242,7 @@ func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post 
 
 var matrixSites = map[string]bool{
 	"spawn.opencode-route": true, "spawn.opencode-environment": true, "spawn.opencode-preflight": true, "launch.opencode-route": true,
+	"spawn.agy-trust": true, "spawn.agy-readiness": true,
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-budget": true,
 	"spawn.registration-render": true,
 	"spawn.native-binding":      true, "dispatch.native-clear": true,

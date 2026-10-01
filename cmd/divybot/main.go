@@ -625,6 +625,13 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		}
 		env["HOME"] = h.agentHome()
 	}
+	if agent == "agy" {
+		trustArgs, trustErr := h.prepareAGYTrust(ctx, cwd)
+		if trustErr != nil {
+			return "", "", matrixSite("spawn.agy-trust", trustErr)
+		}
+		nativeArgs = append(nativeArgs, trustArgs...)
+	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", matrixSite("spawn.workspace-create", errMatrix)
@@ -700,6 +707,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		raw, e := herdrUnwrap(out)
 		if e != nil {
 			return pane, ws, matrixSite("spawn.agent-envelope", registrationFailure(out, ctx.Err()))
+		}
+		if agent == "agy" {
+			if e := h.agyRegistrationCheck(ctx, label, cwd, pane, ws, true); e != nil {
+				return pane, ws, matrixSite("spawn.agy-readiness", e)
+			}
 		}
 		var nativeID string
 		nativeID, identityReason = nativeSessionFromStart(raw, kind, label, location)

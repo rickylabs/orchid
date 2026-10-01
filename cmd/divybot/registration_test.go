@@ -36,8 +36,16 @@ func registrationHost(t *testing.T, fail string) (Host, func() [][]string) {
 	logPath := filepath.Join(root, "calls.jsonl")
 	t.Setenv("REGISTRATION_CALLS", logPath)
 	t.Setenv("REGISTRATION_FAILURE", fail)
+	settings := filepath.Join(root, ".gemini", "antigravity-cli", "settings.json")
+	if os.MkdirAll(filepath.Dir(settings), 0700) != nil || os.WriteFile(settings, []byte(`{"model":"fixture-default","toolPermission":"always-proceed","trustedWorkspaces":["/fixture/prior"]}`), 0600) != nil {
+		t.Fatal("synthetic AGY settings unavailable")
+	}
+	if os.WriteFile(filepath.Join(filepath.Dir(settings), "antigravity-oauth-token"), []byte("SYNTHETIC-AUTH-REFERENCE"), 0600) != nil {
+		t.Fatal("synthetic native credential reference unavailable")
+	}
+	writeFixture(t, filepath.Join(filepath.Dir(settings), "cache", "onboarding.json"), `{"consumerOnboardingComplete":true,"enterpriseOnboardingComplete":false,"onboardingComplete":true}`)
 	script := `#!/usr/bin/env python3
-import json,os,sys,time,tomllib
+import json,os,sys,time,tomllib,pathlib
 args=sys.argv[1:]
 with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
 mode=os.environ.get('REGISTRATION_FAILURE','')
@@ -47,6 +55,50 @@ def cwd():
  a=recorded()[0];return a[a.index('--cwd')+1]
 if args[:2]==['workspace','create']:
  print(json.dumps({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}}))
+elif args[:2]==['agent','start'] and '--kind' in args and args[args.index('--kind')+1]=='agy':
+ native=args[args.index('--')+1:]
+ if '--gemini_dir' not in native or '--app_data_dir' not in native:
+  print(json.dumps({'error':{'code':'timeout','message':'synthetic missing scoped trust'}}));sys.exit(1)
+ settings=pathlib.Path(native[native.index('--gemini_dir')+1])/native[native.index('--app_data_dir')+1]/'settings.json'
+ if json.loads(settings.read_text()).get('trustedWorkspaces')!=[cwd()]:
+  print(json.dumps({'error':{'code':'timeout','message':'synthetic wrong scoped trust'}}));sys.exit(1)
+ credential=settings.parent/'antigravity-oauth-token'
+ expected=pathlib.Path(native[native.index('--gemini_dir')+1])/'antigravity-cli'/'antigravity-oauth-token'
+ if not credential.is_symlink() or credential.resolve()!=expected.resolve() or credential.read_text()!='SYNTHETIC-AUTH-REFERENCE':
+  print(json.dumps({'error':{'code':'timeout','message':'synthetic auth reference missing'}}));sys.exit(1)
+ onboarding=settings.parent/'cache'/'onboarding.json'
+ expectedOnboarding=expected.parent/'cache'/'onboarding.json'
+ if not onboarding.is_symlink() or onboarding.resolve()!=expectedOnboarding.resolve() or json.loads(onboarding.read_text()).get('consumerOnboardingComplete')!=True:
+  print(json.dumps({'error':{'code':'timeout','message':'synthetic onboarding reference missing'}}));sys.exit(1)
+ if mode in ['agy-timeout','agy-timeout-unknown','agy-timeout-name-changed']:
+  print(json.dumps({'error':{'code':'timeout','message':'PRIVATE-AGY-CANARY'}}));sys.exit(1)
+ print(json.dumps({'result':{}}))
+elif args[:2]==['agent','get'] and any(a[:2]==['agent','start'] and '--kind' in a and a[a.index('--kind')+1]=='agy' for a in recorded()):
+ a={'agent':'agy','name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','cwd':cwd(),'agent_status':'idle','interactive_ready':True,'state_change_seq':1}
+ if mode in ['agy-timeout','agy-timeout-unknown','agy-timeout-name-changed']:a.update(name='',agent_status='unknown')
+ if mode=='agy-timeout-name-changed' and sum(x[:2]==['agent','get'] for x in recorded())>1:a['name']='fixture-agent'
+ if mode=='agy-foreign':a['agent']='claude'
+ if mode=='agy-name':a['name']='foreign-agent'
+ if mode=='agy-pane':a['pane_id']='w2:p1'
+ if mode=='agy-workspace':a['workspace_id']='w2'
+ if mode=='agy-cwd':a['cwd']='/fixture/foreign'
+ if mode=='agy-working':a['agent_status']='working'
+ if mode=='agy-unknown':a['agent_status']='unknown'
+ if mode=='agy-native-blocked':a['agent_status']='blocked'
+ if mode=='agy-not-ready':a['interactive_ready']=False
+ if mode=='agy-changing':a['state_change_seq']=sum(x[:2]==['agent','get'] for x in recorded())
+ print(json.dumps({'result':{'agent':a}}))
+elif args[:2]==['pane','read'] and any(a[:2]==['agent','start'] and '--kind' in a and a[a.index('--kind')+1]=='agy' for a in recorded()):
+ if mode=='agy-unreadable':sys.exit(1)
+ if mode=='agy-malformed':print(json.dumps({'error':{'code':'PRIVATE-AGY-CANARY'}}))
+ elif mode=='agy-oversized':print('PRIVATE-AGY-CANARY'*10000)
+ elif mode=='agy-empty':print('')
+ elif mode=='agy-utf8':sys.stdout.buffer.write(b'\xffPRIVATE-AGY-CANARY')
+ elif mode=='agy-onboarding':print('Welcome to Antigravity CLI!\nChoose your color scheme:\n > terminal\n light\n solarized light\n colorblind-friendly light\n dark')
+ elif mode=='agy-login':print('Welcome to the Antigravity CLI. You are currently\nnot signed in.\nSelect login method:\n > 1. Google OAuth\n 2. Use a Google Cloud project\n ↑/↓ Navigate · enter Select')
+ elif mode in ['agy-trust','agy-timeout','agy-timeout-name-changed']:print('Accessing workspace:\n/fixture/PRIVATE-AGY-CANARY\nDo you trust the contents of this project?\nAntigravity requires permission to read, edit, and execute files here.\nConfirm · n / esc')
+ elif mode=='agy-unknown-screen':print('PRIVATE-AGY-CANARY unfamiliar startup dialog')
+ else:print('Antigravity\n > \n ? for shortcuts')
 elif args[:2]==['agent','start'] and mode=='needs-trust':
  native=args[args.index('--')+1:]
  configs=[native[i+1] for i,x in enumerate(native[:-1]) if x=='-c' and native[i+1].startswith('projects=')]
@@ -122,12 +174,19 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 				o.Effort = "high"
 			}
 			cwd := t.TempDir()
+			if kind == "agy" {
+				writeFixture(t, filepath.Join(cwd, ".git", "info", "exclude"), "")
+			}
 			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", cwd, map[string]string{"FIXTURE_ENV": "fixture-value"}, kind, o, registrationReceipt(t, kind, o))
 			if err != nil || pane != "w1:p1" || ws != "w1" {
 				t.Fatal("registration did not return the created handles")
 			}
 			got := calls()
-			if len(got) != 3 {
+			wantCalls := 3
+			if kind == "agy" {
+				wantCalls = 6 // Exact occupant/screen/occupant before goal delivery.
+			}
+			if len(got) != wantCalls {
 				t.Fatalf("wanted workspace, environment, registration; got %d calls", len(got))
 			}
 			if strings.Contains(got[1][3], "exec ") || !strings.Contains(got[1][3], "export FIXTURE_ENV=") {
@@ -137,6 +196,11 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			if kind == "codex" {
 				quoted, _ := json.Marshal(cwd)
 				expected = append(expected, "-c", "projects={"+string(quoted)+`={trust_level="trusted"}}`)
+			}
+			if kind == "agy" {
+				gemini := filepath.Join(h.Home, ".gemini")
+				relative, _ := filepath.Rel(gemini, filepath.Join(cwd, ".divybot-agy"))
+				expected = append(expected, "--gemini_dir", gemini, "--app_data_dir", relative)
 			}
 			if !reflect.DeepEqual(got[2], expected) {
 				t.Fatalf("argv lost identity or quoting: %q", got[2])
