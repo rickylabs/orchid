@@ -30,6 +30,21 @@ Config is one JSON file (inbox repo, hosts, targets, governor) — see
 [divybot.example.json](cmd/divybot/divybot.example.json). Open work with
 `gh issue create --label <target>`.
 
+## Interactive startup deadline
+
+Each host may set `agent_start_timeout`, for example `"agent_start_timeout": "120s"`.
+The default is 120 seconds; valid durations are 5 through 300 seconds, in whole
+milliseconds. Invalid values reject configuration before dispatch. Herdr uses this
+budget to wait for interactive readiness, which can follow process detection.
+
+The same budget controls the spawn deadline, with 30 seconds of finite workspace
+and environment setup slack. A shorter parent deadline or cancellation still wins.
+Noninteractive `*-run` jobs retain their 40-second effect deadline. There is one
+startup attempt: a timeout or blocked/error result still records the durable launch
+fence and loud refusal, with no automatic respawn. Logs classify startup timeout,
+blocked, busy or cancellation without printing native output or environment values.
+Changing the deadline never bypasses native identity or confirmed goal delivery.
+
 ## More
 
 - [docs/architecture.md](docs/architecture.md) — what runs where
