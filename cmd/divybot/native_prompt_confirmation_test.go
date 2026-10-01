@@ -43,8 +43,8 @@ func TestNativePromptWaitsPastHerdrShortGateWithoutResubmitting(t *testing.T) {
 	after := before
 	after.AgentStatus = "done"
 	after.StateChangeSeq++
-	if !nativePromptObserved(before, after) {
-		t.Fatal("a fast completed turn was not confirmed")
+	if nativePromptObserved(before, after) {
+		t.Fatal("done without prompt evidence confirmed a turn")
 	}
 }
 
@@ -63,7 +63,7 @@ path=os.environ['PROMPT_FIXTURE_CALLS']
 with open(path,'a') as f:f.write(' '.join(args[:2])+(' wait' if '--wait' in args else '')+'\n')
 if args[:2]==['agent','get']:
  n=sum(1 for x in open(path) if x.startswith('agent get'))
- a={'agent':'codex','name':'codex-396','pane_id':'w1:p1','workspace_id':'w1','agent_status':'working' if n>=4 else 'idle','state_change_seq':2 if n>=4 else 1}
+ a={'agent':'opencode','name':'fixture-opencode','pane_id':'w1:p1','workspace_id':'w1','agent_status':'working' if n>=4 else 'idle','state_change_seq':2 if n>=4 else 1}
  print(json.dumps({'result':{'agent':a}}))
 elif args[:2]==['agent','prompt']:
  if '--wait' in args:
