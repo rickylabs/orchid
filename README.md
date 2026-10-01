@@ -74,6 +74,14 @@ closure and observed cleanup. Ordinary teardown receipts keep their existing cau
 When an assignment requires a final GitHub comment, its launch prompt supplies
 an exact hidden `orchid-run` marker containing the public opaque assignment and
 agent IDs. The visible comment format and destination come from the brief.
+Each new worker also receives a locally excluded `.divybot-final-comment.sh`
+body helper bound to that launch. Build the requested final comment with
+`sh .divybot-final-comment.sh < REPORT.md > FINAL-COMMENT.md`, then post it with
+`gh issue comment <issue> --repo <repository> --body-file FINAL-COMMENT.md`
+at the brief's destination. The helper preserves visible lines and appends one
+exact marker; empty, oversized or already-marked reports fail without output.
+It prepares a body and does not post or screen the visible report. Agents must
+still follow the brief's privacy rules and use it only for final comments.
 Missing or altered markers provide no completion evidence; readers must also
 verify bot authorship and dispatch time before accepting a marked comment.
 

@@ -2952,8 +2952,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	// by commentTick's mirror) parameterizes the run.
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
+	commentKey := strings.TrimPrefix(receipt.dispatch.RunID, "orchid-")
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
-	goal += finalCommentInstruction(strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"))
+	goal += finalCommentBodyInstruction(commentKey)
 	if pre := ovr.goalPreamble(); pre != "" {
 		goal = pre + "\n" + goal
 	}
@@ -2962,16 +2963,11 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		// /ephemeral/tmp (the compose default TMPDIR) is a noexec tmpfs, so the
 		// map fails and opencode dies at startup. The container's /tmp is exec.
 		env["TMPDIR"] = "/tmp"
-		// `opencode run` reads its assignment pointer from argv at startup, so
-		// the full goal must be staged BEFORE the process spawns. The file lives
-		// inside the worktree (out-of-workspace reads trigger permission prompts)
-		// and is excluded so the worker never commits it.
-		goalFile := workdir + "/.divybot-goal.md"
-		if err := host.writeFile(ctx, goalFile, goal); err != nil {
-			log.Printf("issue #%d: launch-effect-failed", n)
-			return matrixSite("launch.goal-file", errMatrix)
-		}
-		_, _ = host.runRemote(ctx, fmt.Sprintf("grep -qxF .divybot-goal.md %s/.git/info/exclude 2>/dev/null || echo .divybot-goal.md >> %s/.git/info/exclude", shq(workdir), shq(workdir)))
+	}
+	// Prepare both launch artifacts under the existing compatible failure site.
+	if err := host.stageWorkerGoal(ctx, workdir, commentKey, goal, opencodeClass); err != nil {
+		log.Printf("issue #%d: launch-effect-failed", n)
+		return matrixSite("launch.goal-file", errMatrix)
 	}
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
