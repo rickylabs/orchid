@@ -86,6 +86,28 @@ rows for existing strict Harness readers. Provider availability projection and
 config/discovery admission of matrix alternates are separate follow-up work;
 this adapter does not certify app picker availability or evaluator verdicts.
 
+AGY launches also prepare trust for the exact canonical checkout. The dispatcher
+reads valid effective CLI settings, preserves non-trust fields, and writes a
+private `.divybot-agy/settings.json` with only that checkout in `trustedWorkspaces`.
+Registered per-process directory flags select the CLI overlay. Native OAuth
+credentials are bound by symlink to their existing native store, never read or
+copied by the dispatcher; the CLI can refresh that same store normally. Other
+native authentication inputs stay inherited, and missing credentials are never
+fabricated or entered automatically. The existing native onboarding cache is also
+bound by reference; completion flags are never fabricated and no history/cache
+tree is copied. Standing settings remain unchanged. Missing,
+unreadable or invalid settings and reused/symlink state refuse before seat creation.
+
+Before any AGY goal, bounded reads of the same stable owned occupant screen detect
+remaining folder consent, sign-in and measured color-scheme onboarding blockers,
+including dialogs Herdr can report as idle/ready. These return the existing `startup_blocked` class;
+uncertain reads/ownership remain failed registration or the original timeout.
+Readiness also requires the native built-in `? for shortcuts` composer hint;
+unfamiliar screens or custom status lines fail closed before a goal.
+There is no consent keypress, automatic retry or standing-config repair. Operators
+must keep effective settings, authentication and onboarding state readable by
+the native agent.
+
 ## More
 
 - [docs/architecture.md](docs/architecture.md) — what runs where
