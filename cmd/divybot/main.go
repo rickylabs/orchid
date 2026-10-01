@@ -39,21 +39,22 @@ import (
 // ============================ config ============================
 
 type Config struct {
-	Matrix                  MatrixConfig   `json:"matrix"`
-	ActionRequestRoot       string         `json:"action_request_root,omitempty"`        // separate private maildir mount
-	ActionGoalBudgetCeiling int64          `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
-	Inbox                   string         `json:"inbox"`                                // e.g. "denoland/divybot"
-	BotLogin                string         `json:"bot_login"`                            // PR author login (for review attribution)
-	BotEmail                string         `json:"bot_email"`                            // git committer email
-	PollInterval            string         `json:"poll_interval"`                        // e.g. "30s"
-	BranchPrefix            string         `json:"branch_prefix"`                        // e.g. "orch/divybot-"
-	StateFile               string         `json:"state_file"`                           // private state location
-	NtfyTopic               string         `json:"ntfy_topic"`                           // ntfy.sh topic for escalation (optional)
-	Hosts                   []Host         `json:"hosts"`
-	Targets                 []Target       `json:"targets"`
-	Governor                Gov            `json:"governor"`
-	OpenCode                OpenCodeConfig `json:"opencode,omitempty"`
-	Memory                  Mem            `json:"memory"`
+	Matrix                  MatrixConfig             `json:"matrix"`
+	ActionRequestRoot       string                   `json:"action_request_root,omitempty"`        // separate private maildir mount
+	ActionGoalBudgetCeiling int64                    `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
+	Inbox                   string                   `json:"inbox"`                                // e.g. "denoland/divybot"
+	BotLogin                string                   `json:"bot_login"`                            // PR author login (for review attribution)
+	BotEmail                string                   `json:"bot_email"`                            // git committer email
+	PollInterval            string                   `json:"poll_interval"`                        // e.g. "30s"
+	BranchPrefix            string                   `json:"branch_prefix"`                        // e.g. "orch/divybot-"
+	StateFile               string                   `json:"state_file"`                           // private state location
+	NtfyTopic               string                   `json:"ntfy_topic"`                           // ntfy.sh topic for escalation (optional)
+	Hosts                   []Host                   `json:"hosts"`
+	Targets                 []Target                 `json:"targets"`
+	Governor                Gov                      `json:"governor"`
+	OpenCode                OpenCodeConfig           `json:"opencode,omitempty"`
+	UnmeteredTransports     UnmeteredTransportLimits `json:"unmetered_transports,omitempty"`
+	Memory                  Mem                      `json:"memory"`
 }
 
 // Mem configures the git-backed shared memory. Reuses the inbox repo
@@ -214,7 +215,19 @@ func loadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(b, &fields) != nil {
+		return nil, fmt.Errorf("config object required")
+	}
+	if block, present := fields["unmetered_transports"]; present {
+		if string(block) == "null" || strictJSON(block, &c.UnmeteredTransports) != nil {
+			return nil, fmt.Errorf("unmetered_transports invalid or unknown field")
+		}
+	}
 	c.withDefaults()
+	if !c.UnmeteredTransports.valid() {
+		return nil, fmt.Errorf("unmetered_transports requires agy max_active 0..256")
+	}
 	for i, host := range c.Hosts {
 		if _, err := host.agentStartBudget(); err != nil {
 			return nil, fmt.Errorf("hosts[%d].agent_start_timeout invalid", i)
@@ -1636,6 +1649,9 @@ printf '%%s ' "$m"; printf '%%s' "$l"`, shq(home))
 // reading (ok=false when blank/unparseable/empty meter). mtime is the recency
 // key used to pick the freshest host when an account spans several.
 func parseHostQuota(account, out string) (five, seven RateLimit, mtime int64, ok bool) {
+	if account != "claude" && account != "codex" {
+		return // A different transport cannot borrow either native account meter.
+	}
 	out = strings.TrimSpace(out)
 	if out == "" {
 		return
@@ -1719,6 +1735,9 @@ func (c *Coord) sampleQuota(ctx context.Context) map[string]quota {
 	out := map[string]quota{}
 	best := map[string]int64{} // account => freshest mtime seen
 	for _, acct := range c.cfg.accounts() {
+		if acct != "claude" && acct != "codex" {
+			continue // AGY is explicitly unmetered; OpenCode uses provider seats.
+		}
 		for _, h := range c.cfg.Hosts {
 			var script string
 			if acct == "codex" {
@@ -2185,6 +2204,14 @@ func (c *Coord) curCaps() map[string]int {
 		active[accountKey(j.Agent)]++
 	}
 	for _, a := range c.cfg.accounts() {
+		if a == "agy" {
+			caps[a] = c.cfg.UnmeteredTransports.cap(a)
+			log.Printf("governor[agy]: meter=unmetered static cap %d active %d", caps[a], active[a])
+			continue
+		}
+		if a != "claude" && a != "codex" {
+			continue // OpenCode capacity is calculated from its exact provider pools.
+		}
 		d := c.cfg.Governor.decide(now, qs[a], c.st.QuotaSamples[a], active[a], c.st.PrevCap[a])
 		caps[a] = d.cap
 		c.st.PrevCap[a] = d.cap
@@ -2492,8 +2519,9 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 	for key, value := range openCodeCapacityBudget(c.cfg.OpenCode, c.st.Jobs, status) {
 		budget[key] = value
 	}
+	pools := openCodeProviderPools(c.cfg.OpenCode, c.st.Jobs)
 	c.st.mu.Unlock()
-	c.publishTransportAvailability(budget, time.Now())
+	c.publishTransportAvailability(budget, time.Now(), pools)
 	return budget
 }
 

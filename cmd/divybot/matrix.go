@@ -69,15 +69,16 @@ type MatrixGrant struct {
 	Override      *MatrixOverride  `json:"ownerMatrixOverride,omitempty"`
 }
 type matrixRequest struct {
-	PinName       string           `json:"pinName,omitempty"`
-	Tier          string           `json:"tier"`
-	Role          string           `json:"role"`
-	ProfileText   string           `json:"profileText,omitempty"`
-	Pin           *MatrixPin       `json:"pin,omitempty"`
-	Authorization *MatrixAuthority `json:"authorization,omitempty"`
-	Override      *MatrixOverride  `json:"ownerMatrixOverride,omitempty"`
-	WorklogText   string           `json:"worklogText,omitempty"`
-	Available     []string         `json:"availableTransports"`
+	PinName           string           `json:"pinName,omitempty"`
+	Tier              string           `json:"tier"`
+	Role              string           `json:"role"`
+	ProfileText       string           `json:"profileText,omitempty"`
+	Pin               *MatrixPin       `json:"pin,omitempty"`
+	Authorization     *MatrixAuthority `json:"authorization,omitempty"`
+	Override          *MatrixOverride  `json:"ownerMatrixOverride,omitempty"`
+	WorklogText       string           `json:"worklogText,omitempty"`
+	Available         []string         `json:"availableTransports"`
+	OpenCodeProviders []string         `json:"openCodeProviders,omitempty"`
 }
 type matrixRoute struct {
 	Provider        string `json:"provider"`
@@ -781,7 +782,8 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 			continue // A disabled adapter is not a blocked subscription quota.
 		}
 		q := c.gov.q[transport]
-		cond := transportQuotaCondition(budget[transport], q, now, c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling)
+		cond := availabilityConditions[admissionTransportReason(transport, budget[transport], q, now,
+			c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling, c.cfg.UnmeteredTransports)]
 		if transport == "opencode" {
 			cond = "blocked by capacity"
 			if c.cfg.OpenCode.valid() && budget[transport] > 0 && len(c.cfg.OpenCode.Providers) > 0 {
@@ -795,6 +797,11 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		}
 	}
 	c.gov.mu.Unlock()
+	for provider, limit := range c.cfg.OpenCode.Providers {
+		if limit.MaxActive > 0 && budget["opencode:"+provider] > 0 {
+			req.OpenCodeProviders = append(req.OpenCodeProviders, provider)
+		}
+	}
 	quotaDetail := strings.Join(quotaConditions, ", ")
 	route, e := d.resolve(ctx, cfg, req)
 	if errors.Is(e, errEvaluatorEvidence) || (e == nil && strings.HasSuffix(route.Role, "_evaluation")) {
@@ -925,7 +932,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 
 // Native subscription meters keep their published v1 contract. OpenCode
 // admission uses explicit provider capacity, not one fabricated vendor meter.
-var meteredTransports = []string{"claude", "codex", "agy"}
+var meteredTransports = []string{"claude", "codex"}
 
 // Adapters supported by the matrix dispatcher.
 var matrixTransports = []string{"claude", "codex", "agy", "opencode"}

@@ -50,7 +50,7 @@ func TestQuotaBlockedPinReportsQuota(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := privateTestRoot(t)
-			cfg := &Config{Inbox: "example/inbox", Matrix: MatrixConfig{Source: root, ReceiptRoot: root, Revision: strings.Repeat("b", 40), TargetRevisions: map[string]string{"example/project": strings.Repeat("c", 40)}}, Governor: Gov{WeeklyCeiling: 92}}
+			cfg := &Config{Inbox: "example/inbox", Matrix: MatrixConfig{Source: root, ReceiptRoot: root, Revision: strings.Repeat("b", 40), TargetRevisions: map[string]string{"example/project": strings.Repeat("c", 40)}}, Governor: Gov{WeeklyCeiling: 92}, UnmeteredTransports: UnmeteredTransportLimits{"agy": {1}}}
 			c := &Coord{cfg: cfg}
 			now := time.Now()
 			q := quota{ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: now.Add(time.Hour).Unix()}, seven: RateLimit{UsedPct: 20, ResetsAt: now.Add(2 * time.Hour).Unix()}}

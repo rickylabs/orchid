@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // This is an explicit operator concurrency limit, not a subscription/credit
 // meter. No provider is enabled implicitly and OpenCode never borrows Codex quota.
@@ -9,6 +12,30 @@ type OpenCodeConfig struct {
 }
 type OpenCodeProvider struct {
 	MaxActive int `json:"max_active"`
+}
+
+type openCodeProviderPool struct {
+	Provider  string `json:"provider"`
+	MaxActive int    `json:"maxActive"`
+	Active    int    `json:"active"`
+}
+
+func openCodeProviderPools(cfg OpenCodeConfig, jobs map[int]*Job) []openCodeProviderPool {
+	pools := make([]openCodeProviderPool, 0, len(cfg.Providers))
+	if !cfg.valid() {
+		return pools
+	}
+	for provider, limit := range cfg.Providers {
+		active := 0
+		for _, job := range jobs {
+			if job != nil && job.Agent == "opencode" && (job.OpenCode == nil || job.OpenCode.Route.Provider == "" || job.OpenCode.Route.Provider == provider) {
+				active++
+			}
+		}
+		pools = append(pools, openCodeProviderPool{provider, limit.MaxActive, active})
+	}
+	sort.Slice(pools, func(i, j int) bool { return pools[i].Provider < pools[j].Provider })
+	return pools
 }
 
 func (cfg OpenCodeConfig) valid() bool {

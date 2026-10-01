@@ -63,7 +63,7 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 		"codex":  {ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: later}, seven: RateLimit{UsedPct: 10, ResetsAt: later}},
 	}
 	budget := map[string]int{"claude": 2, "codex": 1, "agy": 0}
-	snapshot := buildTransportAvailability(budget, quotas, now, 90*time.Second, 92, time.Minute)
+	snapshot := buildTransportAvailability(budget, quotas, now, 90*time.Second, 92, time.Minute, nil, nil)
 	// Millisecond UTC, whatever the clock's precision: the contract reads at most three digits.
 	if snapshot.SchemaVersion != 1 || snapshot.ObservedAt != "2026-09-30T12:00:00.123Z" || snapshot.ValidUntil != "2026-09-30T12:01:00.123Z" {
 		t.Fatalf("snapshot header %+v", snapshot)
@@ -81,7 +81,7 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 		}
 		// The published answer is admission's answer.
 		admitted := budget[row.Transport] > 0
-		if row.Transport != "opencode" {
+		if row.Transport != "opencode" && row.Transport != "agy" {
 			admitted = transportQuotaCondition(budget[row.Transport], quotas[row.Transport], now, 90*time.Second, 92) == ""
 		}
 		if admitted != row.Available {
@@ -104,7 +104,7 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	if !reflect.DeepEqual(keys, []string{"observedAt", "schemaVersion", "transports", "validUntil"}) {
+	if !reflect.DeepEqual(keys, []string{"observedAt", "openCodeProviderPools", "schemaVersion", "transports", "validUntil"}) {
 		t.Fatalf("snapshot fields %v", keys)
 	}
 	var rows []map[string]any
@@ -120,7 +120,7 @@ func TestTransportAvailabilityPublishedPrivately(t *testing.T) {
 	owner := &receiptOwner{uid: 1000, gid: 1000,
 		chown: func(path string, _, _ int) error { chowned = append(chowned, filepath.Base(path)); return nil },
 		sync:  func(string) error { return nil }}
-	first := buildTransportAvailability(map[string]int{"claude": 1}, nil, now, 90*time.Second, 92, time.Minute)
+	first := buildTransportAvailability(map[string]int{"claude": 1}, nil, now, 90*time.Second, 92, time.Minute, nil, nil)
 	if err := publishTransportAvailability(root, owner, first); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestTransportAvailabilityPublishedPrivately(t *testing.T) {
 	if len(chowned) != 2 || chowned[0] != "governance" {
 		t.Fatalf("owner transfer %v, want the new directory and the file", chowned)
 	}
-	second := buildTransportAvailability(map[string]int{"codex": 1}, nil, now.Add(30*time.Second), 90*time.Second, 92, time.Minute)
+	second := buildTransportAvailability(map[string]int{"codex": 1}, nil, now.Add(30*time.Second), 90*time.Second, 92, time.Minute, nil, nil)
 	if err := publishTransportAvailability(root, owner, second); err != nil {
 		t.Fatal(err)
 	}
@@ -166,19 +166,19 @@ func TestTransportAvailabilityFailedPublishClears(t *testing.T) {
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}}
 	c.gov.q = map[string]quota{}
-	c.publishTransportAvailability(map[string]int{"claude": 1}, now)
+	c.publishTransportAvailability(map[string]int{"claude": 1}, now, nil)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal("snapshot not published", err)
 	}
 	uid := -1
 	c.cfg.Matrix.ReceiptOwnerUID = &uid // An invalid owner makes the publish fail.
-	c.publishTransportAvailability(map[string]int{"claude": 1}, now.Add(30*time.Second))
+	c.publishTransportAvailability(map[string]int{"claude": 1}, now.Add(30*time.Second), nil)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a failed publish kept the previous snapshot")
 	}
 	c.cfg.Matrix.ReceiptOwnerUID = nil
 	c.dry = true
-	c.publishTransportAvailability(map[string]int{"claude": 1}, now.Add(time.Minute))
+	c.publishTransportAvailability(map[string]int{"claude": 1}, now.Add(time.Minute), nil)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a dry run wrote a snapshot")
 	}
