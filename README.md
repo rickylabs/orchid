@@ -81,10 +81,15 @@ evidence blocks the run loudly and durably. Blocked runs keep the issue open and
 cannot replay the prompt, poke an idle worker, supervise/merge a PR, or close as
 completed after a deadline. Existing sessions without this binding need inspection.
 
-The published v1 subscription availability snapshot retains its three native
-rows for existing strict Harness readers. Provider availability projection and
-config/discovery admission of matrix alternates are separate follow-up work;
-this adapter does not certify app picker availability or evaluator verdicts.
+The published v1 availability snapshot now appends an `opencode` row after the
+three subscriptions. Upgrade Harness readers and contracts to 0.31.0 before
+deploying this emitter; those readers accept the old three-row producer during
+the transition. OpenCode reports whether any explicitly configured provider pool
+has a free seat (`available: true`, `reason: null`), otherwise `no-capacity`. It
+reports no subscription quota, credit balance or exact model readiness. Native
+provider/model/variant preflight and matrix admission still govern each launch.
+Config/discovery admission of matrix alternates and evaluator verdicts remain
+separate follow-up work.
 
 ## More
 

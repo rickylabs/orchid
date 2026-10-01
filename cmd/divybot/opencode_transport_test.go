@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -397,16 +396,19 @@ func TestOpenCodeUnfinishedOutputNeverCompletesAtDeadline(t *testing.T) {
 	}
 }
 
-func TestOpenCodeAdapterPreservesPublishedSubscriptionContract(t *testing.T) {
+func TestOpenCodeAvailabilityUsesOnlyExplicitProviderCapacity(t *testing.T) {
 	now := time.Now()
-	s := buildTransportAvailability(map[string]int{"opencode": 1}, nil, now, time.Minute, 92, time.Minute)
-	for _, row := range s.Transports {
-		if row.Transport == "opencode" {
-			t.Fatal("provider capacity corrupted the strict three-subscription v1 reader")
+	for _, capacity := range []int{-1, 0, 1} {
+		for _, nativeQuota := range []quota{{}, {ok: true, at: now, seven: RateLimit{UsedPct: 100, ResetsAt: now.Add(time.Hour).Unix()}}} {
+			s := buildTransportAvailability(map[string]int{"opencode": capacity}, map[string]quota{"opencode": nativeQuota}, now, time.Minute, 92, time.Minute)
+			if len(s.Transports) != 4 || s.Transports[3].Transport != "opencode" {
+				t.Fatal("OpenCode capacity row is missing or out of order")
+			}
+			row := s.Transports[3]
+			if row.Available != (capacity > 0) || (capacity > 0 && row.Reason != nil) || (capacity <= 0 && (row.Reason == nil || *row.Reason != availabilityNoCapacity)) {
+				t.Fatal("OpenCode capacity was treated as subscription quota or fabricated")
+			}
 		}
-	}
-	if !reflect.DeepEqual(matrixTransports, []string{"claude", "codex", "agy", "opencode"}) {
-		t.Fatal("transport adapter is not offered")
 	}
 }
 

@@ -8,9 +8,9 @@ import (
 
 // A private, current snapshot of which matrix transports admission would offer
 // right now, and why each other one is unavailable. It uses the exact predicate
-// admission uses (transportAvailabilityReason), so a reader never sees a
-// transport offered that admission would refuse. The governance reader
-// (rickylabs/harness, contracts 0.28.0 `transportAvailability`) publishes it;
+// subscription admission uses (transportAvailabilityReason), plus aggregate
+// configured OpenCode provider capacity. Exact route discovery is still required.
+// The governance reader (contracts 0.31.0 `transportAvailability`) publishes it;
 // the file carries no identity, path or quota figure.
 type transportAvailabilityRow struct {
 	Transport string  `json:"transport"`
@@ -35,12 +35,19 @@ func transportAvailabilityPath(receiptRoot string) string {
 
 func buildTransportAvailability(budget map[string]int, quotas map[string]quota, now time.Time,
 	sampleInterval time.Duration, ceiling float64, validFor time.Duration) transportAvailabilitySnapshot {
-	// Published v1 is the exact three-subscription contract consumed by Harness
-	// 0.30.0. Provider capacity is not a subscription meter; do not add a fourth
-	// row and make existing strict readers discard all native availability.
-	rows := make([]transportAvailabilityRow, 0, len(meteredTransports))
-	for _, transport := range meteredTransports {
-		reason := transportAvailabilityReason(budget[transport], quotas[transport], now, sampleInterval, ceiling)
+	// Reader-first rollout: contracts 0.31.0 accepts the legacy subscription
+	// prefix and this fourth row. OpenCode has explicit provider seats; never
+	// infer a subscription/credit meter or model readiness from that capacity.
+	rows := make([]transportAvailabilityRow, 0, len(matrixTransports))
+	for _, transport := range matrixTransports {
+		reason := ""
+		if transport == "opencode" {
+			if budget[transport] <= 0 {
+				reason = availabilityNoCapacity
+			}
+		} else {
+			reason = transportAvailabilityReason(budget[transport], quotas[transport], now, sampleInterval, ceiling)
+		}
 		row := transportAvailabilityRow{Transport: transport, Available: reason == ""}
 		if reason != "" {
 			row.Reason = &reason
