@@ -39,6 +39,7 @@ func completionFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int) {
 		}
 		return []AgentInfo{completionAgent(j)}, nil
 	}
+	c.actions.completionPR = func(context.Context, *Job) (bool, error) { return false, nil }
 	c.actions.completed = func(_ context.Context, _ Host, _ *Job, native string) (bool, error) {
 		if native != "thread-fixture" {
 			t.Fatal("wrong native source")
@@ -144,6 +145,10 @@ func TestCompletionOccupantMustBeUnique(t *testing.T) {
 func TestCompletionLeavesOtherNativeAdaptersToTheirOwnSupervisor(t *testing.T) {
 	c, j, _, _, closes := completionFixture(t)
 	for _, agent := range []string{"opencode", "agy"} {
+		c.actions.completionPR = func(context.Context, *Job) (bool, error) {
+			t.Fatal("completion inspected another adapter PR")
+			return false, nil
+		}
 		j.Agent = agent
 		if c.retireCompleted(context.Background(), 7, j, completionRef(j), true) || *closes != 0 {
 			t.Fatal("intercepted another native adapter")
@@ -495,12 +500,226 @@ func TestCompletionFencePrecedesAdmissionAdoptionAndSupervisionEffects(t *testin
 	src := string(data)
 	tick := src[strings.Index(src, "func (c *Coord) tick("):strings.Index(src, "func teardownEligible(")]
 	if strings.Index(tick, "c.retireCompleted(") > strings.Index(tick, "budget := c.admissionBudget(") ||
-		strings.Index(tick, "if completed {") > strings.Index(tick, "c.adopt(") {
+		strings.Index(tick, "if completed {") > strings.Index(tick, "c.adopt(") ||
+		!strings.Contains(tick, "c.superviseActive(ctx, n, j, status, is)") {
 		t.Fatal("completion fence lost tick ordering")
 	}
 	supervise := src[strings.Index(src, "func (c *Coord) supervise("):strings.Index(src, "const strandedPokeInterval")]
 	if strings.Index(supervise, "c.retireCompleted(") > strings.Index(supervise, "c.pollPR(") ||
 		strings.Index(supervise, "c.retireCompleted(") > strings.Index(supervise, "c.retryBoundGoal(") {
 		t.Fatal("completion check followed a continuation effect")
+	}
+}
+
+// Executable doubles exercise the real PR and deadline paths without a host.
+func completionSupervisionCommands(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	ghLog, sshLog := filepath.Join(dir, "gh-log"), filepath.Join(dir, "ssh-log")
+	gh := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$COMPLETION_GH_LOG\"\nif [ \"$COMPLETION_GH_FAIL\" = yes ]; then exit 1; fi\ncase \"$1 $2\" in\n 'pr list') printf '%s\\n' \"$COMPLETION_PR_LIST\" ;;\n 'pr view') printf '%s\\n' \"$COMPLETION_PR_VIEW\" ;;\n *) printf '{}\\n' ;;\nesac\n"
+	ssh := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$COMPLETION_SSH_LOG\"\nprintf '[]\\n'\n"
+	for name, script := range map[string]string{"gh": gh, "ssh": ssh} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("COMPLETION_GH_LOG", ghLog)
+	t.Setenv("COMPLETION_SSH_LOG", sshLog)
+	t.Setenv("COMPLETION_GH_FAIL", "no")
+	t.Setenv("COMPLETION_PR_LIST", "[]")
+	t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","isDraft":false,"reviews":[],"comments":[{"id":"new","author":{"login":"reviewer"},"body":"Review this."}],"statusCheckRollup":[{"name":"check","status":"COMPLETED","conclusion":"SUCCESS"}]}`)
+	return ghLog, sshLog
+}
+
+func TestCompletionPRScopeRequiresConfirmedAbsence(t *testing.T) {
+	completionSupervisionCommands(t)
+	for _, name := range []string{"unbound-open", "bound-open", "missing-scope", "read-error", "absent", "merged", "closed"} {
+		t.Run(name, func(t *testing.T) {
+			c, j, _, _, closes := completionFixture(t)
+			c.actions.completionPR = nil
+			j.Branch = "fixture-branch"
+			t.Setenv("COMPLETION_GH_FAIL", "no")
+			t.Setenv("COMPLETION_PR_LIST", "[]")
+			t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"OPEN"}`)
+			switch name {
+			case "unbound-open":
+				t.Setenv("COMPLETION_PR_LIST", `[{"number":8}]`)
+			case "bound-open":
+				j.PR = 8
+			case "missing-scope":
+				j.Branch = ""
+			case "read-error":
+				t.Setenv("COMPLETION_GH_FAIL", "yes")
+			case "merged":
+				j.PR = 8
+				t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"MERGED"}`)
+			case "closed":
+				j.PR = 8
+				t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"CLOSED"}`)
+			}
+			c.retireCompleted(context.Background(), 7, j, completionRef(j), true)
+			wantClose := name == "absent" || name == "merged" || name == "closed"
+			if (*closes == 1) != wantClose {
+				t.Fatalf("PR scope %s close count %d", name, *closes)
+			}
+		})
+	}
+}
+
+func TestCompletionUnprovenSupervisionPollsAndMergesWithoutInput(t *testing.T) {
+	for _, name := range []string{"no-final", "receipt-missing", "open-pr", "merge-pr", "merged-pr", "stuck-draft"} {
+		t.Run(name, func(t *testing.T) {
+			ghLog, sshLog := completionSupervisionCommands(t)
+			c, j, _, _, closes := completionFixture(t)
+			h := c.hosts[j.Host]
+			h.SSH = "fixture-host"
+			c.hosts[j.Host] = h
+			j.Branch = "fixture-branch"
+			j.SpawnedAt = time.Now().Add(-time.Hour)
+			c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { return false, nil }
+			if name == "receipt-missing" {
+				os.Remove(filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record", "binding.json"))
+			}
+			if name == "open-pr" || name == "merge-pr" || name == "merged-pr" || name == "stuck-draft" {
+				j.PR = 8
+				c.actions.completionPR = func(context.Context, *Job) (bool, error) { return true, nil }
+			}
+			if name == "merged-pr" {
+				t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"MERGED"}`)
+			}
+			if name == "stuck-draft" {
+				t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","isDraft":true,"statusCheckRollup":[{"name":"check","conclusion":"SUCCESS"}]}`)
+			}
+			if name == "merge-pr" {
+				c.cfg.Targets = []Target{{Repo: j.Repo, AutoMerge: true}}
+			}
+			c.supervise(context.Background(), 7, j, map[int]agentRef{7: completionRef(j)}, Issue{Number: 7})
+			calls, _ := os.ReadFile(ghLog)
+			if !strings.Contains(string(calls), "pr list") && !strings.Contains(string(calls), "pr view") {
+				t.Fatal("unproven completion stopped PR polling")
+			}
+			if name == "merge-pr" && !strings.Contains(string(calls), "pr merge") {
+				t.Fatal("done unproven worker stopped eligible PR merge")
+			}
+			if sent, _ := os.ReadFile(sshLog); len(sent) != 0 {
+				t.Fatalf("unproven done seat received input: %s", sent)
+			}
+			if *closes != 0 || len(c.st.CompletedRuns) != 0 {
+				t.Fatal("unproven PR supervision retired the seat")
+			}
+		})
+	}
+}
+
+func TestCompletionMismatchRetainsOwnerAndDeadlineSupervisionAcrossRestart(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(strconv.FormatBool(mismatch), func(t *testing.T) {
+			ghLog, sshLog := completionSupervisionCommands(t)
+			c, j, _, _, _ := completionFixture(t)
+			h := c.hosts[j.Host]
+			h.SSH = "fixture-host"
+			c.hosts[j.Host] = h
+			c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { return false, nil }
+			// Deadline teardown retains its existing independent capture semantics.
+			c.actions.stopProcess = func(context.Context, Host, string, string) (*actionStopProcess, error) {
+				return &actionStopProcess{SchemaVersion: 1, RootPID: 301, GroupID: 301, Members: []actionProcessIdentity{{PID: 301, Start: 9}}}, nil
+			}
+			ref := completionRef(j)
+			ref.StateChangeSeq = 42
+			if mismatch {
+				ref.Pane = "replacement-pane"
+				ref.Workspace = "replacement-workspace"
+			}
+			var logs bytes.Buffer
+			oldLog := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(oldLog)
+			c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+			c.st.save()
+			c.st = loadState(c.st.path)
+			j = c.st.Jobs[7]
+			c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+			if mismatch && strings.Count(logs.String(), "owner-mismatch") != 1 {
+				t.Fatal("mismatch notice not durable/deduplicated")
+			}
+			if j.Pane != "pane-fixture" || j.Workspace != "workspace-fixture" {
+				t.Fatal("mismatch replaced recorded owner")
+			}
+			j.Deadline = time.Now().Add(-time.Second)
+			c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+			calls, _ := os.ReadFile(ghLog)
+			remote, _ := os.ReadFile(sshLog)
+			if !strings.Contains(string(calls), "issue close 7") || !strings.Contains(string(remote), "workspace' 'close' 'workspace-fixture") {
+				t.Fatalf("deadline supervision stopped: %s %s", calls, remote)
+			}
+			if strings.Contains(string(remote), "replacement-") || strings.Contains(string(remote), "'send'") {
+				t.Fatal("deadline used replacement owner or sent continuation")
+			}
+			if c.st.Jobs[7] != nil {
+				t.Fatal("deadline did not finish existing supervision")
+			}
+		})
+	}
+}
+
+func TestCompletionPreAdmissionObservationIsNotRepeatedBySupervision(t *testing.T) {
+	ghLog, _ := completionSupervisionCommands(t)
+	c, j, _, _, _ := completionFixture(t)
+	h := c.hosts[j.Host]
+	h.SSH = "fixture-host"
+	c.hosts[j.Host] = h
+	reads := 0
+	c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { reads++; return false, nil }
+	ref := completionRef(j)
+	if c.retireCompleted(context.Background(), 7, j, ref, true) {
+		t.Fatal("unproven prepass retired")
+	}
+	c.superviseActive(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+	if reads != 1 {
+		t.Fatal("completion was read again during supervision")
+	}
+	if calls, _ := os.ReadFile(ghLog); !strings.Contains(string(calls), "pr list") {
+		t.Fatal("cached unproven completion stopped PR polling")
+	}
+}
+
+func TestCompletionMismatchedIdleSeatNeverReceivesInput(t *testing.T) {
+	for _, field := range []string{"host", "pane", "workspace", "agent", "stranded"} {
+		t.Run(field, func(t *testing.T) {
+			ghLog, sshLog := completionSupervisionCommands(t)
+			c, j, _, _, _ := completionFixture(t)
+			h := c.hosts[j.Host]
+			h.SSH = "fixture-host"
+			c.hosts[j.Host] = h
+			j.PR = 8
+			if field == "stranded" {
+				j.PR = 0
+			}
+			j.LastPoke = time.Now().Add(-time.Hour)
+			t.Setenv("COMPLETION_PR_VIEW", `{"number":8,"state":"OPEN","mergeable":"MERGEABLE","isDraft":true,"statusCheckRollup":[{"name":"check","conclusion":"SUCCESS"}]}`)
+			ref := completionRef(j)
+			ref.Status = "idle"
+			switch field {
+			case "host":
+				ref.Host = "other"
+			case "pane", "stranded":
+				ref.Pane = "other"
+			case "workspace":
+				ref.Workspace = "other"
+			case "agent":
+				ref.Agent = "claude"
+			}
+			c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+			if calls, _ := os.ReadFile(ghLog); !(strings.Contains(string(calls), "pr view") || strings.Contains(string(calls), "pr list")) {
+				t.Fatal("mismatch stopped PR polling")
+			}
+			if calls, _ := os.ReadFile(sshLog); len(calls) != 0 {
+				t.Fatalf("mismatched seat received effects: %s", calls)
+			}
+			if j.Pane != "pane-fixture" || j.Workspace != "workspace-fixture" {
+				t.Fatal("mismatch changed recorded owner")
+			}
+		})
 	}
 }

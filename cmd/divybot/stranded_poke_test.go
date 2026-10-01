@@ -56,7 +56,7 @@ func TestStrandedPokeIsTheOnlyStrandedSend(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(src)
-	if !strings.Contains(text, "if poke := strandedPoke(j, ref.Status, time.Now()); known && poke != \"\" {") {
+	if !strings.Contains(text, "if poke := strandedPoke(j, ref.Status, time.Now()); !suppressInput && poke != \"\" {") {
 		t.Fatal("the stranded tick does not use strandedPoke")
 	}
 	if strings.Contains(text, "implement the assigned issue fully, then open a PR") {

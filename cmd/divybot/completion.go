@@ -12,7 +12,7 @@ import (
 )
 
 // Private completion fence. It outlives job removal: an open inbox issue is
-// never permission to restart a successful run. Cleanup holds capacity until
+// never permission to restart a completed run. Cleanup holds capacity until
 // the recorded seat AND its captured native process are independently absent.
 type completedRun struct {
 	DispatchKey     string `json:"dispatchKey"`
@@ -45,6 +45,40 @@ func markedCompletionComment(body, author, bot, createdAt string, spawned time.T
 	return marker != "" && bot != "" && author == bot && err == nil && !spawned.IsZero() &&
 		!at.Before(spawned.Truncate(time.Second)) && !at.After(time.Now()) &&
 		strings.Count(body, "<!-- orchid-run ") == 1 && strings.Count(body, marker) == 1
+}
+
+// A final turn must not retire a worker whose PR still needs supervision.
+func (c *Coord) completionPRPending(ctx context.Context, j *Job) (bool, error) {
+	if c.actions.completionPR != nil {
+		return c.actions.completionPR(ctx, j)
+	}
+	if j.PR != 0 {
+		v, err := ghPRView(ctx, j.Repo, j.PR)
+		return err != nil || (v.State != "MERGED" && v.State != "CLOSED"), err
+	}
+	if j.Repo == "" || j.Branch == "" {
+		return true, nil // absent PR scope is not proof of absence
+	}
+	var prs []struct {
+		Number int `json:"number"`
+	}
+	err := ghJSON(ctx, &prs, "pr", "list", "--repo", j.Repo, "--head", j.Branch,
+		"--state", "open", "--json", "number")
+	return err != nil || len(prs) != 0, err
+}
+
+func (c *Coord) noteOwnerMismatch(j *Job, ref agentRef) {
+	key := shaText([]byte(fmt.Sprintf("%s/%s/%s/%s/%s/%d", ref.Host, ref.Agent, ref.Pane, ref.Workspace, ref.Status, ref.StateChangeSeq)))
+	c.st.mu.Lock()
+	if j.OwnerMismatchNotice == key {
+		c.st.mu.Unlock()
+		return
+	}
+	j.OwnerMismatchNotice = key
+	_ = c.st.saveLocked()
+	c.st.mu.Unlock()
+	log.Printf("issue #%d: owner-mismatch; continuation input suppressed", j.Issue)
+	c.notify(fmt.Sprintf("issue #%d: recorded seat differs from fleet; inspect ownership", j.Issue))
 }
 
 func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native string) (bool, error) {
@@ -191,27 +225,33 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	}
 	check, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	if !fenced {
+		pending, err := c.completionPRPending(check, j)
+		if err != nil || pending {
+			return false // PR supervision continues, with no input to a done seat
+		}
+	}
 	receipt, native, err := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, nil, j.Agent)
 	if err != nil || native == "" || receipt.dispatch.Location == nil || receipt.dispatch.Host != j.Host ||
 		receipt.dispatch.Location.PaneID != j.Pane || receipt.dispatch.Location.WorkspaceID != j.Workspace {
 		c.noteCompletionUnproven(j, 0)
-		return true
+		return fenced
 	}
 	if !fenced {
 		agents, err := c.actionList(check, host)
 		first, valid := completionOccupant(agents, j, native)
 		if err != nil || !valid {
-			return true
+			return false
 		}
 		complete, err := c.completionEvidence(check, host, j, native)
 		if err != nil || !complete {
 			c.noteCompletionUnproven(j, first.StateChangeSeq)
-			return true // no continuation effect after a done observation
+			return false // supervision continues without continuation input
 		}
 		agents, err = c.actionList(check, host)
 		second, valid := completionOccupant(agents, j, native)
 		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq {
-			return true
+			return false
 		}
 		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring"}
 		c.st.mu.Lock()
@@ -225,7 +265,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		}
 		c.st.mu.Unlock()
 		if err != nil {
-			return true
+			return false
 		}
 	}
 	if fence.DispatchKey != j.DispatchKey || fence.NativeSessionID != native {

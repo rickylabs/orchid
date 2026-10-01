@@ -53,7 +53,12 @@ completion source confirms it: the newest native Codex turn has a final answer,
 or the bot posted this run's marked final comment. A turn without that evidence
 logs `completion-unproven`, notifies the operator once per state change, and
 receives no automatic continuation. When a Codex run has a native goal, that
-goal must also match the assignment and report `complete`.
+goal must also match the assignment and report `complete`. Pending or unreadable
+PRs keep the worker supervised for review; branch-scoped PR absence is checked
+before retirement. Unproven completion and mismatched seat handles suppress
+automatic input while retaining PR polling, eligible merging and the existing
+operator deadline. Handle mismatches notify the operator once per observed change
+and never replace the recorded owner. Completion is checked once per poll tick.
 
 The dispatcher persists a completion fence before cleanup. It retains the job
 and capacity until both the recorded workspace and its captured native process
