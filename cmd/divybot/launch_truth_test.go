@@ -53,7 +53,7 @@ func TestMatrixLaunchOutcomePreservesRegisteredAgent(t *testing.T) {
 			body, err := os.ReadFile(launchStatePath(root, cfg.Inbox, is))
 			var state launchStateRecord
 			if err != nil || json.Unmarshal(body, &state) != nil || state.State != "launching" || state.ReasonCode != nil {
-				t.Fatal("ambiguous launch was exported as a refusal")
+				t.Fatal("ambiguous launch was exported as a false pre-launch refusal")
 			}
 			files, e := filepath.Glob(filepath.Join(root, "*", "record", "dispatch.json"))
 			if e != nil || len(files) != 1 {
@@ -66,6 +66,12 @@ func TestMatrixLaunchOutcomePreservesRegisteredAgent(t *testing.T) {
 			}
 			var comment string
 			c.reportIssueMatrixRefusal(context.Background(), 1, is, refusal, func(_ context.Context, _ string, _ int, body string) error { comment = body; return nil })
+			if tc.name == "prompt-unconfirmed" {
+				body, err = os.ReadFile(launchStatePath(root, cfg.Inbox, is))
+				if err != nil || json.Unmarshal(body, &state) != nil || state.SchemaVersion != 2 || state.State != "blocked" || state.ReasonCode == nil || *state.ReasonCode != "goal-prompt-unconfirmed" {
+					t.Fatal("post-launch blocked evidence was not published")
+				}
+			}
 			if strings.Contains(comment, "No agent was launched") || !strings.Contains(comment, "Launch outcome requires inspection") {
 				t.Fatal("ambiguous launch was publicly described as a no-agent failure")
 			}

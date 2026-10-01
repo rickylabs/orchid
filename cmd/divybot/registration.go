@@ -56,13 +56,16 @@ func (c *Coord) reportBlockedLaunch(ctx context.Context, n int) bool {
 	// Keep native handles, paths, process output and credentials out of the issue.
 	reason := "registration_incomplete"
 	switch block.Reason {
-	case "registration_failed", "agent_disappeared":
+	case "registration_failed", "agent_disappeared", "goal-prompt-unconfirmed":
 		reason = block.Reason
 	}
 	body := fmt.Sprintf("divybot: automatic launch abandoned (%s). The agent was not confirmed ready, or disappeared after supervision. No automatic respawn will occur for this inbox issue, including after dispatcher restart. Inspect the failed launch before requesting a new dispatch in a new inbox issue.", reason)
+	if reason == "goal-prompt-unconfirmed" {
+		body = "divybot: goal delivery BLOCKED (`goal-prompt-unconfirmed`). A registered agent may exist, but its assignment was not confirmed delivered. This issue remains open and needs inspection; automatic prompt replay, idle pokes and timeout-completed closure are disabled, including after restart. Inspect the existing agent before explicitly requesting another attempt."
+	}
 	commentCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if _, err := run(commentCtx, "gh", "issue", "comment", fmt.Sprint(n), "--repo", c.cfg.Inbox, "--body", body); err != nil {
+	if err := postMatrixComment(commentCtx, c.cfg.Inbox, n, body); err != nil {
 		log.Printf("issue #%d: launch abandonment comment unavailable; will retry comment only", n)
 		return true
 	}

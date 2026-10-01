@@ -33,21 +33,29 @@ func publishLaunchState(root string, owner *receiptOwner, inbox string, n int, i
 	if !privateReceiptRoot(root) || !repositoryName.MatchString(inbox) || is.ID == "" || n < 1 || is.Number != n {
 		return errMatrix
 	}
-	if state != "refused" && state != "launching" && state != "launched" {
+	if state != "refused" && state != "launching" && state != "launched" && state != "blocked" {
 		return errMatrix
 	}
 	if state == "refused" {
 		if !validMatrixRefusal(matrixRefusal{Status: "refused", ReasonCode: reason}) || reason == "launch-failed" {
 			return errMatrix
 		}
+	} else if state == "blocked" {
+		if reason != "goal-prompt-unconfirmed" {
+			return errMatrix
+		}
 	} else if reason != "" {
 		return errMatrix
 	}
 	var reasonCode *string
-	if state == "refused" {
+	version := 1
+	if state == "refused" || state == "blocked" {
 		reasonCode = &reason
 	}
-	record := launchStateRecord{SchemaVersion: 1, Issue: dispatchIssue{Repo: inbox, Number: n},
+	if state == "blocked" {
+		version = 2
+	}
+	record := launchStateRecord{SchemaVersion: version, Issue: dispatchIssue{Repo: inbox, Number: n},
 		DispatchID: launchStateDispatchID(inbox, is), State: state, ReasonCode: reasonCode,
 		ObservedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
 	path := launchStatePath(root, inbox, is)

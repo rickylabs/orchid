@@ -1,0 +1,200 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"time"
+)
+
+var errPromptUnconfirmed = errors.New("goal-prompt-unconfirmed")
+
+type promptSnapshot struct {
+	Agent  AgentInfo
+	Screen string
+	Stable bool
+}
+
+type promptCalls struct {
+	observe func(context.Context) (promptSnapshot, error)
+	submit  func(context.Context, string) error
+	enter   func(context.Context) error
+	wait    func(context.Context) bool
+	now     func() time.Time
+}
+
+func samePromptOccupant(a, b AgentInfo) bool {
+	return a.Agent != "" && a.Name != "" && a.PaneID != "" && a.WorkspaceID != "" &&
+		a.Agent == b.Agent && a.Name == b.Name && a.PaneID == b.PaneID && a.WorkspaceID == b.WorkspaceID && a.Cwd == b.Cwd
+}
+
+// These are UI placeholders, never route/model choices. Unknown/nonempty input refuses.
+func emptyCodexComposer(screen string) bool {
+	at := strings.LastIndex(screen, "›")
+	if at < 0 || codexTrustDialog(screen) {
+		return false
+	}
+	line := strings.TrimSpace(strings.SplitN(screen[at+len("›"):], "\n", 2)[0])
+	switch line {
+	case "", "Ask Codex to do anything", "Anything interesting on the docket?":
+		return true
+	}
+	return false
+}
+
+func codexReady(s promptSnapshot) bool {
+	return s.Stable && s.Agent.Agent == "codex" && s.Agent.InteractiveReady &&
+		(s.Agent.AgentStatus == "idle" || s.Agent.AgentStatus == "done") && emptyCodexComposer(s.Screen)
+}
+
+func normalizedPrompt(s string) string { return strings.Join(strings.Fields(s), " ") }
+func promptVisible(screen, goal string) bool {
+	return goal != "" && strings.Contains(normalizedPrompt(screen), normalizedPrompt(goal))
+}
+
+// A boot-time done transition is not a turn. Require the actual submitted text
+// plus working/blocking evidence or a later composer.
+func codexPromptConsumed(s promptSnapshot, goal string) bool {
+	if !promptVisible(s.Screen, goal) {
+		return false
+	}
+	if s.Agent.AgentStatus == "working" || s.Agent.AgentStatus == "blocked" {
+		return true
+	}
+	at := strings.LastIndex(s.Screen, "›")
+	if at >= 0 && promptVisible(s.Screen[:at], goal) {
+		return true
+	}
+	return false
+}
+
+// One submission and at most one evidence-safe repair. Uncertain delivery never
+// licenses replay: a changed sequence/session/screen can mean a real turn started.
+func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d promptCalls) error {
+	var before, prior promptSnapshot
+	stable := false
+	for {
+		s, err := d.observe(ctx)
+		if err != nil || !samePromptOccupant(expected, s.Agent) {
+			return errPromptUnconfirmed
+		}
+		if codexTrustDialog(s.Screen) {
+			if err := d.enter(ctx); err != nil {
+				return errPromptUnconfirmed
+			}
+			stable = false
+		} else if codexReady(s) {
+			if stable && samePromptOccupant(prior.Agent, s.Agent) && prior.Agent.StateChangeSeq == s.Agent.StateChangeSeq && prior.Screen == s.Screen {
+				before = s
+				break
+			}
+			prior, stable = s, true
+		} else {
+			stable = false
+			if s.Agent.AgentStatus == "blocked" {
+				return errPromptUnconfirmed
+			}
+		}
+		if !d.wait(ctx) {
+			return errPromptUnconfirmed
+		}
+	}
+	if err := d.submit(ctx, goal); err != nil {
+		return errPromptUnconfirmed
+	}
+	started := d.now()
+	repaired, seen, unchanged := false, false, 0
+	for {
+		after, err := d.observe(ctx)
+		if err != nil || !samePromptOccupant(before.Agent, after.Agent) {
+			return errPromptUnconfirmed
+		}
+		if codexPromptConsumed(after, goal) {
+			return nil
+		}
+		if promptVisible(after.Screen, goal) {
+			seen = true
+			// Text landed but Enter did not: submit the existing composer once,
+			// never paste another copy into it.
+			at := strings.LastIndex(after.Screen, "›")
+			if !repaired && at >= 0 && promptVisible(after.Screen[at:], goal) && after.Agent.InteractiveReady && (after.Agent.AgentStatus == "idle" || after.Agent.AgentStatus == "done") {
+				if err := d.enter(ctx); err != nil {
+					return errPromptUnconfirmed
+				}
+				repaired = true
+			}
+		}
+		if !seen && codexReady(after) && after.Screen == before.Screen && after.Agent.StateChangeSeq == before.Agent.StateChangeSeq && bytes.Equal(after.Agent.AgentSession, before.Agent.AgentSession) {
+			unchanged++
+		} else {
+			unchanged = 0
+			// Permanently prohibit full text replay after any ambiguous effect.
+			seen = true
+		}
+		if !repaired && !seen && unchanged >= 3 && d.now().Sub(started) >= 10*time.Second {
+			if err := d.submit(ctx, goal); err != nil {
+				return errPromptUnconfirmed
+			}
+			repaired = true
+		}
+		if !d.wait(ctx) {
+			return errPromptUnconfirmed
+		}
+	}
+}
+
+// Herdr0.9.1 formats read output as plain text. Older adapters/fixtures may
+// expose result.text. Failed/malformed JSON envelopes never become screen proof.
+func (h Host) visiblePromptScreen(ctx context.Context, target string) (string, error) {
+	out, err := h.herdr(ctx, "pane", "read", target, "--source", "visible", "--lines", "60", "--format", "text")
+	if err != nil || len(out) > 64*1024 {
+		return "", errPromptUnconfirmed
+	}
+	if strings.HasPrefix(strings.TrimSpace(out), "{") {
+		raw, err := herdrUnwrap(out)
+		if err != nil {
+			return "", errPromptUnconfirmed
+		}
+		var r struct {
+			Text *string `json:"text"`
+		}
+		if json.Unmarshal(raw, &r) != nil || r.Text == nil {
+			return "", errPromptUnconfirmed
+		}
+		return *r.Text, nil
+	}
+	return out, nil
+}
+
+func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot, error) {
+	before, err := h.agentInfoOf(ctx, target)
+	if err != nil {
+		return promptSnapshot{}, errPromptUnconfirmed
+	}
+	screen, err := h.visiblePromptScreen(ctx, target)
+	if err != nil {
+		return promptSnapshot{}, errPromptUnconfirmed
+	}
+	after, err := h.agentInfoOf(ctx, target)
+	if err != nil || !samePromptOccupant(before, after) {
+		return promptSnapshot{}, errPromptUnconfirmed
+	}
+	return promptSnapshot{Agent: after, Screen: screen, Stable: before.StateChangeSeq == after.StateChangeSeq}, nil
+}
+
+func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
+	return deliverCodexPrompt(ctx, expected, goal, promptCalls{
+		observe: func(ctx context.Context) (promptSnapshot, error) { return h.promptSnapshot(ctx, target) },
+		submit: func(ctx context.Context, goal string) error {
+			_, err := h.herdr(ctx, "agent", "prompt", target, goal)
+			return err
+		},
+		enter: func(ctx context.Context) error {
+			_, err := h.herdr(ctx, "pane", "send-keys", target, "Enter")
+			return err
+		},
+		wait: nativePromptWait, now: time.Now,
+	})
+}

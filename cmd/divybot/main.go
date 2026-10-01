@@ -237,22 +237,23 @@ type tracker struct {
 }
 
 type Job struct {
-	NativeGoal  *dispatchGoal `json:"native_goal,omitempty"`
-	DispatchKey string        `json:"dispatch_key,omitempty"` // private launch receipt key
-	Issue       int           `json:"issue"`
-	Host        string        `json:"host"`
-	Label       string        `json:"label"`     // display name (claude-<n>)
-	Pane        string        `json:"pane"`      // herdr send/read target (pane id)
-	Workspace   string        `json:"workspace"` // herdr teardown handle
-	Target      string        `json:"target"`
-	Repo        string        `json:"repo"`
-	Branch      string        `json:"branch"`
-	Agent       string        `json:"agent"`
-	Title       string        `json:"title"`
-	Goal        string        `json:"goal"`
-	PR          int           `json:"pr"`
-	SpawnedAt   time.Time     `json:"spawned_at"`
-	LastPoke    time.Time     `json:"last_poke"`
+	GoalDelivery string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
+	NativeGoal   *dispatchGoal `json:"native_goal,omitempty"`
+	DispatchKey  string        `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue        int           `json:"issue"`
+	Host         string        `json:"host"`
+	Label        string        `json:"label"`     // display name (claude-<n>)
+	Pane         string        `json:"pane"`      // herdr send/read target (pane id)
+	Workspace    string        `json:"workspace"` // herdr teardown handle
+	Target       string        `json:"target"`
+	Repo         string        `json:"repo"`
+	Branch       string        `json:"branch"`
+	Agent        string        `json:"agent"`
+	Title        string        `json:"title"`
+	Goal         string        `json:"goal"`
+	PR           int           `json:"pr"`
+	SpawnedAt    time.Time     `json:"spawned_at"`
+	LastPoke     time.Time     `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -508,14 +509,16 @@ func herdrUnwrap(out string) (json.RawMessage, error) {
 }
 
 type AgentInfo struct {
-	Agent          string `json:"agent"`
-	AgentStatus    string `json:"agent_status"`
-	StateChangeSeq uint64 `json:"state_change_seq"`
-	Cwd            string `json:"cwd"`
-	PaneID         string `json:"pane_id"`
-	WorkspaceID    string `json:"workspace_id"`
-	Label          string `json:"label"`
-	Name           string `json:"name"`
+	InteractiveReady bool            `json:"interactive_ready"`
+	AgentSession     json.RawMessage `json:"agent_session"`
+	Agent            string          `json:"agent"`
+	AgentStatus      string          `json:"agent_status"`
+	StateChangeSeq   uint64          `json:"state_change_seq"`
+	Cwd              string          `json:"cwd"`
+	PaneID           string          `json:"pane_id"`
+	WorkspaceID      string          `json:"workspace_id"`
+	Label            string          `json:"label"`
+	Name             string          `json:"name"`
 }
 
 func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
@@ -718,7 +721,7 @@ func nativePromptObserved(before, after AgentInfo) bool {
 		return false
 	}
 	switch after.AgentStatus {
-	case "working", "blocked", "done":
+	case "working", "blocked":
 		return true
 	}
 	return false
@@ -750,6 +753,15 @@ func nativePromptWait(ctx context.Context) bool {
 }
 
 func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) error {
+	if native {
+		info, err := h.agentInfoOf(ctx, target)
+		if err != nil {
+			return errPromptUnconfirmed
+		}
+		if info.Agent == "codex" {
+			return h.injectCodexGoal(ctx, target, goal, info)
+		}
+	}
 	// Readiness/acceptance via herdr's native status — works for claude AND
 	// opencode. (The old "bypass permissions" pane scrape was claude-only and
 	// blind to opencode's TUI, so the wait loop never broke → it burned the whole
@@ -842,21 +854,8 @@ func codexTrustDialog(screen string) bool {
 // screen is the pane's visible text. `agent read --source recent` does not show
 // codex's trust dialog; `pane read` does.
 func (h Host) screen(ctx context.Context, target string) string {
-	out, err := h.herdr(ctx, "pane", "read", target, "--lines", "30")
-	if err != nil {
-		return ""
-	}
-	raw, err := herdrUnwrap(out)
-	if err != nil {
-		return ""
-	}
-	var r struct {
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &r) != nil {
-		return ""
-	}
-	return r.Text
+	screen, _ := h.visiblePromptScreen(ctx, target)
+	return screen
 }
 
 func (h Host) read(ctx context.Context, target string, lines int) string {
@@ -2302,7 +2301,7 @@ func (c *Coord) tick(ctx context.Context) {
 		j, live := c.st.Jobs[n]
 		c.st.mu.Unlock()
 		if live {
-			c.supervise(ctx, n, j, status)
+			c.supervise(ctx, n, j, status, is)
 			continue
 		}
 		c.st.mu.Lock()
@@ -2316,7 +2315,7 @@ func (c *Coord) tick(ctx context.Context) {
 		}
 		// Adopt a live session before spawning (cutover / restart migration).
 		if j2, ok := c.adopt(n, is, status); ok {
-			c.supervise(ctx, n, j2, status)
+			c.supervise(ctx, n, j2, status, is)
 			continue
 		}
 		tgt, ok := c.targetFor(is)
@@ -2905,6 +2904,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 	}
+	if !runMode {
+		j.GoalDelivery = "pending"
+	}
 	if agent == "codex" {
 		j.NativeGoal = &dispatchGoal{ReceiptKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"), Intent: intent, Reason: "native-session-unavailable"}
 	}
@@ -2945,18 +2947,15 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
 		if err := host.injectGoal(gctx, target, inject, opencodeClass); err != nil {
+			c.blockGoalDelivery(n, j)
 			log.Printf("issue #%d: launch-effect-failed", n)
 			gcancel()
 			return matrixReason("goal-prompt-unconfirmed")
 		}
 		gcancel()
-		if j.NativeGoal != nil {
-			c.st.mu.Lock()
-			j.NativeGoal.PromptConfirmed = true
-			if err := c.st.saveLocked(); err != nil {
-				log.Printf("issue #%d: prompt confirmation state could not be persisted", n)
-			}
-			c.st.mu.Unlock()
+		if err := c.confirmGoalDelivery(j); err != nil {
+			c.blockGoalDelivery(n, j)
+			return matrixReason("goal-prompt-unconfirmed")
 		}
 		c.startDispatchGoal(ctx, host, j, receipt)
 	}
@@ -2964,7 +2963,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	return nil
 }
 
-func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]agentRef) {
+func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
 	host, ok := c.hosts[j.Host]
 	if !ok {
 		return
@@ -2977,6 +2976,14 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 	}
 	if c.dry {
 		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
+		return
+	}
+	// A pending/blocked prompt is never a completed run. Keep its real registered
+	// binding and issue open; retries here report only, never send input or close.
+	if goalDeliveryUnconfirmed(j) {
+		c.blockGoalDelivery(n, j)
+		c.publishLaunchState(n, is, "blocked", "goal-prompt-unconfirmed")
+		c.reportBlockedLaunch(ctx, n)
 		return
 	}
 	if known {

@@ -156,9 +156,11 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	if c.dry {
 		return
 	}
-	// Only a pre-launch refusal is a needs-you fact. Inconclusive launch
-	// outcomes can already have a live agent and must never be called refused.
-	if r.Status == "refused" && r.ReasonCode != "launch-failed" {
+	// Pre-launch refusals and post-launch delivery blocks are distinct observations.
+	// An inconclusive registered launch must never be called a no-agent refusal.
+	if r.ReasonCode == "goal-prompt-unconfirmed" {
+		c.publishLaunchState(n, is, "blocked", r.ReasonCode)
+	} else if r.Status == "refused" && r.ReasonCode != "launch-failed" {
 		c.publishLaunchState(n, is, "refused", r.ReasonCode)
 	}
 	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode + "\x00" + r.Cause + "\x00" + r.Detail))
@@ -190,6 +192,10 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 		c.st.MatrixNotices = map[int]string{}
 	}
 	c.st.MatrixNotices[n] = key
+	if block, ok := c.st.LaunchBlocks[n]; ok && block.Reason == "goal-prompt-unconfirmed" && r.ReasonCode == "goal-prompt-unconfirmed" {
+		block.Notified = true
+		c.st.LaunchBlocks[n] = block
+	}
 	if c.st.saveLocked() != nil {
 		log.Printf("issue #%d: matrix refusal notification persistence failed", n)
 	}
