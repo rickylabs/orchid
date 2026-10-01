@@ -586,6 +586,14 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if renderErr != nil {
 		return "", "", matrixSite("spawn.command-render", renderErr)
 	}
+	var kind string
+	var nativeArgs []string
+	if !strings.HasSuffix(agent, "-run") {
+		kind, nativeArgs, renderErr = managedInteractiveAgentArgs(agent, ovr, cwd)
+		if renderErr != nil {
+			return "", "", matrixSite("spawn.registration-render", renderErr)
+		}
+	}
 	if !receipt.claim(command) {
 		return "", "", matrixSite("spawn.receipt-claim", errMatrix)
 	}
@@ -655,15 +663,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	var identity *string
 	identityReason := nativeUnsupported
 	if !strings.HasSuffix(agent, "-run") {
-		kind, nativeArgs, renderErr := interactiveAgentArgs(agent, ovr)
-		if renderErr != nil {
-			return pane, ws, matrixSite("spawn.registration-render", renderErr)
-		}
 		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", strconv.FormatInt(startBudget.Milliseconds(), 10), "--"}
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)
 		if e != nil {
-			return pane, ws, matrixSite("spawn.agent-start", registrationFailure(out, ctx.Err()))
+			return pane, ws, matrixSite("spawn.agent-start", h.registrationStartFailure(ctx, out, agent, label, cwd, pane, ws))
 		}
 		raw, e := herdrUnwrap(out)
 		if e != nil {

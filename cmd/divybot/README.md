@@ -78,6 +78,22 @@ systemctl stop orchid            # stop the old multi-file orchid
 
 ### Native Codex goals
 
+Before interactive Codex registration, divybot supplies a process-local `-c`
+projects table that trusts only the exact checkout prepared for that dispatch.
+Codex 0.159.3 asks for folder consent even with approvals and sandbox bypassed;
+Herdr waits for readiness before returning from `agent start`, so accepting
+consent later during goal delivery cannot resolve this startup wait. The
+override uses a TOML inline table to preserve paths containing dots or quotes,
+and does not write the user's Codex config or trust the checkout's parent.
+Invalid or unscoped paths refuse before workspace creation.
+
+If Herdr times out while missing a wrapped folder-consent dialog, divybot makes
+bounded read-only checks of the exact owned Codex pane and reports
+`startup_blocked` when its occupant and sequence remain stable around the live
+dialog. Missing proof retains `startup_timeout`. The diagnostic never submits
+input, retries registration, or exposes screen text, paths, or native errors.
+Registration, native identity and goal-delivery confirmation remain required.
+
 For new Codex dispatches, divybot reads the official session report again after
 prompt delivery and records the authoritative identity in the existing private
 binding. It then creates an active native goal using the assignment title and

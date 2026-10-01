@@ -37,11 +37,40 @@ func registrationHost(t *testing.T, fail string) (Host, func() [][]string) {
 	t.Setenv("REGISTRATION_CALLS", logPath)
 	t.Setenv("REGISTRATION_FAILURE", fail)
 	script := `#!/usr/bin/env python3
-import json,os,sys,time
+import json,os,sys,time,tomllib
 args=sys.argv[1:]
 with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
+mode=os.environ.get('REGISTRATION_FAILURE','')
+def recorded():
+ return [json.loads(line) for line in open(os.environ['REGISTRATION_CALLS'])]
+def cwd():
+ a=recorded()[0];return a[a.index('--cwd')+1]
 if args[:2]==['workspace','create']:
  print(json.dumps({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}}))
+elif args[:2]==['agent','start'] and mode=='needs-trust':
+ native=args[args.index('--')+1:]
+ configs=[native[i+1] for i,x in enumerate(native[:-1]) if x=='-c' and native[i+1].startswith('projects=')]
+ if len(configs)!=1 or tomllib.loads(configs[0]).get('projects')!={cwd():{'trust_level':'trusted'}}:
+  print(json.dumps({'error':{'code':'timeout','message':'synthetic folder consent'}}));sys.exit(1)
+ print(json.dumps({'result':{}}))
+elif args[:2]==['agent','start'] and mode.startswith('trust-'):
+ print(json.dumps({'error':{'code':'timeout','message':'PRIVATE-TRUST-CANARY'}}));sys.exit(1)
+elif args[:2]==['agent','get'] and mode.startswith('trust-'):
+ a={'agent':'codex','name':'','pane_id':'w1:p1','workspace_id':'w1','cwd':cwd(),'agent_status':'unknown','state_change_seq':0}
+ if mode=='trust-foreign':a['agent']='claude'
+ if mode=='trust-name':a['name']='foreign-agent'
+ if mode=='trust-pane':a['pane_id']='w2:p1'
+ if mode=='trust-workspace':a['workspace_id']='w2'
+ if mode=='trust-cwd':a['cwd']='/fixture/foreign'
+ if mode=='trust-working':a['agent_status']='working'
+ if mode=='trust-changed':a['state_change_seq']=sum(x[:2]==['agent','get'] for x in recorded())
+ print(json.dumps({'result':{'agent':a}}))
+elif args[:2]==['pane','read'] and mode.startswith('trust-'):
+ if mode=='trust-unreadable':sys.exit(1)
+ if mode=='trust-malformed':print(json.dumps({'error':{'code':'PRIVATE-TRUST-CANARY'}}))
+ elif mode=='trust-oversized':print('PRIVATE-TRUST-CANARY'*10000)
+ elif mode=='trust-quoted':print('The brief mentions Trust this folder? and Trust and continue.')
+ else:print('  Folder access\n  /fixture/PRIVATE-TRUST-CANARY\n\n  Trust this folder? Codex can read, edit, and run\n  files here, subject to your permission settings.\n\n› 1. Trust and\n  continue\n  2. Quit\n\n  enter continue · esc quit\n')
 elif args[:2]==['agent','start'] and os.environ.get('REGISTRATION_FAILURE')=='busy':
  print(json.dumps({'error':{'code':'agent_pane_busy','message':'synthetic busy pane'}}));sys.exit(1)
 elif args[:2]==['agent','start'] and os.environ.get('REGISTRATION_FAILURE')=='envelope':
@@ -93,7 +122,8 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			if kind == "codex" {
 				o.Effort = "high"
 			}
-			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), map[string]string{"FIXTURE_ENV": "fixture-value"}, kind, o, registrationReceipt(t, kind, o))
+			cwd := t.TempDir()
+			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", cwd, map[string]string{"FIXTURE_ENV": "fixture-value"}, kind, o, registrationReceipt(t, kind, o))
 			if err != nil || pane != "w1:p1" || ws != "w1" {
 				t.Fatal("registration did not return the created handles")
 			}
@@ -105,6 +135,10 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 				t.Fatal("environment preparation must leave the shell available")
 			}
 			expected := append([]string{"agent", "start", "fixture-agent", "--kind", kind, "--pane", "w1:p1", "--timeout", "120000", "--"}, configuredArgs...)
+			if kind == "codex" {
+				quoted, _ := json.Marshal(cwd)
+				expected = append(expected, "-c", "projects={"+string(quoted)+`={trust_level="trusted"}}`)
+			}
 			if !reflect.DeepEqual(got[2], expected) {
 				t.Fatalf("argv lost identity or quoting: %q", got[2])
 			}
@@ -123,7 +157,11 @@ func TestRegistrationRefusesBusyNotReadyAndMalformedResponses(t *testing.T) {
 			if pane != "w1:p1" || ws != "w1" {
 				t.Fatal("failure must retain owned cleanup handles")
 			}
-			if len(calls()) != 3 {
+			wantCalls := 3
+			if failure == "timeout" {
+				wantCalls++ // exact-pane diagnostic read; never an input or retry
+			}
+			if len(calls()) != wantCalls {
 				t.Fatal("registration failure retried or delivered a goal")
 			}
 			if failure == "timeout" && registrationFailureKind(err) != "startup_timeout" {

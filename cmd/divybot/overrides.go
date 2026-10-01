@@ -161,7 +161,8 @@ func validCodexEffort(effort string) bool {
 	}
 }
 
-// interactiveAgentArgs is the single argv source for command rendering and herdr registration.
+// interactiveAgentArgs is the routing argv source for rendering and registration.
+// Managed registration adds a process-local trust setting for its exact checkout.
 func interactiveAgentArgs(agent string, o Overrides) (string, []string, error) {
 	kind := agent
 	var args []string
