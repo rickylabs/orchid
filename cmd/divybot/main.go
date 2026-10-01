@@ -2977,7 +2977,11 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt)
 	if err != nil {
 		log.Printf("issue #%d: agent registration failed; reason=%s; automatic launch abandoned", n, registrationFailureKind(err))
-		c.st.blockLaunch(n, "registration_failed")
+		blockReason := "registration_failed"
+		if agySettingsBlocked(err) {
+			blockReason = string(agySettingsUnreadable)
+		}
+		c.st.blockLaunch(n, blockReason)
 		if ws != "" {
 			cleanup, cancel := context.WithTimeout(ctx, 12*time.Second)
 			_ = host.closeWorkspace(cleanup, ws)

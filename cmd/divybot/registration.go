@@ -62,10 +62,15 @@ func (c *Coord) reportBlockedLaunch(ctx context.Context, n int) bool {
 	switch block.Reason {
 	case "registration_failed", "agent_disappeared", "goal-prompt-unconfirmed":
 		reason = block.Reason
+	case "agy-settings-unreadable":
+		reason = block.Reason
 	case "opencode-empty-answer", "opencode-output-unconfirmed", "opencode-route-mismatch", "opencode-provider-error":
 		reason = block.Reason
 	}
 	body := fmt.Sprintf("divybot: automatic launch abandoned (%s). The agent was not confirmed ready, or disappeared after supervision. No automatic respawn will occur for this inbox issue, including after dispatcher restart. Inspect the failed launch before requesting a new dispatch in a new inbox issue.", reason)
+	if reason == string(agySettingsUnreadable) {
+		body = "divybot: AGY launch BLOCKED (`agy-settings-unreadable`). Effective settings or onboarding state is unreadable to the launch user. No native workspace or agent was created, and no task was delivered. An operator must repair file ownership or permissions. No automatic respawn will occur for this inbox issue, including after dispatcher restart. Inspect this fenced attempt before explicitly requesting a new dispatch."
+	}
 	if reason == "goal-prompt-unconfirmed" {
 		body = "divybot: goal delivery BLOCKED (`goal-prompt-unconfirmed`). A registered agent may exist, but its assignment was not confirmed delivered. This issue remains open and needs inspection; automatic prompt replay, idle pokes and timeout-completed closure are disabled, including after restart. Inspect the existing agent before explicitly requesting another attempt."
 	}

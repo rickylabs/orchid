@@ -70,6 +70,9 @@ func registrationFailure(output string, contextErr error) error {
 }
 
 func registrationFailureKind(err error) string {
+	if agySettingsBlocked(err) {
+		return string(agySettingsUnreadable)
+	}
 	var failure *agentRegistrationFailure
 	if errors.As(err, &failure) {
 		return failure.kind
