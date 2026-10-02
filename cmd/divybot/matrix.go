@@ -840,6 +840,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if agent == "opencode" {
 		native, _ := resolveOpenCodeRoute(Overrides{Model: route.Model, Router: o.Router, Effort: route.Effort})
 		openCodeProvider = native.Provider
+		if reason := c.providerBudgetLaunchReason(agent, Overrides{Model: route.Model, Router: o.Router, Effort: route.Effort}, now); reason != "" {
+			return refuse(reason)
+		}
 		if c.cfg.OpenCode.Providers[openCodeProvider].MaxActive < 1 || budget["opencode:"+openCodeProvider] < 1 {
 			return refuse("opencode-provider-capacity")
 		}

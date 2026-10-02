@@ -13,6 +13,8 @@ import (
 // Only this fixed vocabulary crosses the public log/comment boundary. No native
 // error strings, configuration values, source output or issue prose are copied.
 var matrixReasons = map[string]struct{ field, hint string }{
+	"budget-reached":               {"provider_budgets", "The exact provider/model policy is exhausted or its configured overage limit has been reached."},
+	"budget-unavailable":           {"provider_budgets", "Paid admission needs an exact policy, fresh scoped allowance and a verified full-run bound with durable reservations; missing proof cannot permit a launch."},
 	"opencode-route-invalid":       {"route.provider/model", "Use an exact qualified OpenCode model; router may agree with its provider prefix, never substitute it."},
 	"opencode-variant-unavailable": {"route.effort", "The native catalog must list the exact requested variant; no default or lower effort is substituted."},
 	"opencode-catalog-unavailable": {"route.discovery", "The dispatch host's bounded native OpenCode catalog is unavailable or invalid."},

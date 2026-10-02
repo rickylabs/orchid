@@ -65,6 +65,12 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 			return nil, nil, configProblem("unmetered_transports", "invalid-or-unknown-field")
 		}
 	}
+	if block, ok := raw["provider_budgets"]; ok {
+		cfg.ProviderBudgets, err = decodeProviderBudgetConfig(block)
+		if err != nil {
+			return nil, nil, configProblem("provider_budgets", "invalid-budget-policy")
+		}
+	}
 	cfg.withDefaults()
 	return &cfg, raw, nil
 }
