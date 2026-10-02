@@ -17,7 +17,7 @@ import (
 
 // Provider IDs and models are data. These are syntax bounds, not a catalog.
 var openCodeProviderID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var openCodeModelID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
+var openCodeModelID = regexp.MustCompile(`^~?[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
 var openCodeVariantID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 type openCodeRoute struct {
