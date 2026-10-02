@@ -244,7 +244,7 @@ func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post 
 
 var matrixSites = map[string]bool{
 	"spawn.opencode-route": true, "spawn.opencode-environment": true, "spawn.opencode-preflight": true, "launch.opencode-route": true,
-	"spawn.agy-trust": true, "spawn.agy-readiness": true,
+	"spawn.native-store-binding": true, "spawn.agy-trust": true, "spawn.agy-readiness": true,
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-budget": true,
 	"spawn.registration-render": true,
 	"spawn.native-binding":      true, "dispatch.native-clear": true,
