@@ -44,7 +44,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"authorization-required":       {"matrix.grants.authorization", "Add a matching brief-bound privileged-tier authorization with a named authorizer and rationale."},
 	"authorization-invalid":        {"matrix.grants.authorization", "Correct the authorizer or rationale in the matching grant."},
 	"override-required":            {"matrix.grants.ownerMatrixOverride", "A route deviation requires the trusted owner override and its matching pin."},
-	"override-invalid":             {"matrix.grants.ownerMatrixOverride", "Verify the named pin, route and exact owner worklog entry."},
+	"override-invalid":             {"matrix.grants", "Verify the complete authorized route, authorizer and matching pin. Legacy matrix overrides also require the exact owner worklog entry."},
 	"route-unavailable":            {"matrix", "No matrix route is available on the eligible transports."},
 	"retry-pins-unavailable":       {"matrix", "The original dispatch pins no longer resolve exactly; start a new issue for a changed route."},
 	"routing-invalid":              {"issue.tier/role", "Specify a workload tier and a role allowed by the selected profile."},

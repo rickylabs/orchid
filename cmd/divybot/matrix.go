@@ -60,25 +60,27 @@ type MatrixOverride struct {
 // A grant is bound to the GitHub node identity and entire brief, not a local issue number.
 // It has no mutable decision/answer lifecycle. Editing the brief requires a distinct grant.
 type MatrixGrant struct {
-	IssueID       string           `json:"issue_id"`
-	Repo          string           `json:"repo"`
-	BriefDigest   string           `json:"brief_digest"`
-	Tier          string           `json:"tier"`
-	Role          string           `json:"role"`
-	Authorization *MatrixAuthority `json:"authorization,omitempty"`
-	Override      *MatrixOverride  `json:"ownerMatrixOverride,omitempty"`
+	IssueID        string               `json:"issue_id"`
+	Repo           string               `json:"repo"`
+	BriefDigest    string               `json:"brief_digest"`
+	Tier           string               `json:"tier"`
+	Role           string               `json:"role"`
+	Authorization  *MatrixAuthority     `json:"authorization,omitempty"`
+	Override       *MatrixOverride      `json:"ownerMatrixOverride,omitempty"`
+	NativeOverride *ownerNativeOverride `json:"ownerNativeOverride,omitempty"`
 }
 type matrixRequest struct {
-	PinName           string           `json:"pinName,omitempty"`
-	Tier              string           `json:"tier"`
-	Role              string           `json:"role"`
-	ProfileText       string           `json:"profileText,omitempty"`
-	Pin               *MatrixPin       `json:"pin,omitempty"`
-	Authorization     *MatrixAuthority `json:"authorization,omitempty"`
-	Override          *MatrixOverride  `json:"ownerMatrixOverride,omitempty"`
-	WorklogText       string           `json:"worklogText,omitempty"`
-	Available         []string         `json:"availableTransports"`
-	OpenCodeProviders []string         `json:"openCodeProviders,omitempty"`
+	PinName           string               `json:"pinName,omitempty"`
+	Tier              string               `json:"tier"`
+	Role              string               `json:"role"`
+	ProfileText       string               `json:"profileText,omitempty"`
+	Pin               *MatrixPin           `json:"pin,omitempty"`
+	Authorization     *MatrixAuthority     `json:"authorization,omitempty"`
+	Override          *MatrixOverride      `json:"ownerMatrixOverride,omitempty"`
+	NativeOverride    *ownerNativeOverride `json:"ownerNativeOverride,omitempty"`
+	WorklogText       string               `json:"worklogText,omitempty"`
+	Available         []string             `json:"availableTransports"`
+	OpenCodeProviders []string             `json:"openCodeProviders,omitempty"`
 }
 type matrixRoute struct {
 	Provider        string `json:"provider"`
@@ -441,7 +443,7 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 		if req.Role == "" {
 			req.Role = grant.Role
 		}
-		req.Authorization, req.Override = grant.Authorization, grant.Override
+		req.Authorization, req.Override, req.NativeOverride = grant.Authorization, grant.Override, grant.NativeOverride
 	}
 	if o.Pin != "" {
 		p, ok := cfg.Pins[o.Pin]
@@ -452,6 +454,11 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 	} else if o.Model != "" || o.Effort != "" {
 		req.Pin = &MatrixPin{Model: o.Model, Effort: o.Effort}
 	}
+	if req.NativeOverride != nil {
+		if req.Override != nil || !validOwnerNativeOverride(req.NativeOverride) {
+			return req, matrixReason("override-invalid")
+		}
+	}
 	return req, nil
 }
 
@@ -461,8 +468,9 @@ type matrixObservation struct {
 	Reason     string `json:"reason"`
 }
 type matrixReceipt struct {
-	SchemaVersion int `json:"schemaVersion"`
-	Resolution    struct {
+	SchemaVersion       int                  `json:"schemaVersion"`
+	OwnerNativeOverride *ownerNativeOverride `json:"ownerNativeOverride,omitempty"`
+	Resolution          struct {
 		SourceRepository string `json:"sourceRepository,omitempty"`
 		SourceRevision   string `json:"sourceRevision"`
 		Digest           string `json:"digest"`
@@ -803,8 +811,8 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		}
 	}
 	quotaDetail := strings.Join(quotaConditions, ", ")
-	route, e := d.resolve(ctx, cfg, req)
-	if errors.Is(e, errEvaluatorEvidence) || (e == nil && strings.HasSuffix(route.Role, "_evaluation")) {
+	route, e := resolveLaunchRoute(ctx, cfg, req, d.resolve)
+	if errors.Is(e, errEvaluatorEvidence) || (req.NativeOverride == nil && e == nil && strings.HasSuffix(route.Role, "_evaluation")) {
 		report(evaluatorRefusal())
 		return "", false
 	}
@@ -858,6 +866,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		o.MaxTokens, o.MaxTokensPresent = "", false
 	}
 	o.Model, o.Effort, o.Harness, o.Tier, o.Role = route.Model, route.Effort, agent, route.Tier, route.Role
+	if req.NativeOverride != nil && o.Effort == "provider_default" {
+		o.Effort = "" // Native default is an omitted flag, not a Harness effort substitution.
+	}
 	if agent == "codex" {
 		assignment := is
 		assignment.Number = n
@@ -890,7 +901,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if d.retry != nil {
 		key = shaText([]byte("retry\x00" + key + "\x00" + d.retry.OperationID))
 	}
-	handle, e := d.persist(cfg.ReceiptRoot, key, command, receiptFor(cfg, route), binding, owner)
+	receipt := receiptFor(cfg, route)
+	matrixSource, matrixRevision := matrixSourceRepository, cfg.Revision
+	if req.NativeOverride != nil {
+		receipt = receiptForOwnerNative(route, req.NativeOverride)
+		matrixSource, matrixRevision = ownerNativeSource, ""
+	}
+	handle, e := d.persist(cfg.ReceiptRoot, key, command, receipt, binding, owner)
 	if e != nil {
 		report(refusalWithReason(e, "receipt-persistence-failed"))
 		return "", false
@@ -901,7 +918,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
-		Host: host.Name, Profile: o.Profile, ProfileRevision: revision, MatrixSource: matrixSourceRepository, MatrixRevision: cfg.Revision,
+		Host: host.Name, Profile: o.Profile, ProfileRevision: revision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
 		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	if e := handle.writeDispatch("reserved", nil); e != nil {
@@ -955,7 +972,7 @@ func quotaOnly(ctx context.Context, d matrixAttemptDeps, cfg MatrixConfig, req m
 	}
 	unconstrained := req
 	unconstrained.Available = append([]string(nil), matrixTransports...)
-	route, e := d.resolve(ctx, cfg, unconstrained)
+	route, e := resolveLaunchRoute(ctx, cfg, unconstrained, d.resolve)
 	return e == nil && !strings.HasSuffix(route.Role, "_evaluation") && !containsString(req.Available, route.Transport)
 }
 

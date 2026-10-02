@@ -132,7 +132,41 @@ or subprocess diagnostics are echoed. Duplicate/unknown matrix JSON fields, miss
 dirty or mismatched revisions, unsafe receipt roots, missing target pins, malformed grants,
 and selected-issue authorization/profile errors refuse. Arbitrary model/effort policy remains
 owned by the pinned Harness source. Unused pins/grants receive structural checks; selected
-issue policy is resolved by the bridge.
+issue policy is resolved by the bridge unless a matching owner-native grant selects the route.
+
+For an Eric-authorized native selection, use the existing grant builder with this private input:
+
+```json
+{
+  "tier": "<WORKLOAD_TIER_FOR_BUDGET_CONTEXT>",
+  "role": "<WORKER_ROLE>",
+  "ownerNativeOverride": {
+    "authorizer": "eric",
+    "rationale": "<RECORDED_OWNER_SELECTION_RATIONALE>",
+    "route": {
+      "harness": "<NATIVE_ADAPTER>",
+      "provider": "<EXACT_PROVIDER>",
+      "model": "<EXACT_NATIVE_MODEL>",
+      "effort": "provider_default"
+    }
+  }
+}
+```
+
+All four route fields are required; `provider_default` requests the native default without
+passing a literal default effort flag. Current adapters are Claude, Codex, AGY and OpenCode.
+An OpenCode model must include the exact provider prefix, which must match `provider` and
+any explicit issue router. A matching owner-native grant is selected before the matrix, without
+model catalog membership, a new model list or a matrix worklog requirement. Eric's standing
+delegation authorizes recording the selection on his behalf. Keep this grant operator-owned;
+an issue-body authorizer is not authority. The builder still fills and binds the entire issue
+identity/digest, and conflicting explicit model/effort/tool values refuse.
+
+Validation remains read-only and does not claim native catalog availability, physical capacity,
+quota headroom, goal delivery or observed completion. Dispatch uses all existing physical and
+budget checks. The owner authorization and native route are synced to the private reservation
+before launch; owner provenance does not claim Harness selected a catalog model. No live config
+change, deploy or dispatch is part of a source PR.
 
 For structural/source checks alone, omit both `-issue` and `-target`. The output explicitly
 marks issue authorization and profile policy as unchecked. With or without an issue, **live

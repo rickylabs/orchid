@@ -170,6 +170,9 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 			bad(prefix, "duplicate-brief-grant")
 		}
 		seen[key] = true
+		if g.NativeOverride != nil && (g.Override != nil || !validOwnerNativeOverride(g.NativeOverride)) {
+			bad(prefix+".ownerNativeOverride", "eric-and-complete-native-route-required")
+		}
 		if g.Authorization != nil && ((g.Authorization.Authorizer != "owner" && g.Authorization.Authorizer != "milestone_coordinator") || !cleanText(g.Authorization.Rationale)) {
 			bad(prefix+".authorization", "named-authorizer-and-rationale-required")
 		}
@@ -260,12 +263,12 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 			req.OpenCodeProviders = append(req.OpenCodeProviders, provider)
 		}
 	}
-	route, err := d.resolve(ctx, cfg.Matrix, req)
+	route, err := resolveLaunchRoute(ctx, cfg.Matrix, req, d.resolve)
 	if err != nil {
 		r := refusalFor(err)
 		return configProblem(matrixReasons[r.ReasonCode].field, r.ReasonCode)
 	}
-	if strings.HasSuffix(route.Role, "_evaluation") {
+	if req.NativeOverride == nil && strings.HasSuffix(route.Role, "_evaluation") {
 		return configProblem("route.observed", "observer-unavailable")
 	}
 	if routerErr := routeRouterError(route, o); routerErr != nil {
