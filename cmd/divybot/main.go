@@ -3035,7 +3035,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if routeErr != nil {
 			return matrixSite("launch.opencode-route", routeErr)
 		}
-		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir}
+		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir, ExpectedPromptDigest: shaText([]byte(goal))}
 	}
 	if agent == "codex" {
 		j.NativeGoal = &dispatchGoal{ReceiptKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"), Intent: intent, Reason: "native-session-unavailable"}
@@ -3068,22 +3068,20 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if target == "" {
 			target = label
 		}
-		inject := goal
-		if opencodeClass {
-			// The full goal is already staged to .divybot-goal.md (pre-spawn);
-			// the TUI only gets the short pointer, submitted via herdr's native
-			// confirmed prompt.
-			inject = runPointer
-		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
 		var deliveryErr error
 		if agent == "opencode" {
-			deliveryErr = host.injectOpenCodeGoal(gctx, j, func() error {
+			deliveryErr = host.injectOpenCodeGoal(gctx, j, goal, func() error {
 				c.st.mu.Lock()
 				defer c.st.mu.Unlock()
 				return c.st.saveLocked()
 			})
 		} else {
+			inject := goal
+			if opencodeClass {
+				// Existing staged transports keep their pointer delivery.
+				inject = runPointer
+			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
 		if deliveryErr != nil {

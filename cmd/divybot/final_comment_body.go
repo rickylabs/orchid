@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 const finalCommentBodyFile = ".divybot-final-comment.sh"
@@ -62,9 +63,12 @@ func (h Host) stageFinalCommentBody(ctx context.Context, workdir, key string) er
 	return nil
 }
 
-// Interactive Claude receives its goal directly; Codex/run transports read the
-// existing goal artifact. Both receive the same launch-bound comment constructor.
+// Claude and OpenCode receive their goal directly; the existing goal artifact
+// remains available to staged consumers. All get the launch-bound constructor.
 func (h Host) stageWorkerGoal(ctx context.Context, workdir, key, goal string, stagedGoal bool) error {
+	if strings.TrimSpace(goal) == "" {
+		return errors.New("worker_goal_empty")
+	}
 	if err := h.stageFinalCommentBody(ctx, workdir, key); err != nil {
 		return err
 	}
