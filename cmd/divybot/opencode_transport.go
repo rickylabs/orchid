@@ -173,14 +173,17 @@ func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openC
 
 // This private correlation record is not an observed route or a public native
 // identity. A session is bound only after native prompt/route evidence agrees.
+// ExpectedPromptDigest binds the exact rendered first prompt; records without
+// it cannot confirm legacy pointer delivery and are never automatically replayed.
 type openCodeRun struct {
-	Route       openCodeRoute `json:"route"`
-	Cwd         string        `json:"cwd"`
-	ExcludedIDs []string      `json:"excludedIds"`
-	NotBefore   int64         `json:"notBefore"`
-	SessionID   string        `json:"sessionId,omitempty"`
-	CreatedAt   int64         `json:"createdAt,omitempty"`
-	Failure     string        `json:"failure,omitempty"`
+	ExpectedPromptDigest string        `json:"expectedPromptDigest,omitempty"`
+	Route                openCodeRoute `json:"route"`
+	Cwd                  string        `json:"cwd"`
+	ExcludedIDs          []string      `json:"excludedIds"`
+	NotBefore            int64         `json:"notBefore"`
+	SessionID            string        `json:"sessionId,omitempty"`
+	CreatedAt            int64         `json:"createdAt,omitempty"`
+	Failure              string        `json:"failure,omitempty"`
 }
 
 type openCodeSession struct {
@@ -300,7 +303,7 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 			if info.Model.ProviderID != run.Route.Provider || info.Model.ModelID != run.Route.Model || info.Model.Variant != run.Route.Variant {
 				return false, false, matrixReason("opencode-route-mismatch")
 			}
-			if first && shaText([]byte(text.String())) != shaText([]byte(runPointer)) {
+			if first && shaText([]byte(text.String())) != run.ExpectedPromptDigest {
 				return false, false, bad
 			}
 			first = false
@@ -380,7 +383,12 @@ func openCodeOccupant(a AgentInfo, j *Job, run *openCodeRun) bool {
 		a.WorkspaceID == j.Workspace && a.Cwd == run.Cwd && a.InteractiveReady
 }
 
-func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, persist func() error) error {
+func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, goal string, persist func() error) error {
+	// The rendered goal is bound at launch, never reconstructed from Job.Goal's
+	// truncated summary or recovered by reading a file in the model's first turn.
+	if j == nil || j.OpenCode == nil || strings.TrimSpace(goal) == "" || j.OpenCode.ExpectedPromptDigest != shaText([]byte(goal)) {
+		return matrixReason("opencode-output-unconfirmed")
+	}
 	before, err := h.agentInfoOf(ctx, j.Pane)
 	if err != nil || j.OpenCode == nil || !openCodeOccupant(before, j, j.OpenCode) || before.AgentStatus != "idle" {
 		return matrixReason("opencode-output-unconfirmed")
@@ -413,7 +421,7 @@ func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, persist func() err
 		return matrixReason("opencode-output-unconfirmed")
 	}
 	// Baseline was read before this single effect. No Enter nudge or resubmission.
-	if _, err := h.herdr(ctx, "agent", "prompt", j.Pane, runPointer); err != nil {
+	if _, err := h.herdr(ctx, "agent", "prompt", j.Pane, goal); err != nil {
 		return matrixReason("opencode-output-unconfirmed")
 	}
 	for {
