@@ -128,7 +128,12 @@ func TestOpenCodePromptBindingRejectsBeforeNativeEffects(t *testing.T) {
 // Exercise production spawn with local fake SSH, Herdr and OpenCode endpoints.
 // Preparation never fetches a repository or calls a provider/native agent.
 func TestOpenCodeSpawnDeliversFullRenderedGoalOnce(t *testing.T) {
-	h, _, calls := openCodeHostFixture(t, "")
+	testOpenCodeFullGoalSpawn(t, "")
+}
+
+func testOpenCodeFullGoalSpawn(t *testing.T, mode string) {
+	t.Helper()
+	h, _, calls := openCodeHostFixture(t, mode)
 	h.SSH, h.WorkdirRoot = "fixture-host", h.Home
 	cwd := filepath.Join(h.Home, "issue-7")
 	if exec.Command("git", "init", "--quiet", cwd).Run() != nil {
@@ -161,7 +166,7 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	}
 	goal := o.goalPreamble() + "\n" + renderGoal(c.cfg.Inbox, "fixture/project", "fixture-target", is.Title, is.Body, cwd, "fixture/7", "", 7) + finalCommentBodyInstruction(strings.Repeat("d", 64))
 	actual, err := os.ReadFile(filepath.Join(h.Home, "submitted-prompt"))
-	if err != nil || string(actual) != goal || !strings.Contains(string(actual), body) || !strings.Contains(string(actual), "sh .divybot-final-comment.sh < REPORT.md > FINAL-COMMENT.md") {
+	if err != nil || string(actual) != strings.TrimRight(goal, "\r\n") || !strings.Contains(string(actual), body) || !strings.Contains(string(actual), "sh .divybot-final-comment.sh < REPORT.md > FINAL-COMMENT.md") {
 		t.Fatal("first prompt lost the complete brief, directives or helper")
 	}
 	staged, err := os.ReadFile(filepath.Join(cwd, ".divybot-goal.md"))
@@ -178,7 +183,7 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	private, _ := json.Marshal(saved.OpenCode)
 	var binding map[string]any
 	_ = json.Unmarshal(private, &binding)
-	if binding["expectedPromptDigest"] != shaText([]byte(goal)) || strings.Contains(string(private), body) || saved.GoalDelivery != "confirmed" {
+	if binding["expectedPromptDigest"] != shaText([]byte(strings.TrimRight(goal, "\r\n"))) || strings.Contains(string(private), body) || saved.GoalDelivery != "confirmed" {
 		t.Fatal("private binding lost the first goal or persisted its body")
 	}
 }
