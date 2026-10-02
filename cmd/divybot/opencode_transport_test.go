@@ -233,12 +233,20 @@ elif pathlib.Path(sys.argv[0]).name=='opencode':
  elif a[:2]==['debug','agent']:
   emit({'name':'build','mode':'primary','model':{'providerID':'fixture-provider','modelID':'foreign' if mode=='fallback-agent' else 'fixture-model'}})
  elif a[:2]==['session','list']:
-   if prompted and mode!='no-session':emit([{'id':'ses_fixture','directory':cwd,'created':int((root/'prompted').read_text())}])
+   if prompted and mode!='no-session':
+    count_file=root/'session-read-count'
+    count=int(count_file.read_text())+1 if count_file.exists() else 1
+    count_file.write_text(str(count))
+    if mode!='delayed-session' or count>1:emit([{'id':'ses_fixture','directory':cwd,'created':int((root/'prompted').read_text())}])
  elif a[:1]==['export']:
   now=int((root/'prompted').read_text());sid='ses_fixture'
+  def stored_prompt():
+   text=(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER']
+   if mode=='native-terminal' and text.endswith('\n'):text=text[:-1]+' '
+   return text
   part=lambda mid,text:{'type':'text','text':text,'sessionID':sid,'messageID':mid}
   emit({'info':{'id':sid,'directory':cwd,'time':{'created':now}},'messages':[
-   {'info':{'id':'fixture-user','sessionID':sid,'role':'user','time':{'created':now},'model':{'providerID':'fixture-provider','modelID':'fixture-model','variant':'high'}},'parts':[part('fixture-user',(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER'])]},
+   {'info':{'id':'fixture-user','sessionID':sid,'role':'user','time':{'created':now},'model':{'providerID':'fixture-provider','modelID':'fixture-model','variant':'high'}},'parts':[part('fixture-user',stored_prompt())]},
     {'info':{'id':'fixture-assistant','sessionID':sid,'role':'assistant','parentID':'fixture-user','providerID':'foreign' if mode=='wrong-provider' else 'fixture-provider','modelID':'fixture-model','variant':'high','time':{'created':now,'completed':0 if mode=='streaming' else now},'finish':'stop'},'parts':[part('fixture-assistant','' if mode=='empty' else 'OK')]}]})
 elif pathlib.Path(sys.argv[0]).name=='gh':
  if '--body-file' in a:
