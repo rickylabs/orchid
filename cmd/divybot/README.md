@@ -154,3 +154,12 @@ there is no native thread yet; it can coexist with a real dispatch tree. The cur
 rejects version 2, so Needs-you acceptance requires the paired Harness reader update and cockpit
 alignment. Deploy/restart and a real labeled dispatch proof remain operator-owned. Synthetic process,
 restart and mutation controls establish source behavior, not a deployed or paid-turn result.
+
+## Provider/model budgets
+
+The optional private `provider_budgets` block publishes per-model refusals and
+checks OpenCode admission before launch effects. This first producer has no paid
+allow path: reported exhaustion yields `budget-reached`; missing authoritative
+allowance or an enforceable full-run bound yields `budget-unavailable`. See
+[provider budgets](../../docs/provider-budgets.md) for the strict config fields,
+source scope, published six-field decisions and required reservation gate.

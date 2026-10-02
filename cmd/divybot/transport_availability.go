@@ -23,6 +23,7 @@ type transportAvailabilitySnapshot struct {
 	ValidUntil            string                     `json:"validUntil"`
 	Transports            []transportAvailabilityRow `json:"transports"`
 	OpenCodeProviderPools []openCodeProviderPool     `json:"openCodeProviderPools"`
+	ProviderBudgets       []providerBudgetDecision   `json:"providerBudgets,omitempty"`
 }
 
 // Millisecond UTC times: the governance contract reads at most three fractional
@@ -92,7 +93,10 @@ func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Tim
 		// Valid for two poll intervals: one missed tick does not blank it.
 		snapshot := buildTransportAvailability(budget, quotas, now, c.cfg.Governor.sampleIntervalDur(),
 			c.cfg.Governor.WeeklyCeiling, 2*durOr(c.cfg.PollInterval, 30*time.Second), c.cfg.UnmeteredTransports, pools)
-		err = publishTransportAvailability(root, owner, snapshot)
+		snapshot.ProviderBudgets, err = buildProviderBudgetDecisions(c.cfg.ProviderBudgets, now, snapshot.ValidUntil)
+		if err == nil {
+			err = publishTransportAvailability(root, owner, snapshot)
+		}
 	}
 	if err != nil && privateReceiptRoot(root) {
 		_ = os.Remove(transportAvailabilityPath(root))

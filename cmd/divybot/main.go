@@ -53,6 +53,7 @@ type Config struct {
 	Targets                 []Target                 `json:"targets"`
 	Governor                Gov                      `json:"governor"`
 	OpenCode                OpenCodeConfig           `json:"opencode,omitempty"`
+	ProviderBudgets         *ProviderBudgetConfig    `json:"provider_budgets,omitempty"`
 	UnmeteredTransports     UnmeteredTransportLimits `json:"unmetered_transports,omitempty"`
 	Memory                  Mem                      `json:"memory"`
 }
@@ -216,12 +217,18 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(b, &fields) != nil {
+	if strictJSON(b, &fields) != nil {
 		return nil, fmt.Errorf("config object required")
 	}
 	if block, present := fields["unmetered_transports"]; present {
 		if string(block) == "null" || strictJSON(block, &c.UnmeteredTransports) != nil {
 			return nil, fmt.Errorf("unmetered_transports invalid or unknown field")
+		}
+	}
+	if block, present := fields["provider_budgets"]; present {
+		c.ProviderBudgets, err = decodeProviderBudgetConfig(block)
+		if err != nil {
+			return nil, fmt.Errorf("provider_budgets invalid")
 		}
 	}
 	c.withDefaults()
@@ -2861,6 +2868,9 @@ func renderGoal(inbox, targetRepo, label, title, body, workdir, branch, hint str
 }
 
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
+	if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
+		return matrixReason(reason)
+	}
 	var intent goalIntent
 	if agent == "codex" {
 		var e error
