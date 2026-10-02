@@ -2979,6 +2979,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.goal-file", errMatrix)
 	}
+	if agent == "opencode" {
+		goal = openCodeFirstPrompt(goal)
+	}
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
 	if !c.st.reserveLaunch(n) {

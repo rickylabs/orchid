@@ -171,6 +171,13 @@ func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openC
 	return nil
 }
 
+// Native paste can replace a final line ending with a space. Remove only
+// terminal CR/LF before hashing and sending; observed text remains byte-exact.
+// Staging retains the original rendered goal for existing file consumers.
+func openCodeFirstPrompt(goal string) string {
+	return strings.TrimRight(goal, "\r\n")
+}
+
 // This private correlation record is not an observed route or a public native
 // identity. A session is bound only after native prompt/route evidence agrees.
 // ExpectedPromptDigest binds the exact rendered first prompt; records without
@@ -306,6 +313,9 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 				text.WriteString(part.Text)
 				if part.Time.Start != 0 && part.Time.Start < info.Time.Created || part.Time.End != 0 && part.Time.End < part.Time.Start {
 					return false, false, bad
+				}
+				if part.Time.Start > lastPart {
+					lastPart = part.Time.Start
 				}
 				if part.Time.End > lastPart {
 					lastPart = part.Time.End
