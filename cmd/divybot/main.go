@@ -3119,6 +3119,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			return matrixReason("goal-prompt-unconfirmed")
 		}
 		c.startDispatchGoal(ctx, host, j, receipt)
+		c.bindOpenCodeLiveIdentity(ctx, host, j)
 	}
 	log.Printf("issue #%d: launch-started-observation-unproven", n)
 	return nil
@@ -3156,6 +3157,9 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	suppressInput := !matched || ref.Status == "done"
 
 	if j.Agent == "opencode" {
+		if matched {
+			c.bindOpenCodeLiveIdentity(ctx, host, j)
+		}
 		if j.OpenCode == nil || j.OpenCode.Failure != "" {
 			if j.OpenCode == nil {
 				c.blockOpenCode(n, j, matrixReason("opencode-output-unconfirmed"))
@@ -3536,6 +3540,7 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
+	c.bindOpenCodeLiveIdentity(cctx, host, j)
 	ws := j.Workspace
 	if ws == "" {
 		// Resolve from the live fleet by issue cwd if we never recorded it.
