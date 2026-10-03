@@ -736,7 +736,11 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	refuse := func(code string) (string, bool) { report(refusalFor(matrixReason(code))); return "", false }
 	refuseQuota := func(detail string) (string, bool) { report(refusalForQuota(detail)); return "", false }
-	cfg := c.cfg.Matrix
+	cfg, grantError := c.matrixConfigForIssue(ctx, is, target.Repo)
+	if grantError != nil {
+		report(refusalFor(grantError))
+		return "", false
+	}
 	owner, ownerError := configuredReceiptOwner(cfg)
 	if ownerError != nil {
 		return refuse("receipt-owner-invalid")

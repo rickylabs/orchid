@@ -65,6 +65,13 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 			return nil, nil, configProblem("unmetered_transports", "invalid-or-unknown-field")
 		}
 	}
+	if block, ok := raw["owner_native_grant_port"]; ok {
+		var options ownerNativePortConfig
+		if string(block) == "null" || ownerNativeStrictJSON(block, &options) != nil {
+			return nil, nil, configProblem("owner_native_grant_port", "invalid-private-port-config")
+		}
+		cfg.OwnerNativeGrantPort = &options
+	}
 	if block, ok := raw["provider_budgets"]; ok {
 		cfg.ProviderBudgets, err = decodeProviderBudgetConfig(block)
 		if err != nil {
@@ -79,6 +86,9 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 	var out []matrixConfigProblem
 	bad := func(field, reason string) { out = append(out, matrixConfigProblem{field, reason}) }
 	m := cfg.Matrix
+	if cfg.OwnerNativeGrantPort != nil && !ownerNativePortOptionsValid(*cfg.OwnerNativeGrantPort) {
+		bad("owner_native_grant_port", "private-operator-boundary-required")
+	}
 	if !cfg.UnmeteredTransports.valid() {
 		bad("unmetered_transports", "agy-max-active-0-to-256-required")
 	}
@@ -333,14 +343,22 @@ func buildMatrixConfig(ctx context.Context, cfg *Config, source, receipt string,
 	return validateMatrixConfig(ctx, cfg)
 }
 
+func bindMatrixGrant(is Issue, repo string, data []byte) (MatrixGrant, []matrixConfigProblem) {
+	var grant MatrixGrant
+	if strictJSON(data, &grant) != nil || grant.IssueID != "" || grant.Repo != "" || grant.BriefDigest != "" {
+		return grant, configProblem("grant-input", "omit-generated-issue-id-repo-and-brief-digest")
+	}
+	grant.IssueID, grant.Repo, grant.BriefDigest = is.ID, repo, briefDigest(is)
+	return grant, nil
+}
+
 // The input is an existing MatrixGrant with binding fields omitted. Authority is
 // supplied by the operator, never synthesized by the builder or issue body.
 func addMatrixGrant(cfg *Config, is Issue, repo string, data []byte) []matrixConfigProblem {
-	var grant MatrixGrant
-	if strictJSON(data, &grant) != nil || grant.IssueID != "" || grant.Repo != "" || grant.BriefDigest != "" {
-		return configProblem("grant-input", "omit-generated-issue-id-repo-and-brief-digest")
+	grant, problems := bindMatrixGrant(is, repo, data)
+	if len(problems) > 0 {
+		return problems
 	}
-	grant.IssueID, grant.Repo, grant.BriefDigest = is.ID, repo, briefDigest(is)
 	for _, old := range cfg.Matrix.Grants {
 		if old.IssueID == grant.IssueID && old.Repo == repo && old.BriefDigest == grant.BriefDigest {
 			return configProblem("matrix.grants", "matching-grant-already-exists")
