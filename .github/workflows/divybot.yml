@@ -26,7 +26,7 @@ jobs:
           trap 'rm -rf "$proof_dir"' EXIT
           chmod 0711 "$proof_dir"
           go test -race -c -o "$proof_dir/endpoint.test" ./cmd/divybot
-          sudo env TMPDIR=/tmp OWNER_ENDPOINT_REQUIRE_ROOT=1 "$proof_dir/endpoint.test" -test.run '^TestOwnerNativeEndpointTwoUIDs$' -test.v -test.count=1
+          sudo env PATH="$PATH" TMPDIR=/tmp OWNER_ENDPOINT_REQUIRE_ROOT=1 "$proof_dir/endpoint.test" -test.run '^TestOwnerNativeEndpointTwoUIDs$' -test.v -test.count=1
       - name: Vet
         run: go vet ./...
       - name: Build
