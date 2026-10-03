@@ -742,8 +742,14 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			}
 		}
 		var nativeID string
-		nativeID, identityReason = nativeSessionFromStart(raw, kind, label, location)
-		if identityReason == nativeUnavailable {
+		if agent == "opencode" {
+			// Its first prompt creates the native session. The separate bounded
+			// observer certifies it; the generic Herdr hook contract cannot.
+			identityReason = nativeUnavailable
+		} else {
+			nativeID, identityReason = nativeSessionFromStart(raw, kind, label, location)
+		}
+		if identityReason == nativeUnavailable && agent != "opencode" {
 			// One exact-occupant read can catch a completed hook report; never list or guess.
 			if read, readErr := h.herdr(ctx, "agent", "get", pane); readErr == nil {
 				if body, unwrapErr := herdrUnwrap(read); unwrapErr == nil {
@@ -762,6 +768,8 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if receipt.writeNativeIdentity(identity) != nil {
 			return pane, ws, matrixSite("spawn.native-binding", errMatrix)
 		}
+	} else if agent == "opencode" {
+		log.Printf("issue #%d: native identity pending OpenCode prompt proof", receipt.dispatch.Issue.Number)
 	} else if identityReason == nativeUnavailable {
 		// Codex may not report a native thread until the first prompt starts it.
 		// Supervision retries this exact occupant and persists the later binding.
@@ -3104,6 +3112,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
+		if deliveryErr == nil && gctx.Err() != nil {
+			deliveryErr = errPromptUnconfirmed
+		}
 		if deliveryErr != nil {
 			c.blockGoalDelivery(n, j)
 			if agent == "opencode" {
@@ -3113,11 +3124,12 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			gcancel()
 			return matrixReason("goal-prompt-unconfirmed")
 		}
-		gcancel()
-		if err := c.confirmGoalDelivery(j); err != nil {
+		if err := c.confirmGoalDelivery(j); err != nil || gctx.Err() != nil {
+			gcancel()
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")
 		}
+		gcancel()
 		c.startDispatchGoal(ctx, host, j, receipt)
 	}
 	log.Printf("issue #%d: launch-started-observation-unproven", n)

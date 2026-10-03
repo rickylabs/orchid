@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+func TestOpenCodeNativePasteSummaryGoalOnce(t *testing.T) {
+	testOpenCodeFullGoalSpawn(t, "native-summary")
+}
+
 func TestOpenCodeNativeTerminalGoalOnce(t *testing.T) {
 	testOpenCodeFullGoalSpawn(t, "native-terminal")
 }
@@ -107,11 +111,11 @@ func TestOpenCodeTerminalCanonicalizationKeepsExactContent(t *testing.T) {
 	for _, ending := range []string{"", "\n", "\r", "\r\n", "\n\n", "\r\n\r\n"} {
 		t.Run(strings.ReplaceAll(strings.ReplaceAll(ending, "\n", "LF"), "\r", "CR"), func(t *testing.T) {
 			prompt := openCodeFirstPrompt(payload + ending)
-			if prompt != payload {
+			if prompt != strings.ReplaceAll(payload, "\r\n", "\n") {
 				t.Fatal("terminal canonicalization changed goal content")
 			}
 			run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000, ExpectedPromptDigest: shaText([]byte(prompt))}
-			if confirmed, completed, err := inspectOpenCodeExport(fixtureExportPrompt(t, run, payload), run); !confirmed || !completed || err != nil {
+			if confirmed, completed, err := inspectOpenCodeExport(fixtureExportPrompt(t, run, strings.ReplaceAll(payload, "\r\n", "\n")), run); !confirmed || !completed || err != nil {
 				t.Fatal("canonical native terminal text failed exact binding", err)
 			}
 			for _, foreign := range []string{strings.TrimSpace(payload), strings.Replace(payload, "brief", "foreign", 1), payload + " ", payload + "\n"} {

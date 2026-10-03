@@ -243,6 +243,11 @@ elif pathlib.Path(sys.argv[0]).name=='opencode':
   def stored_prompt():
    text=(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER']
    if mode=='native-terminal' and text.endswith('\n'):text=text[:-1]+' '
+   if mode=='native-summary':
+    kv_file=pathlib.Path(os.environ['XDG_STATE_HOME'])/'opencode'/'kv.json'
+    kv=json.loads(kv_file.read_text()) if kv_file.exists() else {}
+    text=text.replace('\r\n','\n').replace('\r','\n')
+    if kv.get('paste_summary_enabled',True) and (text.strip().count('\n')>=2 or len(text.strip())>150):text=text.strip()+' '
    return text
   part=lambda mid,text:{'type':'text','text':text,'sessionID':sid,'messageID':mid}
   emit({'info':{'id':sid,'directory':cwd,'time':{'created':now}},'messages':[
