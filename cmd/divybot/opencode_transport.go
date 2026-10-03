@@ -262,7 +262,7 @@ type openCodeMessage struct {
 	Info struct {
 		ID, Role, SessionID, ParentID, ProviderID, ModelID, Variant, Finish string
 		Error                                                               json.RawMessage
-		Summary                                                             bool
+		Summary                                                             json.RawMessage
 		Model                                                               struct{ ProviderID, ModelID, Variant string }
 		Time                                                                struct{ Created, Completed int64 }
 	} `json:"info"`
@@ -276,6 +276,31 @@ type openCodeMessage struct {
 			Metadata struct{ Interrupted bool }
 		}
 	} `json:"parts"`
+}
+
+// OpenCode 1.18.34 uses different summary contracts by message role. User
+// summary is descriptive object metadata; only an assistant boolean marks
+// compaction. Neither can replace prompt, route or native terminal evidence.
+func openCodeSummary(role string, raw json.RawMessage) (bool, error) {
+	if len(raw) == 0 {
+		return false, nil
+	}
+	switch role {
+	case "user":
+		var metadata map[string]json.RawMessage
+		if strictJSON(raw, &metadata) != nil {
+			return false, errMatrix
+		}
+		return false, nil
+	case "assistant":
+		var compact bool
+		if strictJSON(raw, &compact) != nil {
+			return false, errMatrix
+		}
+		return compact, nil
+	default:
+		return false, errMatrix
+	}
 }
 
 // Inspect native stored messages, never the requested argv, a footer, an exit
@@ -303,6 +328,10 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 	seen := map[string]bool{}
 	for _, message := range record.Messages {
 		info := message.Info
+		compact, summaryErr := openCodeSummary(info.Role, info.Summary)
+		if summaryErr != nil {
+			return false, false, bad
+		}
 		if info.ID == "" || seen[info.ID] || info.SessionID != run.SessionID || info.Time.Created < record.Info.Time.Created || len(message.Parts) > 1024 {
 			return false, false, bad
 		}
@@ -351,7 +380,7 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 			}
 			confirmed = true
 			completed = false // An earlier assistant cannot complete a later streaming response.
-			if info.Summary {
+			if compact {
 				continue
 			}
 			if info.Time.Completed > 0 && (info.Time.Completed < lastPart || info.Time.Completed > time.Now().UnixMilli()) {
