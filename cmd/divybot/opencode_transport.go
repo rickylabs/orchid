@@ -128,7 +128,8 @@ func openCodeEnvironment(cwd string, route openCodeRoute) (map[string]string, er
 	// Agent model precedes the TUI --model fallback. The overlay sets both and
 	// changes no permission rule. The isolated state prevents inherited variants.
 	config, err := json.Marshal(map[string]any{"model": route.qualifiedModel(), "default_agent": "build",
-		"agent": map[string]any{"build": map[string]any{"model": route.qualifiedModel()}}, "share": "disabled"})
+		"agent": map[string]any{"build": map[string]any{"model": route.qualifiedModel()}}, "share": "disabled",
+		"experimental": map[string]any{"disable_paste_summary": true}})
 	if err != nil {
 		return nil, errMatrix
 	}
@@ -160,10 +161,14 @@ func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openC
 		"variant": map[string]string{route.qualifiedModel(): route.Variant}})
 	root := filepath.Join(cwd, ".divybot-opencode")
 	file := filepath.Join(env["XDG_STATE_HOME"], "opencode", "model.json")
+	// A summarized paste expands its placeholder but retains an extra SPACE.
+	// Use literal input in this fresh per-run state; never change global TUI state.
+	kvFile := filepath.Join(filepath.Dir(file), "kv.json")
 	// Never overwrite or traverse a pre-existing repository-supplied state path.
 	script := "umask 077; test ! -e " + shq(root) + " && test ! -L " + shq(root) +
 		" && mkdir " + shq(root) + " && mkdir -p " + shq(filepath.Dir(file)) +
 		" && printf '%s' " + shq(string(state)) + " > " + shq(file) +
+		" && printf '%s' " + shq(`{"paste_summary_enabled":false}`) + " > " + shq(kvFile) +
 		" && printf '\\n.divybot-opencode/\\n' >> " + shq(filepath.Join(cwd, ".git", "info", "exclude"))
 	if _, err := h.runRemote(ctx, script); err != nil {
 		return matrixReason("opencode-state-unavailable")
@@ -171,11 +176,11 @@ func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openC
 	return nil
 }
 
-// Native paste can replace a final line ending with a space. Remove only
-// terminal CR/LF before hashing and sending; observed text remains byte-exact.
+// Native paste normalizes line endings. Do this before hashing and sending;
+// observed text remains byte-exact. Paste summaries are disabled in launch state.
 // Staging retains the original rendered goal for existing file consumers.
 func openCodeFirstPrompt(goal string) string {
-	return strings.TrimRight(goal, "\r\n")
+	return strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(goal, "\r\n", "\n"), "\r", "\n"), "\n")
 }
 
 // This private correlation record is not an observed route or a public native
@@ -365,16 +370,36 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 	return confirmed, completed, nil
 }
 
+type openCodeObservationCalls struct {
+	agent    func(context.Context, string) (AgentInfo, error)
+	sessions func(context.Context, *openCodeRun) ([]openCodeSession, error)
+	export   func(context.Context, *openCodeRun, string) ([]byte, error)
+}
+
 func (h Host) observeOpenCode(ctx context.Context, j *Job) (bool, bool, error) {
+	return observeOpenCodeSession(ctx, j, openCodeObservationCalls{
+		agent:    h.agentInfoOf,
+		sessions: h.openCodeSessions,
+		export: func(ctx context.Context, run *openCodeRun, id string) ([]byte, error) {
+			env, err := openCodeEnvironment(run.Cwd, run.Route)
+			if err != nil {
+				return nil, err
+			}
+			return h.openCodeRead(ctx, run.Cwd, env, "export", id)
+		},
+	})
+}
+
+func observeOpenCodeSession(ctx context.Context, j *Job, calls openCodeObservationCalls) (bool, bool, error) {
 	run := j.OpenCode
-	if run == nil || run.Failure != "" {
+	if ctx.Err() != nil || run == nil || run.Failure != "" {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
-	before, err := h.agentInfoOf(ctx, j.Pane)
+	before, err := calls.agent(ctx, j.Pane)
 	if err != nil || !openCodeOccupant(before, j, run) {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
-	sessions, err := h.openCodeSessions(ctx, run)
+	sessions, err := calls.sessions(ctx, run)
 	if err != nil {
 		return false, false, err
 	}
@@ -392,17 +417,13 @@ func (h Host) observeOpenCode(ctx context.Context, j *Job) (bool, bool, error) {
 	if run.CreatedAt != 0 && run.CreatedAt != copy.CreatedAt {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
-	env, err := openCodeEnvironment(run.Cwd, run.Route)
-	if err != nil {
-		return false, false, err
-	}
-	raw, err := h.openCodeRead(ctx, run.Cwd, env, "export", id)
+	raw, err := calls.export(ctx, run, id)
 	if err != nil {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
 	confirmed, completed, observationErr := inspectOpenCodeExport(raw, &copy)
-	after, err := h.agentInfoOf(ctx, j.Pane)
-	if err != nil || !openCodeOccupant(after, j, run) || before.StateChangeSeq != after.StateChangeSeq {
+	after, err := calls.agent(ctx, j.Pane)
+	if err != nil || ctx.Err() != nil || !openCodeOccupant(after, j, run) || before.StateChangeSeq != after.StateChangeSeq {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
 	if observationErr == nil && confirmed {
@@ -455,11 +476,26 @@ func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, goal string, persi
 		return matrixReason("opencode-output-unconfirmed")
 	}
 	// Baseline was read before this single effect. No Enter nudge or resubmission.
+	if ctx.Err() != nil {
+		return matrixReason("opencode-output-unconfirmed")
+	}
 	if _, err := h.herdr(ctx, "agent", "prompt", j.Pane, goal); err != nil {
 		return matrixReason("opencode-output-unconfirmed")
 	}
+	return waitOpenCodePrompt(ctx, func(ctx context.Context) (bool, bool, error) {
+		return h.observeOpenCode(ctx, j)
+	})
+}
+
+func waitOpenCodePrompt(ctx context.Context, observe func(context.Context) (bool, bool, error)) error {
 	for {
-		confirmed, _, err := h.observeOpenCode(ctx, j)
+		if ctx.Err() != nil {
+			return matrixReason("opencode-output-unconfirmed")
+		}
+		confirmed, _, err := observe(ctx)
+		if ctx.Err() != nil {
+			return matrixReason("opencode-output-unconfirmed")
+		}
 		if confirmed && err == nil {
 			return nil
 		}

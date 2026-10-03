@@ -203,6 +203,18 @@ Upgrade the Harness reader and contracts decoder to **0.32.0 before deploying th
 emitter**: earlier strict readers reject the additive field.
 ### Private OpenCode live-reader binding
 
+OpenCode registration leaves native identity pending until its first prompt creates
+and certifies a session. The dispatcher sends that prompt once and re-reads inside
+the existing 120-second budget. An expired or canceled read cannot confirm the
+goal or write a private native binding, including a late positive result.
+
+The fresh per-run TUI state disables paste summaries: OpenCode 1.18.34 expands a
+long-paste placeholder while retaining an extra trailing space. Literal pastes
+preserve the full goal. Terminal line endings are canonicalized before hashing
+and sending; the native stored prompt must still match that single exact digest.
+The original staged goal remains available, and global TUI settings are unchanged.
+The behavior is defined by the [pinned native paste implementation](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/tui/src/component/prompt/index.tsx).
+
 After durable first-goal confirmation, the dispatcher can publish its certified
 OpenCode session ID only in the reservation's private binding. The native export
 must still match the full prompt digest, exact selected route and fresh session;
