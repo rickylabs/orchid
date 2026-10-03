@@ -1,11 +1,28 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// Invalidate a receipt written after cancellation rather than certify late proof.
+// Both native-store adapters use the same publication boundary.
+func publishNativeIdentity(ctx context.Context, id string, write func(*string) error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if write(&id) != nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		_ = write(nil) // The existing writer removes the binding if invalidation fails.
+		return false
+	}
+	return true
+}
 
 // Native session IDs are private join keys, never public run identifiers.
 type nativeIdentityReason string

@@ -90,6 +90,9 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 	if j.Agent == "opencode" {
 		return c.openCodeCompletionEvidence(ctx, h, j, native)
 	}
+	if j.Agent == "agy" {
+		return c.agyCompletionEvidence(ctx, h, j, native)
+	}
 	if j.Agent == "codex" {
 		var complete bool
 		goalAllowed := j.NativeGoal == nil
@@ -209,6 +212,13 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 			found = a
 			continue
 		}
+		if j.Agent == "agy" {
+			if !agyBindingEligible(j) || !agyConversationID.MatchString(native) || !agyIdentityOccupant(a, j) || issueFromCwd(a.Cwd) != j.Issue {
+				return AgentInfo{}, false
+			}
+			found = a
+			continue
+		}
 		raw, err := json.Marshal(map[string]any{"type": "agent_info", "agent": a})
 		id, reason := nativeSessionFromResponse(raw, "agent_info", j.Agent, j.Label,
 			&dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace})
@@ -230,10 +240,13 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if j == nil {
 		return fenced
 	}
-	if j.Agent != "codex" && j.Agent != "claude" && j.Agent != "opencode" {
+	if j.Agent != "codex" && j.Agent != "claude" && j.Agent != "opencode" && j.Agent != "agy" {
 		return fenced // other native adapters own their completion evidence
 	}
 	if !fenced && j.Agent == "opencode" && !openCodeBindingEligible(j) {
+		return false
+	}
+	if !fenced && j.Agent == "agy" && !agyBindingEligible(j) {
 		return false
 	}
 	if !fenced && (!known || j == nil || j.Issue != n || j.GoalDelivery != "confirmed" || j.RunMode ||
