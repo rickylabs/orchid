@@ -164,7 +164,7 @@ func loadGoalReceipt(root string, j *Job, inbox string, owner *receiptOwner) (*d
 }
 
 func loadNativeBindingReceipt(root, key string, j *Job, inbox string, owner *receiptOwner, source string) (*durableMatrixReceipt, string, error) {
-	if j == nil || (source != "codex" && source != "claude" && source != "opencode") || j.Agent != source || !digestPattern.MatchString(key) || !privateReceiptRoot(root) {
+	if j == nil || (source != "codex" && source != "claude" && source != "agy" && source != "opencode") || j.Agent != source || !digestPattern.MatchString(key) || !privateReceiptRoot(root) {
 		return nil, "", goalError("goal-binding-unavailable")
 	}
 	reservation := filepath.Join(root, key)

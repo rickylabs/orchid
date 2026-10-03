@@ -624,6 +624,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	var kind string
 	var nativeArgs []string
+	var agyStore *nativeStore
 	if !strings.HasSuffix(agent, "-run") {
 		kind, nativeArgs, renderErr = managedInteractiveAgentArgs(agent, ovr, cwd)
 		if renderErr != nil {
@@ -654,11 +655,17 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		env["HOME"] = h.agentHome()
 	}
 	if agent == "agy" {
-		trustArgs, trustErr := h.prepareAGYTrust(ctx, cwd)
+		root, rootErr := agyStoreDirectory(cwd, receipt.dispatch.RunID)
+		var trustArgs []string
+		trustErr := rootErr
+		if rootErr == nil {
+			trustArgs, trustErr = h.prepareAGYTrustAt(ctx, cwd, root, true)
+		}
 		if trustErr != nil {
 			return "", "", matrixSite("spawn.agy-trust", trustErr)
 		}
 		nativeArgs = append(nativeArgs, trustArgs...)
+		agyStore = &nativeStore{Source: "agy", Directory: root}
 	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
@@ -758,6 +765,14 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if e := receipt.writeDispatch("dispatched", location); e != nil {
 		return pane, ws, matrixSite("spawn.dispatched-binding", e)
 	}
+	if agyStore != nil {
+		if receipt.writeAGYStore(agyStore) != nil {
+			return pane, ws, matrixSite("spawn.native-store-binding", errMatrix)
+		}
+		// AGY creates its ID on the first turn. Exact-occupant supervision
+		// binds the retained native store after goal delivery is confirmed.
+		identityReason = nativeUnavailable
+	}
 	if identity != nil {
 		if receipt.writeNativeIdentity(identity) != nil {
 			return pane, ws, matrixSite("spawn.native-binding", errMatrix)
@@ -765,7 +780,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	} else if identityReason == nativeUnavailable {
 		// Codex may not report a native thread until the first prompt starts it.
 		// Supervision retries this exact occupant and persists the later binding.
-		log.Printf("issue #%d: native identity pending first-thread hook", receipt.dispatch.Issue.Number)
+		if agyStore != nil {
+			log.Printf("issue #%d: native identity pending first native session", receipt.dispatch.Issue.Number)
+		} else {
+			log.Printf("issue #%d: native identity pending first-thread hook", receipt.dispatch.Issue.Number)
+		}
 	} else {
 		log.Printf("issue #%d: native identity INCONCLUSIVE reason=%s", receipt.dispatch.Issue.Number, identityReason)
 	}
@@ -3118,6 +3137,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")
 		}
+		if agent == "agy" {
+			c.bindAGYLiveIdentity(ctx, host, j)
+		}
 		c.startDispatchGoal(ctx, host, j, receipt)
 		c.bindOpenCodeLiveIdentity(ctx, host, j)
 	}
@@ -3155,6 +3177,9 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		c.noteOwnerMismatch(j, ref)
 	}
 	suppressInput := !matched || ref.Status == "done"
+	if matched && j.Agent == "agy" {
+		c.bindAGYLiveIdentity(ctx, host, j)
+	}
 
 	if j.Agent == "opencode" {
 		if matched {
@@ -3555,6 +3580,11 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 	}
 	c.clearClaudeWorking(j)
 	if ws != "" {
+		// A short AGY run can close its source before the first supervision tick.
+		// Preserve its exact native join while the registered occupant still exists.
+		if j.Agent == "agy" {
+			c.bindAGYLiveIdentity(ctx, host, j)
+		}
 		// Capture a bound native process before closing the workspace. A failed
 		// capture never prevents teardown, but cannot create terminal evidence.
 		captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)

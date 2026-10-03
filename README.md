@@ -141,7 +141,7 @@ separate follow-up work.
 
 AGY launches also prepare trust for the exact canonical checkout. The dispatcher
 reads valid effective CLI settings, preserves non-trust fields, and writes a
-private `.divybot-agy/settings.json` with only that checkout in `trustedWorkspaces`.
+private per-reservation settings with only that checkout in `trustedWorkspaces`.
 Registered per-process directory flags select the CLI overlay. Native OAuth
 credentials are bound by symlink to their existing native store, never read or
 copied by the dispatcher; the CLI can refresh that same store normally. Other
@@ -160,6 +160,17 @@ unfamiliar screens or custom status lines fail closed before a goal.
 There is no consent keypress, automatic retry or standing-config repair. Operators
 must keep effective settings, authentication and onboarding state readable by
 the native agent.
+
+AGY's fresh conversation store lives in a mode-0700 `.divybot-native/<reservation>/agy`
+directory beside the disposable checkout. A compatibility `.divybot-agy` link
+points to it; checkout removal preserves native evidence. Store retention is
+independent of checkout cleanup. The private `binding.json` carries `NativeStore`
+and, after confirmed prompt delivery, the exact `NativeSessionID`. The host needs
+Python 3's standard SQLite module for bounded read-only identity metadata queries.
+Supervision accepts one native root with a matching trajectory only while the
+registered occupant and durable receipt remain unchanged. Missing or ambiguous
+metadata stays unbound; uncertain launches clear both keys. Public receipts,
+diagnostics and agent IDs contain neither native IDs nor store paths.
 
 ## More
 

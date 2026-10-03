@@ -42,12 +42,15 @@ func (h Host) agyUnreadableFile(ctx context.Context, path string) (bool, error) 
 // credential file. Never copy credentials, modify standing settings or
 // substitute defaults when settings cannot be read.
 func (h Host) prepareAGYTrust(ctx context.Context, cwd string) ([]string, error) {
+	return h.prepareAGYTrustAt(ctx, cwd, filepath.Join(cwd, ".divybot-agy"), false)
+}
+
+func (h Host) prepareAGYTrustAt(ctx context.Context, cwd, root string, retained bool) ([]string, error) {
 	bad := matrixReason("agy-settings-unavailable")
 	if !agyTrustScope(cwd) {
 		return nil, bad
 	}
 	gemini := filepath.Join(h.agentHome(), ".gemini")
-	root := filepath.Join(cwd, ".divybot-agy")
 	relative, err := filepath.Rel(gemini, root)
 	if err != nil || !filepath.IsAbs(gemini) || filepath.Clean(gemini) != gemini || !cleanText(gemini) {
 		return nil, bad
@@ -85,13 +88,30 @@ func (h Host) prepareAGYTrust(ctx context.Context, cwd string) ([]string, error)
 	// absence of this optional file never substitutes credentials or signs in.
 	// mkdir, without -p, is the exclusive ownership boundary. Never follow a
 	// repository-provided file/symlink or reuse state from an earlier launch.
-	script := "umask 077; test ! -e " + shq(root) + " && test ! -L " + shq(root) +
+	preparation := ""
+	if retained {
+		parent := filepath.Dir(filepath.Dir(root))
+		reservation := filepath.Dir(root)
+		alias := filepath.Join(cwd, ".divybot-agy")
+		// The compatibility link remains inside the checkout, but the fresh native
+		// store is private and survives removal of that checkout. Never reuse a run.
+		preparation = "test ! -e " + shq(alias) + " && test ! -L " + shq(alias) +
+			" && { test -d " + shq(parent) + " || mkdir " + shq(parent) + "; }" +
+			" && test ! -L " + shq(parent) + " && test -O " + shq(parent) +
+			" && test \"$(stat -c '%a' " + shq(parent) + ")\" = 700" +
+			" && test \"$(cd " + shq(parent) + " && pwd -P)\" = " + shq(parent) +
+			" && mkdir " + shq(reservation) + " && "
+	}
+	script := "umask 077; " + preparation + "test ! -e " + shq(root) + " && test ! -L " + shq(root) +
 		" && mkdir " + shq(root) + " && printf '%s' " + shq(string(merged)) +
 		" > " + shq(filepath.Join(root, "settings.json")) +
 		" && " + agyFileReference(credential, filepath.Join(root, "antigravity-oauth-token")) +
 		" && mkdir " + shq(filepath.Join(root, "cache")) +
 		" && " + agyFileReference(onboarding, filepath.Join(root, "cache", "onboarding.json")) +
 		" && printf '\\n.divybot-agy/\\n' >> " + shq(filepath.Join(cwd, ".git", "info", "exclude"))
+	if retained {
+		script += " && ln -s " + shq(root) + " " + shq(filepath.Join(cwd, ".divybot-agy"))
+	}
 	if _, err := h.agyTrustCommand(ctx, script); err != nil {
 		return nil, bad
 	}

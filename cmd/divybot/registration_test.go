@@ -18,7 +18,7 @@ func registrationReceipt(t *testing.T, agent string, o Overrides) *durableMatrix
 	if err != nil {
 		t.Fatal("fixture matrix receipt failed")
 	}
-	r.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key, Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Source: "claude"}
+	r.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key, Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Source: strings.TrimSuffix(agent, "-run")}
 	if r.writeDispatch("reserved", nil) != nil {
 		t.Fatal("fixture dispatch binding failed")
 	}
@@ -199,7 +199,8 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			}
 			if kind == "agy" {
 				gemini := filepath.Join(h.Home, ".gemini")
-				relative, _ := filepath.Rel(gemini, filepath.Join(cwd, ".divybot-agy"))
+				store, _ := agyStoreDirectory(cwd, "orchid-"+strings.Repeat("d", 64))
+				relative, _ := filepath.Rel(gemini, store)
 				expected = append(expected, "--gemini_dir", gemini, "--app_data_dir", relative)
 			}
 			if !reflect.DeepEqual(got[2], expected) {
