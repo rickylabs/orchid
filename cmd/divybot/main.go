@@ -3176,7 +3176,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		c.startDispatchGoal(ctx, host, j, receipt)
 		c.bindOpenCodeLiveIdentity(ctx, host, j)
 	}
-	log.Printf("issue #%d: launch-started-observation-unproven", n)
+	log.Printf("issue #%d: launch-started", n)
 	return nil
 }
 
