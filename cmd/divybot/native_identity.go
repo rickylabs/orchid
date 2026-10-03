@@ -102,10 +102,13 @@ func (r *durableMatrixReceipt) writeNativeIdentityLocked(identity *string) (err 
 		binding = map[string]json.RawMessage{}
 	}
 	if identity == nil {
-		if _, ok := binding["NativeSessionID"]; !ok {
+		_, hasID := binding["NativeSessionID"]
+		_, hasStore := binding["NativeStore"]
+		if !hasID && !hasStore {
 			return nil
 		}
 		delete(binding, "NativeSessionID")
+		delete(binding, "NativeStore")
 	} else {
 		if r.dispatch == nil || r.dispatch.State != "dispatched" {
 			return errMatrix
