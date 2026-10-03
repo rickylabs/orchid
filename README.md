@@ -190,3 +190,19 @@ snapshots means unknown per-provider availability; an empty list means no pools.
 These are concurrency seats, without quota, credit or model-readiness claims.
 Upgrade the Harness reader and contracts decoder to **0.32.0 before deploying this
 emitter**: earlier strict readers reject the additive field.
+### Private OpenCode live-reader binding
+
+After durable first-goal confirmation, the dispatcher can publish its certified
+OpenCode session ID only in the reservation's private binding. The native export
+must still match the full prompt digest, exact selected route and fresh session;
+registered occupant, state sequence and durable receipt are checked around the
+read. Missing or changed evidence stays unbound, and an existing identity is
+never replaced. Supervision and pre-teardown reads do not resend a prompt.
+
+A native `stop` with continuation tool calls is unfinished, even when the tool
+has returned. Only a completed final stop with a nonempty nonsynthetic/nonignored
+answer and consistent native clocks can complete. Empty answers stay loudly
+blocked; process exit, idle status and unknown finishes never supply a verdict.
+Deploy this writer after the Harness 0.35.0 reader and cockpit decoder are ready;
+native IDs and prompt digests remain private. Quota and provider accounting are
+unchanged.

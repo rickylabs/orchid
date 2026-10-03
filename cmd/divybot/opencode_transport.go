@@ -261,12 +261,19 @@ type openCodeMessage struct {
 	Info struct {
 		ID, Role, SessionID, ParentID, ProviderID, ModelID, Variant, Finish string
 		Error                                                               json.RawMessage
+		Summary                                                             bool
 		Model                                                               struct{ ProviderID, ModelID, Variant string }
 		Time                                                                struct{ Created, Completed int64 }
 	} `json:"info"`
 	Parts []struct {
 		Type, Text, SessionID, MessageID string
-		Synthetic                        bool
+		Synthetic, Ignored               bool
+		Time                             struct{ Start, End int64 }
+		Metadata                         struct{ ProviderExecuted bool }
+		State                            struct {
+			Status   string
+			Metadata struct{ Interrupted bool }
+		}
 	} `json:"parts"`
 }
 
@@ -300,12 +307,26 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 		}
 		seen[info.ID] = true
 		var text strings.Builder
+		continuation := false
+		lastPart := info.Time.Created
 		for _, part := range message.Parts {
 			if part.SessionID != run.SessionID || part.MessageID != info.ID {
 				return false, false, bad
 			}
-			if part.Type == "text" && !part.Synthetic {
+			if part.Type == "text" && !part.Synthetic && !part.Ignored {
 				text.WriteString(part.Text)
+				if part.Time.Start != 0 && part.Time.Start < info.Time.Created || part.Time.End != 0 && part.Time.End < part.Time.Start {
+					return false, false, bad
+				}
+				if part.Time.Start > lastPart {
+					lastPart = part.Time.Start
+				}
+				if part.Time.End > lastPart {
+					lastPart = part.Time.End
+				}
+			}
+			if part.Type == "tool" && !part.Metadata.ProviderExecuted && !(part.State.Status == "error" && part.State.Metadata.Interrupted) {
+				continuation = true
 			}
 		}
 		switch info.Role {
@@ -329,7 +350,13 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 			}
 			confirmed = true
 			completed = false // An earlier assistant cannot complete a later streaming response.
-			if info.Time.Completed > 0 && info.Finish != "" && info.Finish != "tool-calls" {
+			if info.Summary {
+				continue
+			}
+			if info.Time.Completed > 0 && (info.Time.Completed < lastPart || info.Time.Completed > time.Now().UnixMilli()) {
+				return false, false, bad
+			}
+			if info.Time.Completed > 0 && info.Finish == "stop" && !continuation {
 				if strings.TrimSpace(text.String()) == "" {
 					return false, false, matrixReason("opencode-empty-answer")
 				}
