@@ -98,13 +98,17 @@ func (s *ownerNativeGrantStore) listen(ctx context.Context) (*net.UnixListener, 
 		return nil, errMatrix
 	}
 	listener.SetUnlinkOnClose(false)
-	// Private parent prevents access during the chmod interval.
-	if os.Chmod(s.options.Socket, 0600) != nil {
+	prepare := s.prepareSocket
+	if prepare == nil {
+		prepare = ownerNativeSetSocketOwner
+	}
+	created, err := os.Lstat(s.options.Socket)
+	if err != nil || prepare(s.options.Socket, created, *s.options.OperatorUID) != nil {
 		listener.Close()
 		return nil, errMatrix
 	}
 	bound, err := os.Lstat(s.options.Socket)
-	if err != nil || bound.Mode()&os.ModeSocket == 0 || !ownerNativeOwned(bound, os.Getuid()) {
+	if err != nil || !os.SameFile(created, bound) || bound.Mode()&os.ModeSocket == 0 || bound.Mode().Perm() != 0600 || !ownerNativeOwned(bound, *s.options.OperatorUID) {
 		listener.Close()
 		return nil, errMatrix
 	}
@@ -151,11 +155,11 @@ func ownerNativeGrantCLI(args []string, out io.Writer) int {
 	requestPath := fs.String("request", "", "private install request")
 	operation := fs.String("operation", "", "existing operation UUID")
 	serverUID := fs.Int("server-uid", os.Getuid(), "expected daemon UID")
-	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 || *serverUID < 0 || !filepath.IsAbs(*socket) || filepath.Clean(*socket) != *socket || !ownerNativePrivateDir(filepath.Dir(*socket), *serverUID) {
+	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 || *serverUID < 0 || !filepath.IsAbs(*socket) || filepath.Clean(*socket) != *socket || !ownerNativePrivateDir(filepath.Dir(*socket), os.Getuid()) {
 		return emit()
 	}
 	info, e := os.Lstat(*socket)
-	if e != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 || !ownerNativeOwned(info, *serverUID) {
+	if e != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 || !ownerNativeOwned(info, os.Getuid()) {
 		return emit()
 	}
 	rpc := ownerNativeRPC{Method: "readStatus", OperationID: *operation}
