@@ -39,6 +39,7 @@ import (
 // ============================ config ============================
 
 type Config struct {
+	OwnerNativeGrantPort    *ownerNativePortConfig   `json:"owner_native_grant_port,omitempty"`
 	Matrix                  MatrixConfig             `json:"matrix"`
 	ActionRequestRoot       string                   `json:"action_request_root,omitempty"`        // separate private maildir mount
 	ActionGoalBudgetCeiling int64                    `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
@@ -224,6 +225,13 @@ func loadConfig(path string) (*Config, error) {
 		if string(block) == "null" || strictJSON(block, &c.UnmeteredTransports) != nil {
 			return nil, fmt.Errorf("unmetered_transports invalid or unknown field")
 		}
+	}
+	if block, present := fields["owner_native_grant_port"]; present {
+		var options ownerNativePortConfig
+		if string(block) == "null" || ownerNativeStrictJSON(block, &options) != nil || !ownerNativePortOptionsValid(options) {
+			return nil, fmt.Errorf("owner_native_grant_port invalid private boundary")
+		}
+		c.OwnerNativeGrantPort = &options
 	}
 	if block, present := fields["provider_budgets"]; present {
 		c.ProviderBudgets, err = decodeProviderBudgetConfig(block)
@@ -1992,13 +2000,14 @@ func relaxBucket(used float64) bool { return used < govEngageFloorPct }
 // ============================ coordinator ============================
 
 type Coord struct {
-	cfg     *Config
-	st      *State
-	auth    *AuthStore
-	hosts   map[string]Host
-	actions actionCalls // injected only by action-delivery tests
-	dry     bool        // dry-run: log spawn/adopt decisions, take no spawning action
-	gov     struct {
+	ownerGrants *ownerNativeGrantStore
+	cfg         *Config
+	st          *State
+	auth        *AuthStore
+	hosts       map[string]Host
+	actions     actionCalls // injected only by action-delivery tests
+	dry         bool        // dry-run: log spawn/adopt decisions, take no spawning action
+	gov         struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
 	}
@@ -2050,6 +2059,14 @@ func newCoord(cfg *Config) *Coord {
 }
 
 func (c *Coord) run(ctx context.Context) {
+	c.startOwnerNativeGrants(ctx)
+	if c.cfg.OwnerNativeGrantPort != nil {
+		if c.ownerGrants == nil {
+			log.Printf("owner-native-grant-port UNKNOWN reason=override-invalid")
+		} else {
+			log.Printf("owner-native-grant-port LIVE")
+		}
+	}
 	go c.authSyncLoop(ctx)
 	go c.governorLoop(ctx)
 	go c.memoryLoop(ctx)
@@ -2998,6 +3015,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.goal-file", errMatrix)
 	}
+	if agent == "opencode" {
+		goal = openCodeFirstPrompt(goal)
+	}
 
 	// 3. Spawn BARE (no clawpatrol), one agent per dedicated single-pane workspace.
 	if !c.st.reserveLaunch(n) {
@@ -3054,7 +3074,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if routeErr != nil {
 			return matrixSite("launch.opencode-route", routeErr)
 		}
-		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir}
+		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir, ExpectedPromptDigest: shaText([]byte(goal))}
 	}
 	if agent == "codex" {
 		j.NativeGoal = &dispatchGoal{ReceiptKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"), Intent: intent, Reason: "native-session-unavailable"}
@@ -3087,22 +3107,20 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if target == "" {
 			target = label
 		}
-		inject := goal
-		if opencodeClass {
-			// The full goal is already staged to .divybot-goal.md (pre-spawn);
-			// the TUI only gets the short pointer, submitted via herdr's native
-			// confirmed prompt.
-			inject = runPointer
-		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
 		var deliveryErr error
 		if agent == "opencode" {
-			deliveryErr = host.injectOpenCodeGoal(gctx, j, func() error {
+			deliveryErr = host.injectOpenCodeGoal(gctx, j, goal, func() error {
 				c.st.mu.Lock()
 				defer c.st.mu.Unlock()
 				return c.st.saveLocked()
 			})
 		} else {
+			inject := goal
+			if opencodeClass {
+				// Existing staged transports keep their pointer delivery.
+				inject = runPointer
+			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
 		if deliveryErr != nil {
@@ -3123,6 +3141,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			c.bindAGYLiveIdentity(ctx, host, j)
 		}
 		c.startDispatchGoal(ctx, host, j, receipt)
+		c.bindOpenCodeLiveIdentity(ctx, host, j)
 	}
 	log.Printf("issue #%d: launch-started-observation-unproven", n)
 	return nil
@@ -3163,6 +3182,9 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 
 	if j.Agent == "opencode" {
+		if matched {
+			c.bindOpenCodeLiveIdentity(ctx, host, j)
+		}
 		if j.OpenCode == nil || j.OpenCode.Failure != "" {
 			if j.OpenCode == nil {
 				c.blockOpenCode(n, j, matrixReason("opencode-output-unconfirmed"))
@@ -3543,6 +3565,7 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
+	c.bindOpenCodeLiveIdentity(cctx, host, j)
 	ws := j.Workspace
 	if ws == "" {
 		// Resolve from the live fleet by issue cwd if we never recorded it.
@@ -3883,6 +3906,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "owner-native-grant" {
+		os.Exit(ownerNativeGrantCLI(os.Args[2:], os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "matrix" {
 		os.Exit(matrixConfigCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -3914,6 +3940,7 @@ func main() {
 	startReaper(ctx.Done())
 
 	if *once {
+		c.startOwnerNativeGrants(ctx)
 		c.tick(ctx)
 		c.st.save()
 		return

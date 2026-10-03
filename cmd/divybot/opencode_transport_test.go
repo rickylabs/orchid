@@ -76,6 +76,7 @@ func openCodeExportFixture(run *openCodeRun, answer string) []byte {
 
 func TestOpenCodeNativeExportRequiresRoutePromptAndNonemptyAnswer(t *testing.T) {
 	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000}
+	run.ExpectedPromptDigest = shaText([]byte(runPointer))
 	good := string(openCodeExportFixture(run, "OK"))
 	if confirmed, complete, err := inspectOpenCodeExport([]byte(good), run); !confirmed || !complete || err != nil {
 		t.Fatal("native answer was not confirmed", err)
@@ -205,7 +206,7 @@ func openCodeHostFixture(t *testing.T, mode string) (Host, *Job, func() string) 
 	t.Setenv("OC_FIXTURE_MODE", mode)
 	t.Setenv("OC_FIXTURE_POINTER", runPointer)
 	script := `#!/usr/bin/env python3
-import json,os,sys,time,pathlib
+import hashlib,json,os,sys,time,pathlib
 root=pathlib.Path(os.environ['OC_FIXTURE_ROOT']);cwd=os.environ['OC_FIXTURE_CWD'];mode=os.environ['OC_FIXTURE_MODE'];a=sys.argv[1:]
 with (root/'calls.jsonl').open('a') as f:f.write(json.dumps({'bin':pathlib.Path(sys.argv[0]).name,'args':a})+'\n')
 def emit(x):print(json.dumps(x))
@@ -213,11 +214,16 @@ prompted=(root/'prompted').exists()
 if pathlib.Path(sys.argv[0]).name=='herdr':
  if a[:2]==['workspace','create']:emit({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}})
  elif a[:2]==['agent','get']:
-  info={'agent':'opencode','name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','cwd':cwd,'interactive_ready':True,'agent_status':'working' if prompted else 'idle','state_change_seq':2 if prompted else 1}
+  info={'agent':'opencode','name':os.environ.get('OC_FIXTURE_LABEL','fixture-agent'),'pane_id':'w1:p1','workspace_id':'w1','cwd':cwd,'interactive_ready':True,'agent_status':'working' if prompted else 'idle','state_change_seq':2 if prompted else 1}
   if mode=='foreign':info['name']='foreign'
   if mode=='changing' and prompted:info['state_change_seq']=sum('get' in x for x in (root/'calls.jsonl').read_text().splitlines())
   emit({'result':{'agent':info}})
- elif a[:2]==['agent','prompt']:(root/'prompted').write_text(str(int(time.time()*1000)));emit({'result':{'accepted':True}})
+ elif a[:2]==['agent','prompt']:
+  if os.environ.get('OC_FIXTURE_STATE'):
+   saved=json.loads(pathlib.Path(os.environ['OC_FIXTURE_STATE']).read_text())['jobs']['7']['opencode_run']
+   if saved.get('expectedPromptDigest')!=hashlib.sha256(a[3].encode()).hexdigest() or saved.get('notBefore',0)<1:sys.exit(1)
+   (root/'persisted-before-prompt').write_text('yes')
+  (root/'submitted-prompt').write_text(a[3]);(root/'prompted').write_text(str(int(time.time()*1000)));emit({'result':{'accepted':True}})
  else:emit({'result':{}})
 elif pathlib.Path(sys.argv[0]).name=='opencode':
  a=[x for x in a if x!='--pure']
@@ -227,12 +233,20 @@ elif pathlib.Path(sys.argv[0]).name=='opencode':
  elif a[:2]==['debug','agent']:
   emit({'name':'build','mode':'primary','model':{'providerID':'fixture-provider','modelID':'foreign' if mode=='fallback-agent' else 'fixture-model'}})
  elif a[:2]==['session','list']:
-   if prompted and mode!='no-session':emit([{'id':'ses_fixture','directory':cwd,'created':int((root/'prompted').read_text())}])
+   if prompted and mode!='no-session':
+    count_file=root/'session-read-count'
+    count=int(count_file.read_text())+1 if count_file.exists() else 1
+    count_file.write_text(str(count))
+    if mode!='delayed-session' or count>1:emit([{'id':'ses_fixture','directory':cwd,'created':int((root/'prompted').read_text())}])
  elif a[:1]==['export']:
   now=int((root/'prompted').read_text());sid='ses_fixture'
+  def stored_prompt():
+   text=(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER']
+   if mode=='native-terminal' and text.endswith('\n'):text=text[:-1]+' '
+   return text
   part=lambda mid,text:{'type':'text','text':text,'sessionID':sid,'messageID':mid}
   emit({'info':{'id':sid,'directory':cwd,'time':{'created':now}},'messages':[
-   {'info':{'id':'fixture-user','sessionID':sid,'role':'user','time':{'created':now},'model':{'providerID':'fixture-provider','modelID':'fixture-model','variant':'high'}},'parts':[part('fixture-user',os.environ['OC_FIXTURE_POINTER'])]},
+   {'info':{'id':'fixture-user','sessionID':sid,'role':'user','time':{'created':now},'model':{'providerID':'fixture-provider','modelID':'fixture-model','variant':'high'}},'parts':[part('fixture-user',stored_prompt())]},
     {'info':{'id':'fixture-assistant','sessionID':sid,'role':'assistant','parentID':'fixture-user','providerID':'foreign' if mode=='wrong-provider' else 'fixture-provider','modelID':'fixture-model','variant':'high','time':{'created':now,'completed':0 if mode=='streaming' else now},'finish':'stop'},'parts':[part('fixture-assistant','' if mode=='empty' else 'OK')]}]})
 elif pathlib.Path(sys.argv[0]).name=='gh':
  if '--body-file' in a:
@@ -246,7 +260,7 @@ else:sys.exit(1)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	job := &Job{Issue: 7, Agent: "opencode", Label: "fixture-agent", Pane: "w1:p1", Workspace: "w1", Host: "fixture-host",
-		OpenCode: &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd}}
+		OpenCode: &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, ExpectedPromptDigest: shaText([]byte(runPointer))}}
 	return Host{Home: root, Name: job.Host}, job, func() string {
 		b, _ := os.ReadFile(log)
 		return string(b)
@@ -313,7 +327,7 @@ func TestOpenCodeGoalSingleEffectAndLoudEmptyFailure(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			defer cancel()
-			err := h.injectOpenCodeGoal(ctx, j, func() error {
+			err := h.injectOpenCodeGoal(ctx, j, runPointer, func() error {
 				if mode == "save-failure" {
 					return errors.New("PRIVATE-OPENCODE-CANARY")
 				}
