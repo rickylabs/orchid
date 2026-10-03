@@ -14,7 +14,7 @@ const syntheticAGYID = "00000000-0000-4000-8000-000000000001"
 func TestAGYLateIdentityKeepsExactOccupantAndDurableAuthority(t *testing.T) {
 	for _, change := range []string{"", "unconfirmed", "wrong-source", "wrong-pane", "wrong-name", "wrong-cwd", "not-ready", "changed-sequence", "changed-dispatch", "uncertain", "missing-id", "invalid-id", "changed-store"} {
 		t.Run(change, func(t *testing.T) {
-			root, j, receipt := claudeLiveBindingFixture(t)
+			root, j, receipt := agyLiveBindingFixture(t)
 			j.Agent, j.GoalDelivery = "agy", "confirmed"
 			receipt.dispatch.Source = "agy"
 			if receipt.writeDispatch("dispatched", receipt.dispatch.Location) != nil {

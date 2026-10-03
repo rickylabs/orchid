@@ -144,7 +144,7 @@ func TestCompletionOccupantMustBeUnique(t *testing.T) {
 
 func TestCompletionLeavesOtherNativeAdaptersToTheirOwnSupervisor(t *testing.T) {
 	c, j, _, _, closes := completionFixture(t)
-	for _, agent := range []string{"opencode", "agy"} {
+	for _, agent := range []string{"opencode", "fixture-adapter"} {
 		c.actions.completionPR = func(context.Context, *Job) (bool, error) {
 			t.Fatal("completion inspected another adapter PR")
 			return false, nil

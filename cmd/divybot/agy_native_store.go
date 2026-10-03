@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -98,7 +99,7 @@ func readAGYStoreBinding(r *durableMatrixReceipt) (*nativeStore, error) {
 // Fixed metadata queries only. No AGY process, API, payload, title, preview,
 // credential or setting is read to discover identity. Python's SQLite URI is
 // read-only against the native WAL; failures disclose no path or identity.
-const agyIdentityQuery = `import json,os,pathlib,re,sqlite3,stat,sys
+const agyNativeMetadataQuery = `import json,os,pathlib,re,sqlite3,stat,sys
 try:
  root=pathlib.Path(sys.argv[1]); uid=os.getuid()
  for directory in [root,root.parent,root.parent.parent]:
@@ -123,12 +124,15 @@ try:
  meta=db.execute('SELECT trajectory_id,cascade_id FROM trajectory_meta LIMIT 2').fetchall();db.close()
  assert len(meta)==1 and meta[0][1]==identity
  assert re.fullmatch(r'[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}',meta[0][0])
- print(json.dumps({'id':identity}))
-except (FileNotFoundError,sqlite3.OperationalError):
+`
+
+const agyNativeQueryErrors = `except (FileNotFoundError,sqlite3.OperationalError):
  print('{}')
 except Exception:
  sys.exit(1)
 `
+
+const agyIdentityQuery = agyNativeMetadataQuery + " print(json.dumps({'id':identity}))\n" + agyNativeQueryErrors
 
 func (h Host) readAGYIdentity(ctx context.Context, store *nativeStore) (string, nativeIdentityReason) {
 	if store == nil || store.Source != "agy" || !agyTrustScope(store.Directory) {
@@ -156,8 +160,34 @@ func agyIdentityOccupant(a AgentInfo, j *Job) bool {
 		(a.AgentStatus == "idle" || a.AgentStatus == "working" || a.AgentStatus == "blocked" || a.AgentStatus == "done")
 }
 
+func agyBindingEligible(j *Job) bool {
+	return j != nil && j.Agent == "agy" && j.GoalDelivery == "confirmed" && !j.RunMode
+}
+
+// The independently selected route and whole-brief reservation remain authority
+// while native metadata is read. Extra private authority fields stay pinned too.
+func readAGYBindingAuthority(r *durableMatrixReceipt, j *Job) (string, error) {
+	uid := os.Getuid()
+	if r.owner != nil {
+		uid = r.owner.uid
+	}
+	raw, err := ownerNativePrivateRead(filepath.Join(filepath.Dir(r.file), "binding.json"), uid)
+	var binding struct {
+		IssueID, Repo, BriefDigest, Host string
+		Route                            struct{ Transport, Provider, Model, Effort string }
+	}
+	if err != nil || decodeNativeJSON(raw, &binding) != nil || binding.IssueID == "" || binding.Repo != j.Repo || binding.Host != j.Host ||
+		!digestPattern.MatchString(binding.BriefDigest) || shaText([]byte(binding.IssueID+"\x00"+binding.Repo+"\x00"+binding.BriefDigest)) != j.DispatchKey ||
+		binding.Route.Transport != "agy" || binding.Route.Provider != r.dispatch.Provider || binding.Route.Model != r.dispatch.Model ||
+		binding.Route.Effort != r.dispatch.Effort || binding.Route.Model != j.Overrides.Model ||
+		!(binding.Route.Effort == j.Overrides.Effort || r.dispatch.MatrixSource == ownerNativeSource && binding.Route.Effort == "provider_default" && j.Overrides.Effort == "") {
+		return "", errMatrix
+	}
+	return shaText(raw), nil
+}
+
 func (c *Coord) bindAGYLiveIdentity(ctx context.Context, host Host, j *Job) {
-	if j == nil || j.Agent != "agy" || j.GoalDelivery != "confirmed" || j.RunMode {
+	if c.dry || !agyBindingEligible(j) {
 		return
 	}
 	owner, err := configuredReceiptOwner(c.cfg.Matrix)
@@ -166,8 +196,10 @@ func (c *Coord) bindAGYLiveIdentity(ctx context.Context, host Host, j *Job) {
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	retryAGYNativeBinding(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j,
-		host.agentInfoOf, host.readAGYIdentity)
+	if retryAGYNativeBinding(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j,
+		host.agentInfoOf, host.readAGYIdentity) {
+		log.Printf("issue #%d: AGY native identity bound", j.Issue)
+	}
 }
 
 // Read around the native metadata lookup, then reopen the durable authority.
@@ -175,7 +207,7 @@ func (c *Coord) bindAGYLiveIdentity(ctx context.Context, host Host, j *Job) {
 func retryAGYNativeBinding(ctx context.Context, root, inbox string, owner *receiptOwner, j *Job,
 	readAgent func(context.Context, string) (AgentInfo, error),
 	readIdentity func(context.Context, *nativeStore) (string, nativeIdentityReason)) bool {
-	if j == nil || j.Agent != "agy" || j.GoalDelivery != "confirmed" || j.RunMode {
+	if ctx.Err() != nil || !agyBindingEligible(j) {
 		return false
 	}
 	r, existing, err := loadNativeBindingReceipt(root, j.DispatchKey, j, inbox, owner, "agy")
@@ -183,12 +215,16 @@ func retryAGYNativeBinding(ctx context.Context, root, inbox string, owner *recei
 		r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace {
 		return false
 	}
+	beforeBinding, err := readAGYBindingAuthority(r, j)
+	if err != nil {
+		return false
+	}
 	store, err := readAGYStoreBinding(r)
 	if err != nil {
 		return false
 	}
 	before, err := readAgent(ctx, j.Pane)
-	if err != nil || !agyIdentityOccupant(before, j) {
+	if err != nil || ctx.Err() != nil || !agyIdentityOccupant(before, j) {
 		return false
 	}
 	directory, err := agyStoreDirectory(before.Cwd, r.dispatch.RunID)
@@ -196,20 +232,24 @@ func retryAGYNativeBinding(ctx context.Context, root, inbox string, owner *recei
 		return false
 	}
 	id, reason := readIdentity(ctx, store)
-	if reason != "" || !agyConversationID.MatchString(id) {
+	if reason != "" || ctx.Err() != nil || !agyBindingEligible(j) || !agyConversationID.MatchString(id) {
 		return false
 	}
 	after, err := readAgent(ctx, j.Pane)
-	if err != nil || !agyIdentityOccupant(after, j) || before.Cwd != after.Cwd || before.StateChangeSeq != after.StateChangeSeq {
+	if err != nil || ctx.Err() != nil || !agyIdentityOccupant(after, j) || before.Cwd != after.Cwd || before.StateChangeSeq != after.StateChangeSeq {
 		return false
 	}
 	verified, existing, err := loadNativeBindingReceipt(root, j.DispatchKey, j, inbox, owner, "agy")
 	if err != nil || existing != "" || !reflect.DeepEqual(r.dispatch, verified.dispatch) {
 		return false
 	}
+	currentBinding, err := readAGYBindingAuthority(verified, j)
+	if err != nil || currentBinding != beforeBinding || ctx.Err() != nil || !agyBindingEligible(j) {
+		return false
+	}
 	current, err := readAGYStoreBinding(verified)
 	if err != nil || !reflect.DeepEqual(current, store) {
 		return false
 	}
-	return verified.writeNativeIdentity(&id) == nil
+	return publishNativeIdentity(ctx, id, verified.writeNativeIdentity)
 }

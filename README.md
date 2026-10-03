@@ -172,6 +172,14 @@ registered occupant and durable receipt remain unchanged. Missing or ambiguous
 metadata stays unbound; uncertain launches clear both keys. Public receipts,
 diagnostics and agent IDs contain neither native IDs nor store paths.
 
+An exact native AGY stop can retire a done seat before its operator timeout.
+Bounded read-only summary and step queries require the latest completed response,
+native idle state, a successful stop reason, and no pending or active child work.
+The dispatcher rechecks private authority and the same occupant around that read,
+then uses the existing completion fence and releases capacity only after both the
+seat and its captured process are absent. A report file or marked comment alone
+does not prove native completion. Open PRs retain their review relay.
+
 ## More
 
 - [docs/architecture.md](docs/architecture.md) — what runs where
