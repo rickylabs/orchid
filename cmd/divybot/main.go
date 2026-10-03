@@ -39,6 +39,7 @@ import (
 // ============================ config ============================
 
 type Config struct {
+	OwnerNativeGrantPort    *ownerNativePortConfig   `json:"owner_native_grant_port,omitempty"`
 	Matrix                  MatrixConfig             `json:"matrix"`
 	ActionRequestRoot       string                   `json:"action_request_root,omitempty"`        // separate private maildir mount
 	ActionGoalBudgetCeiling int64                    `json:"action_goal_budget_ceiling,omitempty"` // operator ceiling for raise_budget
@@ -224,6 +225,13 @@ func loadConfig(path string) (*Config, error) {
 		if string(block) == "null" || strictJSON(block, &c.UnmeteredTransports) != nil {
 			return nil, fmt.Errorf("unmetered_transports invalid or unknown field")
 		}
+	}
+	if block, present := fields["owner_native_grant_port"]; present {
+		var options ownerNativePortConfig
+		if string(block) == "null" || ownerNativeStrictJSON(block, &options) != nil || !ownerNativePortOptionsValid(options) {
+			return nil, fmt.Errorf("owner_native_grant_port invalid private boundary")
+		}
+		c.OwnerNativeGrantPort = &options
 	}
 	if block, present := fields["provider_budgets"]; present {
 		c.ProviderBudgets, err = decodeProviderBudgetConfig(block)
@@ -1973,13 +1981,14 @@ func relaxBucket(used float64) bool { return used < govEngageFloorPct }
 // ============================ coordinator ============================
 
 type Coord struct {
-	cfg     *Config
-	st      *State
-	auth    *AuthStore
-	hosts   map[string]Host
-	actions actionCalls // injected only by action-delivery tests
-	dry     bool        // dry-run: log spawn/adopt decisions, take no spawning action
-	gov     struct {
+	ownerGrants *ownerNativeGrantStore
+	cfg         *Config
+	st          *State
+	auth        *AuthStore
+	hosts       map[string]Host
+	actions     actionCalls // injected only by action-delivery tests
+	dry         bool        // dry-run: log spawn/adopt decisions, take no spawning action
+	gov         struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
 	}
@@ -2031,6 +2040,14 @@ func newCoord(cfg *Config) *Coord {
 }
 
 func (c *Coord) run(ctx context.Context) {
+	c.startOwnerNativeGrants(ctx)
+	if c.cfg.OwnerNativeGrantPort != nil {
+		if c.ownerGrants == nil {
+			log.Printf("owner-native-grant-port UNKNOWN reason=override-invalid")
+		} else {
+			log.Printf("owner-native-grant-port LIVE")
+		}
+	}
 	go c.authSyncLoop(ctx)
 	go c.governorLoop(ctx)
 	go c.memoryLoop(ctx)
@@ -3854,6 +3871,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "owner-native-grant" {
+		os.Exit(ownerNativeGrantCLI(os.Args[2:], os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "matrix" {
 		os.Exit(matrixConfigCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -3885,6 +3905,7 @@ func main() {
 	startReaper(ctx.Done())
 
 	if *once {
+		c.startOwnerNativeGrants(ctx)
 		c.tick(ctx)
 		c.st.save()
 		return
