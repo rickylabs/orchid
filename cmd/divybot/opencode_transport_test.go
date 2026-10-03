@@ -243,11 +243,13 @@ elif pathlib.Path(sys.argv[0]).name=='opencode':
   def stored_prompt():
    text=(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER']
    if mode=='native-terminal' and text.endswith('\n'):text=text[:-1]+' '
-   if mode=='native-summary':
+   if mode in ['native-summary','native-summary-startup']:
     kv_file=pathlib.Path(os.environ['XDG_STATE_HOME'])/'opencode'/'kv.json'
-    kv=json.loads(kv_file.read_text()) if kv_file.exists() else {}
+    kv=json.loads(kv_file.read_text()) if kv_file.exists() and mode!='native-summary-startup' else {}
+    config=json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT','{}'))
+    summary_default=not config.get('experimental',{}).get('disable_paste_summary',False)
     text=text.replace('\r\n','\n').replace('\r','\n')
-    if kv.get('paste_summary_enabled',True) and (text.strip().count('\n')>=2 or len(text.strip())>150):text=text.strip()+' '
+    if kv.get('paste_summary_enabled',summary_default) and (text.strip().count('\n')>=2 or len(text.strip())>150):text=text.strip()+' '
    return text
   part=lambda mid,text:{'type':'text','text':text,'sessionID':sid,'messageID':mid}
   emit({'info':{'id':sid,'directory':cwd,'time':{'created':now}},'messages':[
@@ -307,7 +309,7 @@ func TestOpenCodeRegisteredLaunchCatalogBeforeSeatAndIsolatedVariant(t *testing.
 		t.Fatal("launch state is not private")
 	}
 	env, err := openCodeEnvironment(j.OpenCode.Cwd, j.OpenCode.Route)
-	if err != nil || strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "permission") || env["XDG_STATE_HOME"] == "" {
+	if err != nil || strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "permission") || env["XDG_STATE_HOME"] == "" || !strings.Contains(env["OPENCODE_CONFIG_CONTENT"], `"disable_paste_summary":true`) {
 		t.Fatal("route changed permission rules or inherited shared state")
 	}
 	// Never overwrite a prior state tree (including repository-supplied symlinks).

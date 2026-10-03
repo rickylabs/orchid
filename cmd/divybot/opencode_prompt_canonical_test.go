@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+func TestOpenCodeNativePasteSummaryStartupGoalOnce(t *testing.T) {
+	testOpenCodeFullGoalSpawn(t, "native-summary-startup")
+}
+
 func TestOpenCodeNativePasteSummaryGoalOnce(t *testing.T) {
 	testOpenCodeFullGoalSpawn(t, "native-summary")
 }

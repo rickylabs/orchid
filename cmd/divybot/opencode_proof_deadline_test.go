@@ -204,3 +204,39 @@ func TestOpenCodeCanceledPersistenceNeverSendsPrompt(t *testing.T) {
 		t.Fatal("canceling persistence allowed a native effect", err)
 	}
 }
+
+func TestOpenCodePrivateIdentityWriteDeadline(t *testing.T) {
+	for _, phase := range []string{"", "entry", "write", "error"} {
+		t.Run(phase, func(t *testing.T) {
+			_, _, receipt := openCodeBindingFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if phase == "entry" {
+				cancel()
+			}
+			writes := 0
+			bound := publishOpenCodeNativeIdentity(ctx, "ses_fixture", func(id *string) error {
+				writes++
+				if phase == "error" {
+					return errMatrix
+				}
+				err := receipt.writeNativeIdentity(id)
+				if id != nil && phase == "write" {
+					cancel()
+				}
+				return err
+			})
+			raw, err := os.ReadFile(filepath.Join(filepath.Dir(receipt.file), "binding.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase == "" {
+				if !bound || writes != 1 || !bytes.Contains(raw, []byte("ses_fixture")) {
+					t.Fatal("active write failed to publish native identity")
+				}
+			} else if bound || bytes.Contains(raw, []byte("ses_fixture")) || phase == "entry" && writes != 0 || phase == "write" && writes != 2 {
+				t.Fatal("expired or failed write retained identity or reported success", bound, writes)
+			}
+		})
+	}
+}

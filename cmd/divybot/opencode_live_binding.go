@@ -88,7 +88,22 @@ func retryOpenCodeNativeBinding(ctx context.Context, root, inbox string, owner *
 		return false
 	}
 	id := proof.SessionID
-	return verified.writeNativeIdentity(&id) == nil
+	return publishOpenCodeNativeIdentity(ctx, id, verified.writeNativeIdentity)
+}
+
+// Invalidate a receipt written after cancellation rather than certify late proof.
+func publishOpenCodeNativeIdentity(ctx context.Context, id string, write func(*string) error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if write(&id) != nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		_ = write(nil) // The existing writer removes the binding if invalidation fails.
+		return false
+	}
+	return true
 }
 
 func (c *Coord) bindOpenCodeLiveIdentity(ctx context.Context, host Host, j *Job) {

@@ -128,7 +128,8 @@ func openCodeEnvironment(cwd string, route openCodeRoute) (map[string]string, er
 	// Agent model precedes the TUI --model fallback. The overlay sets both and
 	// changes no permission rule. The isolated state prevents inherited variants.
 	config, err := json.Marshal(map[string]any{"model": route.qualifiedModel(), "default_agent": "build",
-		"agent": map[string]any{"build": map[string]any{"model": route.qualifiedModel()}}, "share": "disabled"})
+		"agent": map[string]any{"build": map[string]any{"model": route.qualifiedModel()}}, "share": "disabled",
+		"experimental": map[string]any{"disable_paste_summary": true}})
 	if err != nil {
 		return nil, errMatrix
 	}
