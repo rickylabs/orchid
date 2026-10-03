@@ -99,11 +99,12 @@ type ownerNativeGrantStore struct {
 	active  map[string]ownerNativeGrantRecord
 	known   map[string]bool
 	// Syscall fault controls, not operator configuration.
-	fileSync func(*os.File) error
-	dirSync  func(string) error
-	link     func(string, string) error
-	activate func() error
-	peerUID  func(*net.UnixConn) (int, error)
+	fileSync      func(*os.File) error
+	dirSync       func(string) error
+	link          func(string, string) error
+	activate      func() error
+	peerUID       func(*net.UnixConn) (int, error)
+	prepareSocket func(string, os.FileInfo, int) error
 }
 
 func ownerNativePrivateDir(root string, uid int) bool {
@@ -145,7 +146,7 @@ func ownerNativePrivateReadWithOpen(path string, uid int, open func(string) (*os
 func ownerNativePortOptionsValid(options ownerNativePortConfig) bool {
 	if options.OperatorUID == nil || *options.OperatorUID < 0 || uint64(*options.OperatorUID) >= 4294967295 ||
 		!filepath.IsAbs(options.Socket) || filepath.Clean(options.Socket) != options.Socket ||
-		!ownerNativePrivateDir(filepath.Dir(options.Socket), os.Getuid()) ||
+		!ownerNativePrivateDir(filepath.Dir(options.Socket), *options.OperatorUID) ||
 		!ownerNativePrivateDir(options.StoreRoot, os.Getuid()) || !ownerNativePrivateDir(options.ApprovalRoot, *options.OperatorUID) {
 		return false
 	}

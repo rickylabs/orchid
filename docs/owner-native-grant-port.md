@@ -19,16 +19,18 @@ Configure the optional `owner_native_grant_port` object once at deployment:
 
 | Key | Requirement |
 | --- | --- |
-| `socket` | Absolute clean Unix socket path in an existing private directory owned by the daemon UID. |
+| `socket` | Absolute clean Unix socket path in an existing mode-0700 private directory owned by `operator_uid`. The listener creates a mode-0600 socket owned by that operator. |
 | `store_root` | Existing absolute private directory owned by the daemon UID; grants and intent indexes live here. |
 | `approval_root` | Existing absolute private directory owned by `operator_uid`; independently issued approvals live here. |
 | `operator_uid` | Required numeric UID authenticated with Linux `SO_PEERCRED` for both port methods. |
 
 All directories must have mode 0700, have no symlink components, and be outside
-Git. The store and approval roots must be separate and not nested. Files and
-the socket have mode 0600. The operator needs filesystem access to the socket
-and approvals; using the daemon UID is the normal deployment arrangement.
-Root operators must account for daemon access to approval files. Other platforms
+Git. The endpoint directory and approval root belong to `operator_uid`; the grant
+store and immutable records remain owned by the daemon UID. The store and approval roots must be separate and not nested. Files and
+the socket have mode 0600. The operator owns the endpoint and approvals, so a root daemon can serve a
+different unprivileged operator without widening permissions. An unprivileged
+daemon must be able to assign the socket to the configured operator; failure
+keeps the port unavailable. Same-UID deployments retain the existing behavior. Other platforms
 fail closed until their peer authentication and no-follow implementation exists.
 An existing endpoint is never overwritten, including an apparently stale socket;
 the operator must resolve it before bootstrap. The process removes its own socket
@@ -97,7 +99,14 @@ divybot owner-native-grant status -socket "$SOCKET" -operation "$OPERATION"
 
 Request files must be private and owned by the caller. `-server-uid` explicitly
 pins a different daemon UID; the client verifies both the socket and its actual
-peer. The CLI emits a private JSON acknowledgement and exits 0 only for LIVE.
+peer. Filesystem checks use the caller/operator UID independently of this server
+UID pin. For a root daemon and an unprivileged operator, pass `-server-uid 0`;
+endpoint ownership never substitutes for authenticating the actual server. An
+operator-created replacement socket is refused before sending an authority
+request. The Linux listener holds and validates its created no-follow socket
+inode before ownership/mode changes, and rechecks the endpoint identity after
+preparation. A swapped path never receives privileged changes or becomes the
+registered listener. The CLI emits a private JSON acknowledgement and exits 0 only for LIVE.
 It never edits configuration, writes approval records, applies labels or launches
 an agent. It never retries a failed request automatically.
 
