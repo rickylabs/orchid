@@ -34,7 +34,7 @@ func TestAGYUnreadableStateBlocksBeforeNativeSeatAndSurvivesRestart(t *testing.T
 			ssh := `#!/usr/bin/env python3
 import os,subprocess,sys
 s=sys.argv[-1]
-if 'pwd -P' in s or s.startswith('if test -f ') or 'exec head -c' in s or 'command -v awk' in s or '__DIVYBOT_EOF__' in s:
+if 'pwd -P' in s or s.startswith('if test -f ') or 'exec head -c' in s or 'command -v awk' in s or '__DIVYBOT_EOF__' in s or 'git rev-parse --git-path info/exclude' in s:
  p=subprocess.run(['/bin/bash','-c',s]);sys.exit(p.returncode)
 if "'workspace' 'create'" in s or "'agent' 'start'" in s:
  with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write('seat attempted\n')
@@ -56,7 +56,12 @@ with open(os.environ['AGY_BLOCK_COMMENT'],'a') as f:f.write(body)
 			cfg := &Config{Inbox: "fixture/inbox", BranchPrefix: "fixture/", Targets: []Target{{Label: "fixture-target", Repo: "fixture/project"}}}
 			c := &Coord{cfg: cfg, auth: &AuthStore{}, st: loadState(filepath.Join(root, "state.json"))}
 			is := Issue{Number: 7, Title: "Synthetic", Body: "PRIVATE-AGY-CANARY", Labels: []string{"fixture-target"}}
-			err := c.spawn(context.Background(), 7, is, h, "agy", Overrides{Model: "fixture-model", Effort: "low"}, registrationReceipt(t, "agy", Overrides{Model: "fixture-model", Effort: "low"}))
+			r := registrationReceipt(t, "agy", Overrides{Model: "fixture-model", Effort: "low"})
+			r.dispatch.Host = h.Name
+			if r.writeDispatch("reserved", nil) != nil || os.WriteFile(filepath.Join(filepath.Dir(r.file), "binding.json"), []byte(`{"Repo":"fixture/project","BriefDigest":"synthetic-full-brief"}`), 0600) != nil {
+				t.Fatal("fixture full launch binding")
+			}
+			err := c.spawn(context.Background(), 7, is, h, "agy", Overrides{Model: "fixture-model", Effort: "low"}, r)
 			_, seatErr := os.Stat(os.Getenv("REGISTRATION_CALLS"))
 			if !agySettingsBlocked(err) || registrationFailureKind(err) != string(agySettingsUnreadable) || c.st.Jobs[7] != nil || !os.IsNotExist(seatErr) {
 				t.Fatal("unreadable state lost its no-seat blocked class")

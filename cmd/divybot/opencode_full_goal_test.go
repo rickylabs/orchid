@@ -159,15 +159,22 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	is := Issue{Number: 7, Title: "Synthetic goal", Body: body, Labels: []string{"fixture-target"}}
 	o := Overrides{Model: "fixture-provider/fixture-model", Router: "fixture-provider", Effort: "high", Prompt: "Synthetic owner instruction: report only; no PR."}
 	r := registrationReceipt(t, "opencode", o)
+	r.dispatch.Host = h.Name
+	if err := r.writeDispatch("reserved", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(r.file), "binding.json"), []byte(`{"Repo":"fixture/project","BriefDigest":"synthetic-full-brief"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := c.spawn(ctx, 7, is, h, "opencode", o, r); err != nil {
 		t.Fatal("full rendered goal launch did not confirm", err)
 	}
-	goal := o.goalPreamble() + "\n" + renderGoal(c.cfg.Inbox, "fixture/project", "fixture-target", is.Title, is.Body, cwd, "fixture/7", "", 7) + finalCommentBodyInstruction(strings.Repeat("d", 64))
+	goal := o.goalPreamble() + "\n" + renderGoal(c.cfg.Inbox, "fixture/project", "fixture-target", is.Title, is.Body, cwd, "fixture/7", "", 7) + finalReportInstruction(r.dispatch.Issue, strings.Repeat("d", 64))
 	actual, err := os.ReadFile(filepath.Join(h.Home, "submitted-prompt"))
-	if err != nil || string(actual) != openCodeFirstPrompt(goal) || !strings.Contains(string(actual), body) || !strings.Contains(string(actual), "sh .divybot-final-comment.sh < REPORT.md > FINAL-COMMENT.md") {
-		t.Fatal("first prompt lost the complete brief, directives or helper")
+	if err != nil || string(actual) != openCodeFirstPrompt(goal) || !strings.Contains(string(actual), body) || !strings.Contains(string(actual), finalReportFile) {
+		t.Fatal("first prompt lost the complete brief, directives or report handoff")
 	}
 	staged, err := os.ReadFile(filepath.Join(cwd, ".divybot-goal.md"))
 	if err != nil || string(staged) != goal+"\n" {
@@ -183,7 +190,10 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	private, _ := json.Marshal(saved.OpenCode)
 	var binding map[string]any
 	_ = json.Unmarshal(private, &binding)
-	if binding["expectedPromptDigest"] != shaText([]byte(openCodeFirstPrompt(goal))) || strings.Contains(string(private), body) || saved.GoalDelivery != "confirmed" {
+	if binding["expectedPromptDigest"] != shaText([]byte(openCodeFirstPrompt(goal))) || strings.Contains(string(private), body) || saved.GoalDelivery != "confirmed" || !saved.FinalReportManaged {
 		t.Fatal("private binding lost the first goal or persisted its body")
+	}
+	if _, scope, err := c.finalScope(saved); err != nil || scope.Destination != r.dispatch.Issue || scope.Cwd != cwd {
+		t.Fatal("actual launch lost its producer publication scope", err)
 	}
 }

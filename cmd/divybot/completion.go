@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -15,11 +16,12 @@ import (
 // never permission to restart a completed run. Cleanup holds capacity until
 // the recorded seat AND its captured native process are independently absent.
 type completedRun struct {
-	DispatchKey     string `json:"dispatchKey"`
-	NativeSessionID string `json:"nativeSessionId"`
-	StateChangeSeq  uint64 `json:"stateChangeSeq"`
-	Phase           string `json:"phase"` // retiring | close-failed | close-sent | observed
-	CloseAttempts   int    `json:"closeAttempts"`
+	DispatchKey            string `json:"dispatchKey"`
+	NativeSessionID        string `json:"nativeSessionId"`
+	StateChangeSeq         uint64 `json:"stateChangeSeq"`
+	Phase                  string `json:"phase"` // retiring | close-failed | close-sent | observed
+	CloseAttempts          int    `json:"closeAttempts"`
+	PublicationUnconfirmed bool   `json:"publicationUnconfirmed,omitempty"`
 }
 
 func finalCommentMarker(key string) string {
@@ -85,6 +87,9 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 	if c.actions.completed != nil {
 		return c.actions.completed(ctx, h, j, native)
 	}
+	if j.Agent == "opencode" {
+		return c.openCodeCompletionEvidence(ctx, h, j, native)
+	}
 	if j.Agent == "codex" {
 		var complete bool
 		goalAllowed := j.NativeGoal == nil
@@ -106,6 +111,10 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 		if err == nil && complete {
 			return true, nil
 		}
+	}
+	if j.FinalReportManaged {
+		_, err := c.publishFinalReport(ctx, j)
+		return err == nil, err
 	}
 	var issue struct {
 		Comments []struct {
@@ -178,8 +187,8 @@ func (c *Coord) pruneCompletedRuns(allOpen map[int]bool, pollOK bool, state func
 	}
 }
 
-// Use the official integration identity, never a cwd or display name as a
-// substitute. Any other agent in the workspace makes a close unsafe.
+// Use each adapter's certified native identity and exact occupant. Any other
+// agent in the workspace makes a close unsafe.
 func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, bool) {
 	var found AgentInfo
 	count := 0
@@ -190,6 +199,15 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 		count++
 		if a.AgentStatus != "done" || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace {
 			return AgentInfo{}, false
+		}
+		if j.Agent == "opencode" {
+			// Herdr supplies the occupant, while the certified native store
+			// supplies OpenCode's identity and terminal evidence.
+			if !openCodeBindingEligible(j) || j.OpenCode.SessionID != native || !openCodeOccupant(a, j, j.OpenCode) {
+				return AgentInfo{}, false
+			}
+			found = a
+			continue
 		}
 		raw, err := json.Marshal(map[string]any{"type": "agent_info", "agent": a})
 		id, reason := nativeSessionFromResponse(raw, "agent_info", j.Agent, j.Label,
@@ -212,8 +230,11 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if j == nil {
 		return fenced
 	}
-	if j.Agent != "codex" && j.Agent != "claude" {
+	if j.Agent != "codex" && j.Agent != "claude" && j.Agent != "opencode" {
 		return fenced // other native adapters own their completion evidence
+	}
+	if !fenced && j.Agent == "opencode" && !openCodeBindingEligible(j) {
+		return false
 	}
 	if !fenced && (!known || j == nil || j.Issue != n || j.GoalDelivery != "confirmed" || j.RunMode ||
 		ref.Status != "done" || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent) {
@@ -244,16 +265,23 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			return false
 		}
 		complete, err := c.completionEvidence(check, host, j, native)
+		publicationUnconfirmed := false
 		if err != nil || !complete {
 			c.noteCompletionUnproven(j, first.StateChangeSeq)
-			return false // supervision continues without continuation input
+			// A file/publication request is not native terminal proof. A stable
+			// done Claude seat may instead be retired as an explicit failure,
+			// after a bounded grace, without claiming assignment success.
+			if !c.finalPublicationFailureDue(j, first.StateChangeSeq) || check.Err() != nil {
+				return false // supervision continues without continuation input
+			}
+			publicationUnconfirmed = true
 		}
 		agents, err = c.actionList(check, host)
 		second, valid := completionOccupant(agents, j, native)
 		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq {
 			return false
 		}
-		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring"}
+		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring", PublicationUnconfirmed: publicationUnconfirmed}
 		c.st.mu.Lock()
 		if c.st.CompletedRuns == nil {
 			c.st.CompletedRuns = map[int]completedRun{}
@@ -294,7 +322,11 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		c.st.mu.Unlock()
 		if err == nil {
 			c.clearClaudeWorking(j)
-			log.Printf("issue #%d: completed; seat and process absence observed", n)
+			if fence.PublicationUnconfirmed {
+				log.Printf("issue #%d: final publication unconfirmed; seat and process absence observed", n)
+			} else {
+				log.Printf("issue #%d: completed; seat and process absence observed", n)
+			}
 		}
 		return true
 	}
@@ -345,4 +377,63 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		return c.retireCompleted(ctx, n, j, ref, known)
 	}
 	return true
+}
+
+// A pane Done or a marked comment cannot substitute OpenCode's exact native
+// terminal proof. Pin its private dispatch/binding before and after that read.
+func (c *Coord) openCodeCompletionEvidence(ctx context.Context, h Host, j *Job, native string) (bool, error) {
+	return c.openCodeCompletionWithObserver(ctx, j, native, h.observeOpenCode)
+}
+
+func (c *Coord) openCodeCompletionWithObserver(ctx context.Context, j *Job, native string, observe func(context.Context, *Job) (bool, bool, error)) (bool, error) {
+	if ctx.Err() != nil || !openCodeBindingEligible(j) || j.OpenCode.SessionID != native {
+		return false, matrixReason("opencode-output-unconfirmed")
+	}
+	owner, err := configuredReceiptOwner(c.cfg.Matrix)
+	if err != nil {
+		return false, matrixReason("opencode-output-unconfirmed")
+	}
+	read := func() (*durableMatrixReceipt, string, error) {
+		r, id, e := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, "opencode")
+		if e != nil || id != native || r.dispatch.Host != j.Host || r.dispatch.Location == nil ||
+			r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace {
+			return nil, "", matrixReason("opencode-output-unconfirmed")
+		}
+		digest, e := readOpenCodeBindingAuthority(r, j)
+		return r, digest, e
+	}
+	before, digest, err := read()
+	if err != nil {
+		return false, err
+	}
+	proof := *j.OpenCode
+	confirmed, completed, err := observe(ctx, j)
+	if err != nil || !confirmed || !completed || ctx.Err() != nil || !reflect.DeepEqual(proof, *j.OpenCode) {
+		return false, matrixReason("opencode-output-unconfirmed")
+	}
+	after, secondDigest, err := read()
+	if err != nil || secondDigest != digest || !reflect.DeepEqual(before.dispatch, after.dispatch) || ctx.Err() != nil {
+		return false, matrixReason("opencode-output-unconfirmed")
+	}
+	return true, nil
+}
+
+// This is failure cleanup, not a new definition of native completion. Codex
+// active-goal ownership and the other adapters' terminal guards stay intact.
+func (c *Coord) finalPublicationFailureDue(j *Job, seq uint64) bool {
+	if !j.FinalReportManaged || j.Agent != "claude" {
+		return false
+	}
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	now := time.Now()
+	if j.FinalDoneAt.IsZero() || j.FinalDoneSeq != seq {
+		priorAt, priorSeq := j.FinalDoneAt, j.FinalDoneSeq
+		j.FinalDoneAt, j.FinalDoneSeq = now, seq
+		if c.st.saveLocked() != nil {
+			j.FinalDoneAt, j.FinalDoneSeq = priorAt, priorSeq
+		}
+		return false
+	}
+	return !j.FinalDoneAt.After(now) && now.Sub(j.FinalDoneAt) >= 2*time.Minute
 }
