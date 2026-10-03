@@ -188,3 +188,108 @@ func TestOwnerNativeEndpointOperatorChild(t *testing.T) {
 		t.Fatal("invalid peer/path was trusted")
 	}
 }
+
+func TestOwnerNativeSocketOwnershipNoFollow(t *testing.T) {
+	for _, change := range []string{"valid", "replaced", "regular", "symlink", "foreign-owner"} {
+		t.Run(change, func(t *testing.T) {
+			if change == "foreign-owner" && os.Getuid() != 0 {
+				t.Skip("actual foreign socket owner is covered by isolated root CI")
+			}
+			path := filepath.Join(privateTestRoot(t), "operator.sock")
+			var listener *net.UnixListener
+			var err error
+			if change == "regular" {
+				err = os.WriteFile(path, []byte("synthetic"), 0640)
+			} else {
+				listener, err = net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+				if err == nil {
+					listener.SetUnlinkOnClose(false)
+					defer listener.Close()
+				}
+			}
+			if err != nil || os.Chmod(path, 0640) != nil {
+				t.Fatal("socket type fixture")
+			}
+			created, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change == "replaced" {
+				if os.Rename(path, path+".old") != nil {
+					t.Fatal("replacement fixture")
+				}
+				replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				replacement.SetUnlinkOnClose(false)
+				defer replacement.Close()
+			} else if change == "foreign-owner" {
+				if os.Chown(path, 1000, -1) != nil {
+					t.Fatal("foreign owner fixture")
+				}
+			} else if change == "symlink" {
+				alias := path + ".alias"
+				if os.Symlink(path, alias) != nil {
+					t.Fatal("symlink fixture")
+				}
+				path = alias
+			}
+			if (ownerNativeSetSocketOwner(path, created, os.Getuid()) == nil) != (change == "valid") {
+				t.Fatal("socket inode ownership guard failed")
+			}
+			if change == "valid" {
+				info, err := os.Lstat(path)
+				if err != nil || info.Mode().Perm() != 0600 || !ownerNativeOwned(info, os.Getuid()) {
+					t.Fatal("held socket permissions not applied")
+				}
+			}
+		})
+	}
+}
+
+func TestOwnerNativeSocketRegistrationGuards(t *testing.T) {
+	for _, change := range []string{"valid", "prepare-error", "replaced", "shared", "missing", "wrong-owner"} {
+		t.Run(change, func(t *testing.T) {
+			if change == "wrong-owner" && os.Getuid() != 0 {
+				t.Skip("actual foreign ownership is covered by isolated root CI")
+			}
+			s, _, _ := ownerPortFixture(t, "claude")
+			s.prepareSocket = func(path string, created os.FileInfo, uid int) error {
+				if ownerNativeSetSocketOwner(path, created, uid) != nil {
+					return errMatrix
+				}
+				switch change {
+				case "prepare-error":
+					return errMatrix
+				case "replaced":
+					if os.Rename(path, path+".old") != nil {
+						t.Fatal("replacement fixture")
+					}
+					replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+					if err != nil || os.Chmod(path, 0600) != nil {
+						t.Fatal("replacement listener fixture")
+					}
+					replacement.SetUnlinkOnClose(false)
+					t.Cleanup(func() { replacement.Close() })
+				case "shared":
+					return os.Chmod(path, 0660)
+				case "missing":
+					return os.Remove(path)
+				case "wrong-owner":
+					return os.Chown(path, 1000, -1)
+				}
+				return nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			listener, err := s.listen(ctx)
+			if listener != nil {
+				defer listener.Close()
+			}
+			if (err == nil) != (change == "valid") {
+				t.Fatal("unverified socket registered")
+			}
+		})
+	}
+}
