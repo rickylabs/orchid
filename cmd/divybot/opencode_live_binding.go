@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -116,5 +117,7 @@ func (c *Coord) bindOpenCodeLiveIdentity(ctx context.Context, host Host, j *Job)
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	retryOpenCodeNativeBinding(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j, host.agentInfoOf, host.observeOpenCode)
+	if retryOpenCodeNativeBinding(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j, host.agentInfoOf, host.observeOpenCode) {
+		log.Printf("issue #%d: OpenCode native identity bound", j.Issue)
+	}
 }

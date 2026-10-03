@@ -271,6 +271,9 @@ type tracker struct {
 }
 
 type Job struct {
+	FinalReportManaged    bool          `json:"final_report_managed,omitempty"`
+	FinalDoneAt           time.Time     `json:"final_done_at,omitempty"`
+	FinalDoneSeq          uint64        `json:"final_done_seq,omitempty"`
 	OwnerMismatchNotice   string        `json:"owner_mismatch_notice,omitempty"`
 	CompletionUnprovenSeq *uint64       `json:"completion_unproven_seq,omitempty"`
 	GoalDelivery          string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
@@ -2008,6 +2011,8 @@ func relaxBucket(used float64) bool { return used < govEngageFloorPct }
 // ============================ coordinator ============================
 
 type Coord struct {
+	finalCalls  finalPublicationCalls
+	finalMu     sync.Mutex
 	ownerGrants *ownerNativeGrantStore
 	cfg         *Config
 	st          *State
@@ -2350,6 +2355,7 @@ func (c *Coord) tick(ctx context.Context) {
 	c.st.mu.Unlock()
 	for n, j := range finishing {
 		ref, known := status[n]
+		c.observeFinalReport(ctx, j, ref, known)
 		c.retireCompleted(ctx, n, j, ref, known)
 	}
 	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return ghIssueStateByNum(ctx, c.cfg.Inbox, n) })
@@ -3008,7 +3014,11 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	commentKey := strings.TrimPrefix(receipt.dispatch.RunID, "orchid-")
 	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
-	goal += finalCommentBodyInstruction(commentKey)
+	if runMode {
+		goal += finalCommentBodyInstruction(commentKey)
+	} else {
+		goal += finalReportInstruction(receipt.dispatch.Issue, commentKey)
+	}
 	if pre := ovr.goalPreamble(); pre != "" {
 		goal = pre + "\n" + goal
 	}
@@ -3019,7 +3029,19 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		env["TMPDIR"] = "/tmp"
 	}
 	// Prepare both launch artifacts under the existing compatible failure site.
-	if err := host.stageWorkerGoal(ctx, workdir, commentKey, goal, opencodeClass); err != nil {
+	var stageErr error
+	if runMode {
+		stageErr = host.stageWorkerGoal(ctx, workdir, commentKey, goal, opencodeClass)
+	} else {
+		stageErr = c.stageFinalReport(ctx, host, workdir, commentKey, receipt)
+		if stageErr == nil && opencodeClass {
+			stageErr = host.writeFile(ctx, filepath.Join(workdir, ".divybot-goal.md"), goal)
+			if stageErr == nil {
+				_, stageErr = host.runRemote(ctx, fmt.Sprintf("cd %s\nreport_exclude=$(git rev-parse --git-path info/exclude)\ngrep -qxF .divybot-goal.md \"$report_exclude\" || printf '.divybot-goal.md\\n' >> \"$report_exclude\"", shq(workdir)))
+			}
+		}
+	}
+	if stageErr != nil {
 		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.goal-file", errMatrix)
 	}
@@ -3073,6 +3095,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		Target:      tgt.Label, Repo: tgt.Repo,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
+		FinalReportManaged: !runMode,
 	}
 	if !runMode {
 		j.GoalDelivery = "pending"
@@ -3145,6 +3168,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")
 		}
+		log.Printf("issue #%d: goal delivery confirmed", n)
 		gcancel()
 		if agent == "agy" {
 			c.bindAGYLiveIdentity(ctx, host, j)
@@ -3158,6 +3182,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 
 func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
 	ref, known := status[n]
+	c.observeFinalReport(ctx, j, ref, known)
 	if c.retireCompleted(ctx, n, j, ref, known) {
 		return
 	}
