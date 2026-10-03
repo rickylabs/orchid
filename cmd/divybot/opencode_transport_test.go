@@ -293,6 +293,15 @@ func TestOpenCodeRegisteredLaunchCatalogBeforeSeatAndIsolatedVariant(t *testing.
 	if err != nil || json.Unmarshal(data, &state) != nil || state.Variant[j.OpenCode.Route.qualifiedModel()] != "high" {
 		t.Fatal("explicit variant was dropped")
 	}
+	kvPath := filepath.Join(filepath.Dir(statePath), "kv.json")
+	kv, kvErr := os.ReadFile(kvPath)
+	if kvErr != nil || string(kv) != `{"paste_summary_enabled":false}` {
+		t.Fatal("launch inherited summary placeholder expansion")
+	}
+	kvStat, kvErr := os.Stat(kvPath)
+	if kvErr != nil || kvStat.Mode().Perm() != 0600 {
+		t.Fatal("paste state is not private")
+	}
 	stat, _ := os.Stat(statePath)
 	if stat.Mode().Perm() != 0600 {
 		t.Fatal("launch state is not private")

@@ -12,7 +12,7 @@ import (
 )
 
 func TestOpenCodeRegistrationPendingNativeProof(t *testing.T) {
-	h, j, _ := openCodeHostFixture(t, "")
+	h, j, calls := openCodeHostFixture(t, "")
 	var output bytes.Buffer
 	previous := log.Writer()
 	log.SetOutput(&output)
@@ -28,6 +28,9 @@ func TestOpenCodeRegistrationPendingNativeProof(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(filepath.Dir(receipt.file), "binding.json"))
 	if err != nil || bytes.Contains(raw, []byte("ses_fixture")) {
 		t.Fatal("registration invented a native identity")
+	}
+	if strings.Contains(calls(), `"agent", "get"`) {
+		t.Fatal("OpenCode registration re-read the unsupported generic contract")
 	}
 }
 
@@ -69,7 +72,7 @@ func TestOpenCodePromptWaitDeadlineCannotConfirm(t *testing.T) {
 }
 
 func TestOpenCodeObservationExpiredCannotBindSession(t *testing.T) {
-	for _, phase := range []string{"", "before", "sessions", "export", "after"} {
+	for _, phase := range []string{"", "entry", "before", "sessions", "export", "after"} {
 		t.Run(phase, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -102,6 +105,9 @@ func TestOpenCodeObservationExpiredCannotBindSession(t *testing.T) {
 					return raw, nil
 				},
 			}
+			if phase == "entry" {
+				cancel()
+			}
 			confirmed, completed, err := observeOpenCodeSession(ctx, j, calls)
 			if phase == "" {
 				if !confirmed || !completed || err != nil || run.SessionID != "ses_fixture" || run.CreatedAt != 2000 {
@@ -110,6 +116,91 @@ func TestOpenCodeObservationExpiredCannotBindSession(t *testing.T) {
 			} else if confirmed || completed || err != matrixReason("opencode-output-unconfirmed") || run.SessionID != "" || run.CreatedAt != 0 {
 				t.Fatal("canceled proof accepted or wrote native identity", confirmed, completed, err, run.SessionID)
 			}
+			if phase == "entry" && reads != 0 {
+				t.Fatal("expired observation performed native reads")
+			}
 		})
+	}
+}
+
+func TestOpenCodePrivateBindingDeadlineCannotPublish(t *testing.T) {
+	for _, phase := range []string{"", "entry", "before", "observe", "after"} {
+		t.Run(phase, func(t *testing.T) {
+			root, j, receipt := openCodeBindingFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if phase == "entry" {
+				cancel()
+			}
+			reads, observations := 0, 0
+			read := func(context.Context, string) (AgentInfo, error) {
+				reads++
+				if reads == 1 && phase == "before" || reads == 2 && phase == "after" {
+					cancel()
+				}
+				return AgentInfo{Agent: j.Agent, Name: j.Label, PaneID: j.Pane, WorkspaceID: j.Workspace, Cwd: j.OpenCode.Cwd, InteractiveReady: true, StateChangeSeq: 1}, nil
+			}
+			observe := func(context.Context, *Job) (bool, bool, error) {
+				observations++
+				if phase == "observe" {
+					cancel()
+				}
+				return true, false, nil
+			}
+			bound := retryOpenCodeNativeBinding(ctx, root, "fixture/inbox", nil, j, read, observe)
+			raw, err := os.ReadFile(filepath.Join(filepath.Dir(receipt.file), "binding.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase == "" {
+				if !bound || !bytes.Contains(raw, []byte("ses_fixture")) {
+					t.Fatal("live-context native identity missing")
+				}
+			} else {
+				if bound || bytes.Contains(raw, []byte("ses_fixture")) {
+					t.Fatal("expired native identity was published")
+				}
+				if phase == "entry" && reads != 0 || phase == "before" && observations != 0 || phase == "observe" && reads != 1 {
+					t.Fatal("canceled proof kept reading native state", reads, observations)
+				}
+			}
+		})
+	}
+}
+
+func TestGoalDeliveryDeadlineCannotConfirm(t *testing.T) {
+	for _, phase := range []string{"", "entry", "save"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if phase == "entry" {
+				cancel()
+			}
+			calls := 0
+			err := confirmGoalDeliveryBeforeDeadline(ctx, func() error {
+				calls++
+				if phase == "save" {
+					cancel()
+				}
+				return nil
+			})
+			if phase == "" {
+				if err != nil || calls != 1 {
+					t.Fatal("live confirmation failed", err, calls)
+				}
+			} else if err != errPromptUnconfirmed || phase == "entry" && calls != 0 {
+				t.Fatal("canceled save could confirm a launch", err, calls)
+			}
+		})
+	}
+}
+
+func TestOpenCodeCanceledPersistenceNeverSendsPrompt(t *testing.T) {
+	h, j, calls := openCodeHostFixture(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := h.injectOpenCodeGoal(ctx, j, runPointer, func() error { cancel(); return nil })
+	if err != matrixReason("opencode-output-unconfirmed") || strings.Contains(calls(), `"agent", "prompt"`) {
+		t.Fatal("canceling persistence allowed a native effect", err)
 	}
 }

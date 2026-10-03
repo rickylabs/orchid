@@ -3112,9 +3112,6 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
-		if deliveryErr == nil && gctx.Err() != nil {
-			deliveryErr = errPromptUnconfirmed
-		}
 		if deliveryErr != nil {
 			c.blockGoalDelivery(n, j)
 			if agent == "opencode" {
@@ -3124,7 +3121,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			gcancel()
 			return matrixReason("goal-prompt-unconfirmed")
 		}
-		if err := c.confirmGoalDelivery(j); err != nil || gctx.Err() != nil {
+		if err := confirmGoalDeliveryBeforeDeadline(gctx, func() error { return c.confirmGoalDelivery(j) }); err != nil {
 			gcancel()
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")

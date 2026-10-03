@@ -54,7 +54,7 @@ func readOpenCodeBindingAuthority(r *durableMatrixReceipt, j *Job) (string, erro
 
 func retryOpenCodeNativeBinding(ctx context.Context, root, inbox string, owner *receiptOwner, j *Job,
 	readAgent func(context.Context, string) (AgentInfo, error), observe func(context.Context, *Job) (bool, bool, error)) bool {
-	if !openCodeBindingEligible(j) {
+	if ctx.Err() != nil || !openCodeBindingEligible(j) {
 		return false
 	}
 	r, existing, err := loadNativeBindingReceipt(root, j.DispatchKey, j, inbox, owner, "opencode")
@@ -68,15 +68,15 @@ func retryOpenCodeNativeBinding(ctx context.Context, root, inbox string, owner *
 	}
 	proof := *j.OpenCode
 	before, err := readAgent(ctx, j.Pane)
-	if err != nil || !openCodeOccupant(before, j, &proof) {
+	if err != nil || ctx.Err() != nil || !openCodeOccupant(before, j, &proof) {
 		return false
 	}
 	confirmed, _, err := observe(ctx, j)
-	if err != nil || !confirmed || !openCodeBindingEligible(j) || !reflect.DeepEqual(proof, *j.OpenCode) {
+	if err != nil || ctx.Err() != nil || !confirmed || !openCodeBindingEligible(j) || !reflect.DeepEqual(proof, *j.OpenCode) {
 		return false
 	}
 	after, err := readAgent(ctx, j.Pane)
-	if err != nil || !openCodeOccupant(after, j, &proof) || before.StateChangeSeq != after.StateChangeSeq {
+	if err != nil || ctx.Err() != nil || !openCodeOccupant(after, j, &proof) || before.StateChangeSeq != after.StateChangeSeq {
 		return false
 	}
 	verified, existing, err := loadNativeBindingReceipt(root, j.DispatchKey, j, inbox, owner, "opencode")
@@ -84,7 +84,7 @@ func retryOpenCodeNativeBinding(ctx context.Context, root, inbox string, owner *
 		return false
 	}
 	currentBinding, err := readOpenCodeBindingAuthority(verified, j)
-	if err != nil || currentBinding != beforeBinding {
+	if err != nil || currentBinding != beforeBinding || ctx.Err() != nil {
 		return false
 	}
 	id := proof.SessionID

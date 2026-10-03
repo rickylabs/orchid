@@ -440,7 +440,7 @@ func openCodeOccupant(a AgentInfo, j *Job, run *openCodeRun) bool {
 func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, goal string, persist func() error) error {
 	// The rendered goal is bound at launch, never reconstructed from Job.Goal's
 	// truncated summary or recovered by reading a file in the model's first turn.
-	if ctx.Err() != nil || j == nil || j.OpenCode == nil || strings.TrimSpace(goal) == "" || j.OpenCode.ExpectedPromptDigest != shaText([]byte(goal)) {
+	if j == nil || j.OpenCode == nil || strings.TrimSpace(goal) == "" || j.OpenCode.ExpectedPromptDigest != shaText([]byte(goal)) {
 		return matrixReason("opencode-output-unconfirmed")
 	}
 	before, err := h.agentInfoOf(ctx, j.Pane)
@@ -471,7 +471,7 @@ func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, goal string, persi
 	}
 	j.OpenCode.NotBefore = seconds * 1000
 	after, readErr := h.agentInfoOf(ctx, j.Pane)
-	if readErr != nil || ctx.Err() != nil || !openCodeOccupant(after, j, j.OpenCode) || after.AgentStatus != "idle" || after.StateChangeSeq != before.StateChangeSeq || persist == nil || persist() != nil {
+	if readErr != nil || !openCodeOccupant(after, j, j.OpenCode) || after.AgentStatus != "idle" || after.StateChangeSeq != before.StateChangeSeq || persist == nil || persist() != nil {
 		return matrixReason("opencode-output-unconfirmed")
 	}
 	// Baseline was read before this single effect. No Enter nudge or resubmission.

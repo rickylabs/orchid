@@ -1,5 +1,7 @@
 package main
 
+import "context"
+
 // Registration and prompt delivery are different effects. Pending legacy Codex
 // jobs cannot acquire a completion verdict from an operator deadline either.
 func goalDeliveryUnconfirmed(j *Job) bool {
@@ -32,6 +34,20 @@ func (c *Coord) confirmGoalDelivery(j *Job) error {
 		if j.NativeGoal != nil {
 			j.NativeGoal.PromptConfirmed = false
 		}
+		return errPromptUnconfirmed
+	}
+	return nil
+}
+
+// A successful save/read arriving after its budget cannot confirm a launch.
+func confirmGoalDeliveryBeforeDeadline(ctx context.Context, confirm func() error) error {
+	if ctx.Err() != nil {
+		return errPromptUnconfirmed
+	}
+	if err := confirm(); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
 		return errPromptUnconfirmed
 	}
 	return nil
