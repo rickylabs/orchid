@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -67,17 +68,25 @@ func (s *ownerNativeGrantStore) handle(ctx context.Context, conn *net.UnixConn) 
 		peerUID = ownerNativePeerUID
 	}
 	uid, err := peerUID(conn)
-	if err == nil && uid == *s.options.OperatorUID && s.healthy() {
+	operator := err == nil && uid == *s.options.OperatorUID
+	switch {
+	case !operator:
+		log.Printf("owner grant REFUSED (override-invalid): the caller is not the operator")
+	case !s.healthy():
+		log.Printf("owner grant REFUSED (override-invalid): the private grant store is unhealthy")
+	default:
 		raw, e := ownerNativeReadFrame(conn)
 		rpc, e2 := ownerNativeDecodeRPC(raw)
-		if e == nil && e2 == nil {
-			callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			if rpc.Method == "install" {
-				ack = s.install(callCtx, *rpc.Install)
-			} else {
-				ack = s.readStatus(callCtx, rpc.OperationID)
-			}
+		if e != nil || e2 != nil {
+			log.Printf("owner grant REFUSED (override-invalid): the request frame is malformed")
+			break
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if rpc.Method == "install" {
+			ack = s.install(callCtx, *rpc.Install)
+		} else {
+			ack = s.readStatus(callCtx, rpc.OperationID)
 		}
 	}
 	// A lost write is UNKNOWN to the caller; neither this handler nor status

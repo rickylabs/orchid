@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -215,16 +217,49 @@ func (s *ownerNativeGrantStore) healthy() bool {
 	return ownerNativePortOptionsValid(s.options) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "intents"), os.Getuid()) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "records"), os.Getuid())
 }
 
+// A plain sentence for the operator log. The wire reason stays the closed
+// override-invalid/grant-conflict pair that Cockpit decodes strictly.
+type ownerNativeWhy string
+
+func (w ownerNativeWhy) Error() string { return string(w) }
+
+func ownerNativeExplain(err error, fallback string) string {
+	if why, ok := err.(ownerNativeWhy); ok {
+		return string(why)
+	}
+	return fallback
+}
+
+// Domain-separates an app approval from operator-file bytes, so removing a file
+// still fences a record that the file approved.
+const ownerNativeAppApproval = "owner-app-approval-v1\x00"
+
 func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, error) {
 	if !s.healthy() || !ownerNativeRequestValid(r) {
-		return "", errMatrix
+		return "", ownerNativeWhy("the private grant store is unhealthy or the request is malformed")
 	}
-	raw, err := ownerNativePrivateRead(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"), *s.options.OperatorUID)
+	path := filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json")
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		// Owner rule (Eric, 2026-10-04): the verified owner's Approve in Cockpit is
+		// the approval. Only the operator peer reaches this endpoint, and it is the
+		// same UID that owns the approval root, so a file adds no authority. The
+		// approval is bound to the current inbox and pins, as a file would be.
+		target := s.cfg.Matrix.TargetRevisions[r.Target]
+		if !sourceRevision.MatchString(s.cfg.Matrix.Revision) || !sourceRevision.MatchString(target) {
+			return "", ownerNativeWhy("the matrix or target revision is not pinned")
+		}
+		raw, err := json.Marshal(ownerNativeApproval{SchemaVersion: 1, Authorizer: "eric", Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: target, Request: r})
+		if err != nil {
+			return "", errMatrix
+		}
+		return shaText(append([]byte(ownerNativeAppApproval), raw...)), nil
+	}
+	raw, err := ownerNativePrivateRead(path, *s.options.OperatorUID)
 	var a ownerNativeApproval
 	if err != nil || ownerNativeStrictJSON(raw, &a) != nil || a.SchemaVersion != 1 || a.Authorizer != "eric" || a.Inbox != s.cfg.Inbox ||
 		!sourceRevision.MatchString(a.MatrixRevision) || a.MatrixRevision != s.cfg.Matrix.Revision ||
 		!sourceRevision.MatchString(a.TargetRevision) || a.TargetRevision != s.cfg.Matrix.TargetRevisions[r.Target] || !reflect.DeepEqual(a.Request, r) {
-		return "", errMatrix
+		return "", ownerNativeWhy("an operator approval file exists for this launch and does not match it")
 	}
 	return shaText(raw), nil
 }
@@ -279,8 +314,19 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 		return ownerNativeGrantRecord{}, err
 	}
 	is, err := s.fetchIssue(ctx, r.IssueNumber)
-	if err != nil || !ownerNativeIssueMatches(is, is, true) || briefDigest(is.Issue) != r.ExpectedBriefDigest || is.Issue.ID != r.ExpectedIssueID || !s.targetMatches(is.Labels, r.Target) {
-		return ownerNativeGrantRecord{}, errMatrix
+	switch {
+	case err != nil:
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the inbox issue could not be read")
+	case is.State != "OPEN":
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the inbox issue is closed")
+	case containsString(is.Labels, "harness"):
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the inbox issue is already labelled harness")
+	case is.Issue.ID != r.ExpectedIssueID:
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the inbox issue is not the approved issue")
+	case briefDigest(is.Issue) != r.ExpectedBriefDigest:
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the brief changed after it was approved")
+	case !s.targetMatches(is.Labels, r.Target):
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue's target label does not name the approved target")
 	}
 	found := false
 	for _, t := range s.cfg.Targets {
@@ -293,13 +339,16 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 	if profile == "" {
 		profile = "leaf"
 	}
-	if !found || profile != r.Profile {
-		return ownerNativeGrantRecord{}, errMatrix
+	if !found {
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the target is not configured or is disabled")
+	}
+	if profile != r.Profile {
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the brief's profile is not the approved profile")
 	}
 	input, _ := json.Marshal(MatrixGrant{Tier: r.Tier, Role: r.Role, NativeOverride: r.NativeOverride})
 	grant, problems := bindMatrixGrant(is.Issue, r.Target, input)
 	if len(problems) > 0 {
-		return ownerNativeGrantRecord{}, errMatrix
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the grant could not be bound to the issue")
 	}
 	copy, err := cloneOwnerNativeConfig(s.cfg)
 	if err != nil {
@@ -307,15 +356,15 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 	}
 	for _, old := range copy.Matrix.Grants {
 		if old.IssueID == grant.IssueID && old.Repo == grant.Repo && old.BriefDigest == grant.BriefDigest {
-			return ownerNativeGrantRecord{}, matrixReason("grant-conflict")
+			return ownerNativeGrantRecord{}, ownerNativeWhy("a startup grant already covers this issue and brief")
 		}
 	}
 	copy.Matrix.Grants = append(copy.Matrix.Grants, grant)
-	if len(validateMatrixConfig(ctx, copy)) > 0 {
-		return ownerNativeGrantRecord{}, errMatrix
+	if problems := validateMatrixConfig(ctx, copy); len(problems) > 0 {
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the matrix config refuses the grant (" + problems[0].Field + ": " + problems[0].Reason + ")")
 	}
-	if len(validateMatrixIssue(ctx, copy, is.Issue, r.Target, s.deps)) > 0 {
-		return ownerNativeGrantRecord{}, errMatrix
+	if problems := validateMatrixIssue(ctx, copy, is.Issue, r.Target, s.deps); len(problems) > 0 {
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue cannot launch on this route (" + problems[0].Field + ": " + problems[0].Reason + ")")
 	}
 	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: s.cfg.Matrix.TargetRevisions[r.Target], ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
 }
@@ -403,55 +452,65 @@ func ownerNativeFailure(operation, state, reason string) ownerNativeAck {
 	return ownerNativeAck{SchemaVersion: 1, OperationID: operation, State: state, Reason: reason}
 }
 
+// Every refused or unknown owner grant leaves one plain line in the daemon log.
+func (s *ownerNativeGrantStore) refuse(issue int, operation, state, reason, why string) ownerNativeAck {
+	subject := "owner grant"
+	if issue > 0 {
+		subject = fmt.Sprintf("issue #%d: owner grant", issue)
+	}
+	log.Printf("%s %s %s (%s): %s", subject, operation, state, reason, why)
+	return ownerNativeFailure(operation, state, reason)
+}
+
 func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstallRequest) ownerNativeAck {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !ownerNativeRequestValid(r) {
-		return ownerNativeFailure("", "REFUSED", "override-invalid")
+		return s.refuse(r.IssueNumber, "", "REFUSED", "override-invalid", "the install request is malformed")
 	}
 	// Detach typed callers too; no caller-owned route pointer enters admission.
 	input, _ := json.Marshal(r)
 	var detached ownerNativeInstallRequest
 	if ownerNativeStrictJSON(input, &detached) != nil {
-		return ownerNativeFailure("", "REFUSED", "override-invalid")
+		return s.refuse(r.IssueNumber, "", "REFUSED", "override-invalid", "the install request could not be detached")
 	}
 	r = detached
 	record, err := s.makeRecord(ctx, r)
 	if err != nil {
-		return ownerNativeFailure(r.OperationID, "REFUSED", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "override-invalid", ownerNativeExplain(err, "the approved launch could not be bound"))
 	}
 	// Do not publish a different payload through a previously used operation.
 	if _, e := os.Lstat(s.recordPath(r.OperationID)); !os.IsNotExist(e) {
 		old, readErr := ownerNativePrivateRead(s.recordPath(r.OperationID), os.Getuid())
 		var prior ownerNativeGrantRecord
 		if e != nil || readErr != nil || ownerNativeStrictJSON(old, &prior) != nil || !reflect.DeepEqual(prior, record) {
-			return ownerNativeFailure(r.OperationID, "REFUSED", "grant-conflict")
+			return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "this operation already holds a different grant")
 		}
 	}
 	current, err := s.fetchIssue(ctx, r.IssueNumber)
 	if err != nil || !ownerNativeIssueMatches(record.Issue, current, true) || !s.targetMatches(current.Labels, r.Target) {
-		return ownerNativeFailure(r.OperationID, "REFUSED", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "override-invalid", "the issue changed while the grant was being prepared")
 	}
 	records, e := ownerNativePrivateEntries(filepath.Join(s.options.StoreRoot, "records"), 1024)
 	if e != nil {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the grant records could not be listed")
 	}
 	if len(records) == 1024 {
 		if _, e = os.Lstat(s.recordPath(r.OperationID)); e != nil {
-			return ownerNativeFailure(r.OperationID, "REFUSED", "grant-conflict")
+			return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "the grant store holds its maximum number of records")
 		}
 	}
 	dir := s.intentDir(r.IssueNumber)
 	s.known[s.issueKey(r.IssueNumber)] = true
 	if err = os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the issue grant directory could not be created")
 	}
 	if !ownerNativePrivateDir(dir, os.Getuid()) || syncDirectory(filepath.Dir(dir)) != nil {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the issue grant directory is not private")
 	}
 	entries, err := ownerNativePrivateEntries(dir, 32)
 	if err != nil || len(entries) > 32 {
-		return ownerNativeFailure(r.OperationID, "REFUSED", "grant-conflict")
+		return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "the issue holds its maximum number of grant intents")
 	}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), ".owner-native-") {
@@ -460,7 +519,7 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 		raw, e := ownerNativePrivateRead(filepath.Join(dir, entry.Name()), os.Getuid())
 		var intent ownerNativeIntent
 		if e != nil || ownerNativeStrictJSON(raw, &intent) != nil || intent.SchemaVersion != 1 || !digestPattern.MatchString(intent.RecordChecksum) || !actionIDPattern.MatchString(intent.OperationID) || entry.Name() != ownerNativeOperationKey(intent.OperationID)+".json" {
-			return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+			return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "an earlier grant intent for this issue is unreadable")
 		}
 		if intent.OperationID == r.OperationID {
 			continue
@@ -468,33 +527,37 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 		oldRaw, e := ownerNativePrivateRead(s.recordPath(intent.OperationID), os.Getuid())
 		var old ownerNativeGrantRecord
 		if e != nil || ownerNativeStrictJSON(oldRaw, &old) != nil || shaText(oldRaw) != intent.RecordChecksum || old.Request.OperationID != intent.OperationID || old.Request.IssueNumber != r.IssueNumber {
-			return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+			return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "an earlier grant record for this issue is unreadable")
 		}
 		if old.Grant.BriefDigest == record.Grant.BriefDigest {
-			return ownerNativeFailure(r.OperationID, "REFUSED", "grant-conflict")
+			return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "another operation already granted this exact brief")
 		}
 	}
 	if len(entries) == 32 {
 		if _, e := os.Lstat(filepath.Join(dir, ownerNativeOperationKey(r.OperationID)+".json")); e != nil {
-			return ownerNativeFailure(r.OperationID, "REFUSED", "grant-conflict")
+			return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "the issue holds its maximum number of grant intents")
 		}
 	}
 	raw, _ := json.Marshal(record)
 	intentRaw, _ := json.Marshal(ownerNativeIntent{SchemaVersion: 1, OperationID: r.OperationID, RecordChecksum: shaText(raw)})
 	if err = s.publish(filepath.Join(dir, ownerNativeOperationKey(r.OperationID)+".json"), intentRaw); err != nil {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the grant intent could not be saved")
 	}
 	if err = s.publish(s.recordPath(r.OperationID), raw); err != nil {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the grant record could not be saved")
 	}
 	if !s.recordValid(record) {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the saved grant did not read back valid")
 	}
 	if s.activate != nil && s.activate() != nil {
-		return ownerNativeFailure(r.OperationID, "UNKNOWN", "override-invalid")
+		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the saved grant could not be activated")
 	}
 	s.active[r.OperationID] = record
-	return s.ackLocked(ctx, r.OperationID, true)
+	ack := s.ackLocked(ctx, r.OperationID, true)
+	if ack.State == "LIVE" {
+		log.Printf("issue #%d: owner grant %s LIVE for %s %s (%s)", r.IssueNumber, r.OperationID, ack.Route.Harness, ack.Route.Model, ack.Route.Effort)
+	}
+	return ack
 }
 
 func (s *ownerNativeGrantStore) readRecordLocked(operation string) (ownerNativeGrantRecord, []byte, error) {
@@ -514,19 +577,19 @@ func (s *ownerNativeGrantStore) readRecordLocked(operation string) (ownerNativeG
 func (s *ownerNativeGrantStore) ackLocked(ctx context.Context, operation string, inert bool) ownerNativeAck {
 	record, raw, err := s.readRecordLocked(operation)
 	if err != nil || !reflect.DeepEqual(s.active[operation], record) {
-		return ownerNativeFailure(operation, "UNKNOWN", "override-invalid")
+		return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the saved grant is missing, damaged or no longer valid")
 	}
 	current, err := s.fetchIssue(ctx, record.Request.IssueNumber)
 	if err != nil || !ownerNativeIssueMatches(record.Issue, current, inert) || !s.targetMatches(current.Labels, record.Grant.Repo) {
-		return ownerNativeFailure(operation, "REFUSED", "override-invalid")
+		return s.refuse(0, operation, "REFUSED", "override-invalid", "the issue changed after the grant was saved")
 	}
 	config, e := s.matrixForIssueLocked(ctx, Issue{ID: current.Issue.ID, Number: current.Issue.Number, Title: current.Issue.Title, Body: current.Issue.Body, Labels: current.Labels}, record.Grant.Repo)
 	if e != nil {
-		return ownerNativeFailure(operation, "UNKNOWN", "override-invalid")
+		return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the issue no longer admits exactly one owner grant")
 	}
 	request, e := prepareMatrixRequest(config, current.Issue, record.Grant.Repo, parseOverrides(current.Issue.Body))
 	if e != nil || !reflect.DeepEqual(request.NativeOverride, record.Request.NativeOverride) {
-		return ownerNativeFailure(operation, "UNKNOWN", "override-invalid")
+		return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the issue brief no longer carries the granted route")
 	}
 	route := record.Request.NativeOverride.Route
 	return ownerNativeAck{SchemaVersion: 1, OperationID: operation, State: "LIVE", IssueID: record.Grant.IssueID, IssueNumber: record.Request.IssueNumber, Inbox: record.Inbox, Target: record.Grant.Repo, BriefDigest: record.Grant.BriefDigest, Profile: record.Request.Profile, MatrixRevision: record.MatrixRevision, TargetRevision: record.TargetRevision, Route: &route, RecordChecksum: shaText(raw)}
@@ -536,7 +599,7 @@ func (s *ownerNativeGrantStore) readStatus(ctx context.Context, operation string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !actionIDPattern.MatchString(operation) {
-		return ownerNativeFailure("", "REFUSED", "override-invalid")
+		return s.refuse(0, "", "REFUSED", "override-invalid", "the status request is malformed")
 	}
 	return s.ackLocked(ctx, operation, false)
 }

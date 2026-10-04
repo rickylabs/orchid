@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,7 +129,7 @@ func TestOwnerNativeLiveGrantSnapshotAndRecovery(t *testing.T) {
 }
 
 func TestOwnerNativeLiveGrantAuthorityRefusals(t *testing.T) {
-	for _, name := range []string{"missing-approval", "other-actor", "wrong-inbox", "wrong-matrix-pin", "wrong-target-pin", "wrong-approved-route", "wrong-operation", "wrong-brief", "wrong-target", "wrong-profile", "disabled-target", "static-conflict", "bad-native", "wrong-schema", "unknown-field", "duplicate-field", "null-field", "case-alias", "case-extra-alias", "wrong-mode", "approval-symlink", "wrong-owner"} {
+	for _, name := range []string{"other-actor", "wrong-inbox", "wrong-matrix-pin", "wrong-target-pin", "wrong-approved-route", "wrong-operation", "wrong-brief", "wrong-target", "wrong-profile", "disabled-target", "static-conflict", "bad-native", "wrong-schema", "unknown-field", "duplicate-field", "null-field", "case-alias", "case-extra-alias", "wrong-mode", "approval-symlink", "wrong-owner"} {
 		t.Run(name, func(t *testing.T) {
 			s, r, _ := ownerPortFixture(t, "claude")
 			path := filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json")
@@ -136,9 +138,6 @@ func TestOwnerNativeLiveGrantAuthorityRefusals(t *testing.T) {
 			_ = json.Unmarshal(raw, &a)
 			rewrite := true
 			switch name {
-			case "missing-approval":
-				_ = os.Remove(path)
-				rewrite = false
 			case "other-actor":
 				a.Authorizer = "owner"
 			case "wrong-inbox":
@@ -195,7 +194,7 @@ func TestOwnerNativeLiveGrantAuthorityRefusals(t *testing.T) {
 			if rewrite {
 				raw, _ = json.Marshal(a)
 			}
-			if !containsString([]string{"missing-approval", "wrong-mode", "approval-symlink", "wrong-owner"}, name) {
+			if !containsString([]string{"wrong-mode", "approval-symlink", "wrong-owner"}, name) {
 				_ = os.WriteFile(path, raw, 0600)
 			}
 			ack := s.install(context.Background(), r)
@@ -311,6 +310,76 @@ func TestOwnerNativeLiveGrantPublicationFailures(t *testing.T) {
 				if err != nil || recovered.readStatus(context.Background(), r.OperationID).State != "LIVE" {
 					t.Fatal("independent recovery failed")
 				}
+			}
+		})
+	}
+}
+
+// Owner rule (2026-10-04): Eric's Approve in Cockpit is the approval; no
+// operator file is written. The exact request still binds the current pins.
+func TestOwnerNativeLiveGrantOwnerApproveNeedsNoFile(t *testing.T) {
+	s, r, is := ownerPortFixture(t, "claude")
+	_ = os.Remove(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"))
+	r.ApprovalRef = "8f0c2a4e-1b7d-4c39-9e55-0a6b3c2d1e4f"
+	r.NativeOverride = &ownerNativeOverride{Authorizer: "eric", Rationale: "Owner approved this launch in Cockpit.",
+		Route: ownerNativeRoute{Harness: "claude", Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}}
+	var logs bytes.Buffer
+	prior := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prior)
+	ack := s.install(context.Background(), r)
+	if ack.State != "LIVE" || ack.Route == nil || ack.Route.Model != "claude-opus-5-5" {
+		t.Fatalf("owner Approve without a file refused: state=%s reason=%s log=%q", ack.State, ack.Reason, logs.String())
+	}
+	if !strings.Contains(logs.String(), "LIVE for claude claude-opus-5-5 (high)") {
+		t.Fatalf("LIVE grant not logged: %q", logs.String())
+	}
+	if s.readStatus(context.Background(), r.OperationID).State != "LIVE" {
+		t.Fatal("owner Approve status not LIVE")
+	}
+	if _, err := s.matrixForIssue(*is, r.Target); err != nil {
+		t.Fatal("owner Approve grant not admitted")
+	}
+	recovered, err := newOwnerNativeGrantStore(context.Background(), s.cfg, s.options, s.deps)
+	if err != nil || recovered.readStatus(context.Background(), r.OperationID).State != "LIVE" {
+		t.Fatal("owner Approve grant not recovered")
+	}
+	// A later pin change fences the app approval exactly like a file approval.
+	s.cfg.Matrix.Revision = strings.Repeat("d", 40)
+	if s.readStatus(context.Background(), r.OperationID).State == "LIVE" {
+		t.Fatal("app approval survived a matrix pin change")
+	}
+}
+
+func TestOwnerNativeLiveGrantRefusalsLogOnePlainReason(t *testing.T) {
+	for name, want := range map[string]string{
+		"stale-brief":     "the brief changed after it was approved",
+		"mismatched-file": "an operator approval file exists for this launch and does not match it",
+		"wrong-profile":   "the brief's profile is not the approved profile",
+		"static-conflict": "a startup grant already covers this issue and brief",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, r, _ := ownerPortFixture(t, "claude")
+			switch name {
+			case "stale-brief":
+				_ = os.Remove(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"))
+				r.ExpectedBriefDigest = strings.Repeat("a", 64)
+			case "mismatched-file":
+				r.Tier = "other-tier"
+			case "wrong-profile":
+				_ = os.Remove(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"))
+				r.Profile = "other-profile"
+			case "static-conflict":
+				s.cfg.Matrix.Grants = []MatrixGrant{{IssueID: "synthetic-node", Repo: r.Target, BriefDigest: r.ExpectedBriefDigest, NativeOverride: r.NativeOverride}}
+			}
+			var logs bytes.Buffer
+			prior := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(prior)
+			ack := s.install(context.Background(), r)
+			line := "issue #7: owner grant " + r.OperationID + " REFUSED (override-invalid): " + want + "\n"
+			if ack.State != "REFUSED" || ack.Reason != "override-invalid" || !strings.HasSuffix(logs.String(), line) || strings.Count(logs.String(), "\n") != 1 {
+				t.Fatalf("refusal not explained once: state=%s reason=%s log=%q", ack.State, ack.Reason, logs.String())
 			}
 		})
 	}
