@@ -39,6 +39,7 @@ import (
 // ============================ config ============================
 
 type Config struct {
+	RemoteControl           RemoteControlConfig      `json:"remote_control"`
 	OwnerNativeGrantPort    *ownerNativePortConfig   `json:"owner_native_grant_port,omitempty"`
 	Matrix                  MatrixConfig             `json:"matrix"`
 	ActionRequestRoot       string                   `json:"action_request_root,omitempty"`        // separate private maildir mount
@@ -78,13 +79,16 @@ type Mem struct {
 // host is usable iff it's on the tailnet and its herdr answers. Capabilities
 // gate routing (a deno build needs a beefy box, not a phone).
 type Host struct {
-	Name         string   `json:"name"`
-	SSH          string   `json:"ssh"`          // ssh target, e.g. "orchid@100.112.121.20" or "localhost"
-	Key          string   `json:"key"`          // ssh key path; "" = default/agent
-	Home         string   `json:"home"`         // agent user $HOME (creds + socket)
-	WorkdirRoot  string   `json:"workdir_root"` // where issue worktrees live
-	Capabilities []string `json:"capabilities"` // e.g. ["build-deno","windows"]
-	Capacity     int      `json:"capacity"`     // max concurrent agents
+	RemoteControl  *RemoteControlConfig `json:"-"`
+	CanonicalCodex bool                 `json:"-"`
+	RemoteRun      *remoteControlRun    `json:"-"`
+	Name           string               `json:"name"`
+	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
+	Key            string               `json:"key"`          // ssh key path; "" = default/agent
+	Home           string               `json:"home"`         // agent user $HOME (creds + socket)
+	WorkdirRoot    string               `json:"workdir_root"` // where issue worktrees live
+	Capabilities   []string             `json:"capabilities"` // e.g. ["build-deno","windows"]
+	Capacity       int                  `json:"capacity"`     // max concurrent agents
 	// Agents restricts which agents may be PLACED on this host (empty = all).
 	// codex's chatgpt-oauth TUI gets Cloudflare-challenged from datacenter IPs
 	// (gcp/vultr), so codex is pinned to residential hosts (mac) via ["claude"]
@@ -168,6 +172,10 @@ func (g Gov) fiveRateWindowDur() time.Duration { return durOr(g.FiveRateWindow, 
 func (g Gov) sampleIntervalDur() time.Duration { return durOr(g.SampleInterval, 90*time.Second) }
 
 func (c *Config) withDefaults() {
+	c.RemoteControl.defaults()
+	for i := range c.Hosts {
+		c.Hosts[i].RemoteControl = &c.RemoteControl
+	}
 	if c.PollInterval == "" {
 		c.PollInterval = "30s"
 	}
@@ -221,6 +229,17 @@ func loadConfig(path string) (*Config, error) {
 	if strictJSON(b, &fields) != nil {
 		return nil, fmt.Errorf("config object required")
 	}
+	if block, present := fields["remote_control"]; present {
+		var raw map[string]json.RawMessage
+		if string(block) == "null" || strictJSON(block, &c.RemoteControl) != nil || json.Unmarshal(block, &raw) != nil {
+			return nil, fmt.Errorf("remote_control invalid")
+		}
+		for _, value := range raw {
+			if string(value) == "null" {
+				return nil, fmt.Errorf("remote_control invalid")
+			}
+		}
+	}
 	if block, present := fields["unmetered_transports"]; present {
 		if string(block) == "null" || strictJSON(block, &c.UnmeteredTransports) != nil {
 			return nil, fmt.Errorf("unmetered_transports invalid or unknown field")
@@ -271,28 +290,31 @@ type tracker struct {
 }
 
 type Job struct {
-	FinalReportManaged    bool          `json:"final_report_managed,omitempty"`
-	FinalDoneAt           time.Time     `json:"final_done_at,omitempty"`
-	FinalDoneSeq          uint64        `json:"final_done_seq,omitempty"`
-	OwnerMismatchNotice   string        `json:"owner_mismatch_notice,omitempty"`
-	CompletionUnprovenSeq *uint64       `json:"completion_unproven_seq,omitempty"`
-	GoalDelivery          string        `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
-	NativeGoal            *dispatchGoal `json:"native_goal,omitempty"`
-	DispatchKey           string        `json:"dispatch_key,omitempty"` // private launch receipt key
-	Issue                 int           `json:"issue"`
-	Host                  string        `json:"host"`
-	Label                 string        `json:"label"`     // display name (claude-<n>)
-	Pane                  string        `json:"pane"`      // herdr send/read target (pane id)
-	Workspace             string        `json:"workspace"` // herdr teardown handle
-	Target                string        `json:"target"`
-	Repo                  string        `json:"repo"`
-	Branch                string        `json:"branch"`
-	Agent                 string        `json:"agent"`
-	Title                 string        `json:"title"`
-	Goal                  string        `json:"goal"`
-	PR                    int           `json:"pr"`
-	SpawnedAt             time.Time     `json:"spawned_at"`
-	LastPoke              time.Time     `json:"last_poke"`
+	RemoteCleanup         string            `json:"remote_cleanup,omitempty"`
+	RemoteStopOperation   string            `json:"remote_stop_operation,omitempty"`
+	RemoteControl         *remoteControlRun `json:"remote_control,omitempty"`
+	FinalReportManaged    bool              `json:"final_report_managed,omitempty"`
+	FinalDoneAt           time.Time         `json:"final_done_at,omitempty"`
+	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"`
+	OwnerMismatchNotice   string            `json:"owner_mismatch_notice,omitempty"`
+	CompletionUnprovenSeq *uint64           `json:"completion_unproven_seq,omitempty"`
+	GoalDelivery          string            `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
+	NativeGoal            *dispatchGoal     `json:"native_goal,omitempty"`
+	DispatchKey           string            `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue                 int               `json:"issue"`
+	Host                  string            `json:"host"`
+	Label                 string            `json:"label"`     // display name (claude-<n>)
+	Pane                  string            `json:"pane"`      // herdr send/read target (pane id)
+	Workspace             string            `json:"workspace"` // herdr teardown handle
+	Target                string            `json:"target"`
+	Repo                  string            `json:"repo"`
+	Branch                string            `json:"branch"`
+	Agent                 string            `json:"agent"`
+	Title                 string            `json:"title"`
+	Goal                  string            `json:"goal"`
+	PR                    int               `json:"pr"`
+	SpawnedAt             time.Time         `json:"spawned_at"`
+	LastPoke              time.Time         `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -615,7 +637,10 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 
 // spawnAgent creates an isolated workspace, prepares its shell environment, then
 // registers an interactive agent in that exact pane before accepting goal delivery.
-func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt) (pane, ws string, err error) {
+func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt, titles ...string) (pane, ws string, err error) {
+	if h.remoteEnabled(agent) && strings.HasSuffix(agent, "-run") {
+		return "", "", matrixSite("spawn.remote-control-mode", errAgentRegistration)
+	}
 	ctx, cancel, startBudget, budgetErr := h.agentSpawnContext(ctx, agent)
 	if budgetErr != nil {
 		return "", "", matrixSite("spawn.registration-budget", budgetErr)
@@ -628,6 +653,18 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	var kind string
 	var nativeArgs []string
 	var agyStore *nativeStore
+	var remote *remoteControlRun
+	if h.remoteEnabled(agent) {
+		title := ""
+		if len(titles) == 1 {
+			title = titles[0]
+		}
+		name, e := remoteSessionName(receipt.dispatch.Issue.Number, title)
+		if e != nil {
+			return "", "", matrixSite("spawn.remote-control-name", e)
+		}
+		remote = &remoteControlRun{Cwd: cwd, Name: name, Model: ovr.Model, Effort: ovr.Effort}
+	}
 	if !strings.HasSuffix(agent, "-run") {
 		kind, nativeArgs, renderErr = managedInteractiveAgentArgs(agent, ovr, cwd)
 		if renderErr != nil {
@@ -735,6 +772,22 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	var identity *string
 	identityReason := nativeUnsupported
+	if remote != nil {
+		if agent == "codex" {
+			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
+				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
+			}
+			nativeArgs, err = remoteCodexArgs(nativeArgs, cwd, remote.NativeSessionID)
+			if err != nil {
+				return pane, ws, matrixSite("spawn.remote-control-render", err)
+			}
+		} else {
+			nativeArgs = append(nativeArgs, "--remote-control", remote.Name, "--name", remote.Name)
+		}
+		if e := writePrivateJSON(filepath.Join(filepath.Dir(receipt.file), "remote-control-run.json"), ".remote-control-run-", receipt.owner, remote); e != nil {
+			return pane, ws, matrixSite("spawn.remote-control-staged-binding", errMatrix)
+		}
+	}
 	if !strings.HasSuffix(agent, "-run") {
 		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", strconv.FormatInt(startBudget.Milliseconds(), 10), "--"}
 		args = append(args, nativeArgs...)
@@ -771,6 +824,22 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			identity = &nativeID
 		}
 	}
+	if remote != nil {
+		e := h.preGoalRemoteIdentity(ctx, agent, label, remote, location)
+		if e != nil {
+			return pane, ws, matrixSite("spawn.remote-control-identity", e)
+		}
+		identity = &remote.NativeSessionID
+		if e = h.remoteProof(ctx, agent, label, remote, location); e != nil {
+			return pane, ws, matrixSite("spawn.remote-control-proof", e)
+		}
+		if e = writePrivateJSON(filepath.Join(filepath.Dir(receipt.file), "remote-control-run.json"), ".remote-control-run-", receipt.owner, remote); e != nil {
+			return pane, ws, matrixSite("spawn.remote-control-proven-binding", errMatrix)
+		}
+	}
+	if ctx.Err() != nil {
+		return pane, ws, matrixSite("spawn.remote-control-deadline", errAgentRegistration)
+	}
 	if e := receipt.writeDispatch("dispatched", location); e != nil {
 		return pane, ws, matrixSite("spawn.dispatched-binding", e)
 	}
@@ -783,7 +852,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		identityReason = nativeUnavailable
 	}
 	if identity != nil {
-		if receipt.writeNativeIdentity(identity) != nil {
+		if !publishNativeIdentity(ctx, *identity, receipt.writeNativeIdentity) {
 			return pane, ws, matrixSite("spawn.native-binding", errMatrix)
 		}
 	} else if agent == "opencode" {
@@ -798,6 +867,15 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		}
 	} else {
 		log.Printf("issue #%d: native identity INCONCLUSIVE reason=%s", receipt.dispatch.Issue.Number, identityReason)
+	}
+	if remote != nil {
+		var observedName *string
+		if agent == "codex" {
+			observedName = &remote.Name
+		}
+		if e := writeRemoteObservation(ctx, receipt, agent, remote, "connected", "", observedName); e != nil {
+			return pane, ws, matrixSite("spawn.remote-control-observation", errMatrix)
+		}
 	}
 	return pane, ws, nil
 }
@@ -1122,7 +1200,7 @@ func (a *AuthStore) syncToHost(ctx context.Context, h Host) error {
 			errs = append(errs, "claude:"+err.Error())
 		}
 	}
-	_ = h.scpTo(ctx, cfg, filepath.Join(home, ".claude.json"))
+	_ = h.syncClaudeAccountConfig(ctx, cfg) // best effort, as before; never overwrite owner choices
 	_ = h.scpTo(ctx, codex, filepath.Join(home, ".codex", "auth.json"))
 	if tok != "" {
 		gh := fmt.Sprintf("github.com:\n    oauth_token: %s\n    git_protocol: https\n", tok)
@@ -2314,6 +2392,9 @@ func (c *Coord) tick(ctx context.Context) {
 	if pollOK {
 		c.st.mu.Lock()
 		for n, j := range c.st.Jobs {
+			if j.RemoteStopOperation != "" {
+				continue
+			}
 			if _, completing := c.st.CompletedRuns[n]; completing {
 				continue // completion owns cleanup and paired absence, even if the issue closes
 			}
@@ -2335,9 +2416,11 @@ func (c *Coord) tick(ctx context.Context) {
 					continue
 				}
 				c.finishAssignmentGoal(ctx, jc)
-				c.teardown(ctx, n, jc, "teardown")
+				cleaned := c.teardown(ctx, n, jc, "teardown")
 				c.st.mu.Lock()
-				delete(c.st.Jobs, n)
+				if cleaned {
+					delete(c.st.Jobs, n)
+				}
 			}
 		}
 		c.st.mu.Unlock()
@@ -2371,6 +2454,9 @@ func (c *Coord) tick(ctx context.Context) {
 	var dead []deadJob
 	c.st.mu.Lock()
 	for n, j := range c.st.Jobs {
+		if j.RemoteControl != nil {
+			continue // absence of a TUI never proves shared-daemon work stopped
+		}
 		if _, completing := c.st.CompletedRuns[n]; completing {
 			continue // an uncertain cleanup is never a disappeared launch
 		}
@@ -2583,6 +2669,9 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 }
 
 func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
+	if j != nil && j.RemoteControl != nil {
+		return true
+	} // released only after native and paired absence proof
 	if !known || j == nil || j.Pane == "" || j.Workspace == "" {
 		return true
 	}
@@ -3053,7 +3142,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	if !c.st.reserveLaunch(n) {
 		return matrixSite("launch.fence", errMatrix)
 	}
-	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt)
+	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt, is.Title)
 	if err != nil {
 		log.Printf("issue #%d: agent registration failed; reason=%s; automatic launch abandoned", n, registrationFailureKind(err))
 		blockReason := "registration_failed"
@@ -3100,6 +3189,13 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	if !runMode {
 		j.GoalDelivery = "pending"
 	}
+	if host.remoteEnabled(agent) {
+		var remote remoteControlRun
+		if readPrivateActionJSON(filepath.Join(filepath.Dir(receipt.file), "remote-control-run.json"), &remote) != nil || remote.NativeSessionID == "" {
+			return matrixSite("launch.remote-control-binding", errMatrix)
+		}
+		j.RemoteControl = &remote
+	}
 	if agent == "opencode" {
 		route, routeErr := resolveOpenCodeRoute(ovr)
 		if routeErr != nil {
@@ -3139,7 +3235,15 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			target = label
 		}
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
+		if j.RemoteControl != nil {
+			if e := host.remoteProof(gctx, agent, j.Label, j.RemoteControl, &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace}); e != nil {
+				c.blockGoalDelivery(n, j)
+				gcancel()
+				return matrixReason("goal-prompt-unconfirmed")
+			}
+		}
 		var deliveryErr error
+		host = host.forJob(j)
 		if agent == "opencode" {
 			deliveryErr = host.injectOpenCodeGoal(gctx, j, goal, func() error {
 				c.st.mu.Lock()
@@ -3195,10 +3299,15 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	_, fenced := c.st.CompletedRuns[n]
 	c.st.mu.Unlock()
 	if fenced {
+		c.clearRemoteControl(j)
 		return // completion owns every remaining effect for this run
 	}
 	host, ok := c.hosts[j.Host]
 	if !ok {
+		return
+	}
+	if j.RemoteCleanup != "" {
+		c.superviseRemoteCleanup(ctx, host, j)
 		return
 	}
 	ref, known := status[n]
@@ -3209,6 +3318,13 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 	if known && !matched {
 		c.noteOwnerMismatch(j, ref)
+	}
+	if j.RemoteControl != nil {
+		if !matched || !c.checkRemoteHook(ctx, host, j) {
+			c.clearRemoteControl(j)
+			return
+		}
+		c.observeRemoteControl(ctx, host, j)
 	}
 	suppressInput := !matched || ref.Status == "done"
 	if matched && j.Agent == "agy" {
@@ -3266,15 +3382,23 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	// it open would make the deleted job respawn on the very next tick. Retry =
 	// file a fresh inbox issue (or /swarm comment) with a longer timeout.
 	if !j.Deadline.IsZero() && time.Now().After(j.Deadline) {
+		if j.RemoteControl != nil {
+			if c.beginRemoteCleanup(j, "operator-timeout") {
+				c.superviseRemoteCleanup(ctx, host, j)
+			}
+			return
+		}
 		c.transitionGoal(ctx, j, "paused")
 		log.Printf("issue #%d: operator timeout (%s) exceeded — tearing down", n, j.Overrides.Timeout)
 		cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
 		_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
 			"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
 		ccancel()
-		c.teardown(ctx, n, j, "operator-timeout")
+		cleaned := c.teardown(ctx, n, j, "operator-timeout")
 		c.st.mu.Lock()
-		delete(c.st.Jobs, n)
+		if cleaned {
+			delete(c.st.Jobs, n)
+		}
 		c.st.mu.Unlock()
 		c.notify(fmt.Sprintf("issue #%d timed out (%s)", n, j.Overrides.Timeout))
 		return
@@ -3592,15 +3716,32 @@ func checksGreen(v *PRView) bool {
 	return true
 }
 
-func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
+func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool {
 	host, ok := c.hosts[j.Host]
 	if !ok {
-		return
+		return false
+	}
+	if j.RemoteControl != nil && !c.beginRemoteCleanup(j, cause) {
+		return false
+	}
+	if j.RemoteCleanup != "" {
+		cause = j.RemoteCleanup
+	}
+	c.clearRemoteControl(j)
+	nativeCtx, nativeDone := context.WithTimeout(ctx, 20*time.Second)
+	nativeErr := host.stopRemoteRun(nativeCtx, j)
+	nativeDone()
+	if nativeErr != nil {
+		log.Printf("issue #%d: native stop unconfirmed; capacity retained", n)
+		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	c.bindOpenCodeLiveIdentity(cctx, host, j)
 	ws := j.Workspace
+	if j.RemoteControl != nil && ws == "" {
+		return false
+	}
 	if ws == "" {
 		// Resolve from the live fleet by issue cwd if we never recorded it.
 		if agents, err := host.agentList(cctx); err == nil {
@@ -3621,13 +3762,36 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 		}
 		// Capture a bound native process before closing the workspace. A failed
 		// capture never prevents teardown, but cannot create terminal evidence.
+		if !c.remoteTeardownOccupant(cctx, host, j) {
+			return false
+		}
 		captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)
 		c.teardownStart(captureCtx, n, j, ws, cause)
 		captureDone()
-		closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
-		_ = host.closeWorkspace(closeCtx, ws)
-		closeDone()
-		c.teardownObservePending(ctx)
+		if j.RemoteControl != nil {
+			var intent teardownIntent
+			record := filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record")
+			if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &intent) != nil || intent.DispatchKey != j.DispatchKey || intent.NativeSessionID != j.RemoteControl.NativeSessionID || intent.PaneID != j.Pane || intent.WorkspaceID != ws || intent.Cause != cause {
+				return false
+			}
+			if !c.teardownObserveOne(cctx, intent) {
+				if !c.remoteTeardownOccupant(cctx, host, j) {
+					return false
+				}
+				_ = c.actionClose(cctx, host, ws)
+				if !c.teardownObserveOne(cctx, intent) {
+					return false
+				}
+			}
+			if host.stopRemoteRun(cctx, j) != nil || cctx.Err() != nil {
+				return false
+			}
+		} else {
+			closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
+			_ = host.closeWorkspace(closeCtx, ws)
+			closeDone()
+			c.teardownObservePending(ctx)
+		}
 	}
 
 	// Reclaim the worktree. Closing the herdr workspace does NOT remove the
@@ -3654,7 +3818,10 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) {
 	// remaining work. This is EVENT-driven (one merge → at most one re-file),
 	// never a backlog scan, so it can't storm the way an open-only feeder dedupe
 	// did. Best-effort; failures just skip the continuation.
-	c.maybeContinue(ctx, j)
+	if j.RemoteStopOperation == "" {
+		c.maybeContinue(ctx, j)
+	}
+	return true
 }
 
 // partialMerge reports whether job j shipped a PR that MERGED but only PARTIALLY

@@ -548,6 +548,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		return
 	}
 	host, ok := c.hosts[j.Host]
+	host = host.forJob(j)
 	if !ok || j.Pane == "" || j.Workspace == "" {
 		r.Reason = "seat_unavailable"
 		return
@@ -572,12 +573,52 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		return
 	}
 	r.NativeRunID, r.Host, r.PaneID, r.WorkspaceID = runID, j.Host, j.Pane, j.Workspace
+	if j.RemoteCleanup != "" {
+		r.Outcome, r.Reason = "rejected", "agent_not_live"
+		return
+	}
+	if j.RemoteControl != nil && (r.NativeSessionID != j.RemoteControl.NativeSessionID || !c.checkRemoteHook(ctx, host, j)) {
+		r.Reason = "native_identity_unavailable"
+		return
+	}
 	switch req.Action {
 	case "stop":
-		if status == "done" || status == "unknown" {
+		if (status == "done" && j.RemoteControl == nil) || status == "unknown" {
 			r.Outcome, r.Reason = "rejected", "agent_not_stoppable"
 			return
 		}
+		if j.RemoteControl != nil {
+			c.st.mu.Lock()
+			prior, had := c.st.LaunchBlocks[j.Issue]
+			if c.st.LaunchBlocks == nil {
+				c.st.LaunchBlocks = map[int]launchBlock{}
+			}
+			previousCleanup, previousOperation := j.RemoteCleanup, j.RemoteStopOperation
+			j.RemoteCleanup, j.RemoteStopOperation = "teardown", req.OperationID
+			c.st.LaunchBlocks[j.Issue] = launchBlock{Reason: "cockpit_stop", Notified: true}
+			err = c.st.saveLocked()
+			if err != nil {
+				j.RemoteCleanup, j.RemoteStopOperation = previousCleanup, previousOperation
+				if had {
+					c.st.LaunchBlocks[j.Issue] = prior
+				} else {
+					delete(c.st.LaunchBlocks, j.Issue)
+				}
+			}
+			c.st.mu.Unlock()
+			if err != nil {
+				r.Reason = "stop_fence_unavailable"
+				return
+			}
+		}
+		nativeCtx, nativeDone := context.WithTimeout(ctx, 20*time.Second)
+		nativeErr := host.stopRemoteRun(nativeCtx, j)
+		nativeDone()
+		if nativeErr != nil {
+			r.Reason = "stop_delivery_unconfirmed"
+			return
+		}
+		c.clearRemoteControl(j)
 		// Capture the exact native process identity before the workspace closes.
 		// A failed probe never blocks stop, but cannot create terminal evidence.
 		probeCtx, probeDone := context.WithTimeout(ctx, 12*time.Second)
@@ -596,7 +637,9 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 			c.st.LaunchBlocks = map[int]launchBlock{}
 		}
 		c.st.LaunchBlocks[j.Issue] = launchBlock{Reason: "cockpit_stop", Notified: true}
-		delete(c.st.Jobs, j.Issue)
+		if j.RemoteControl == nil {
+			delete(c.st.Jobs, j.Issue)
+		}
 		err = c.st.saveLocked()
 		c.st.mu.Unlock()
 		if err != nil {

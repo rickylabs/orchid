@@ -96,8 +96,13 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 	if j.Agent == "codex" {
 		var complete bool
 		goalAllowed := j.NativeGoal == nil
-		err := h.withGoalConnection(ctx, native, func(p *goalRPC) error {
+		err := h.forJob(j).withGoalConnection(ctx, native, func(p *goalRPC) error {
 			var e error
+			if j.RemoteControl != nil {
+				if e = p.remoteWorkIdle(false); e != nil {
+					return e
+				}
+			}
 			complete, e = p.lastTurnCompleted()
 			if e == nil && j.NativeGoal != nil {
 				goal, err := p.get()
@@ -108,6 +113,9 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 			}
 			return e
 		})
+		if j.RemoteControl != nil && (err != nil || !complete) {
+			return false, err
+		}
 		if j.NativeGoal != nil && (err != nil || !goalAllowed) {
 			return false, err // a marked comment cannot override an active or unknown goal
 		}
@@ -219,6 +227,14 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 			found = a
 			continue
 		}
+		if j.Agent == "codex" && j.RemoteControl != nil {
+			raw, err := json.Marshal(map[string]any{"type": "agent_info", "agent": a})
+			if err != nil || native != j.RemoteControl.NativeSessionID || !remoteStatusOccupant(raw, j.Agent, j.Label, j.RemoteControl.Cwd, native, &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace}) {
+				return AgentInfo{}, false
+			}
+			found = a
+			continue
+		}
 		raw, err := json.Marshal(map[string]any{"type": "agent_info", "agent": a})
 		id, reason := nativeSessionFromResponse(raw, "agent_info", j.Agent, j.Label,
 			&dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace})
@@ -231,6 +247,9 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 }
 
 func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef, known bool) bool {
+	if j != nil && j.RemoteCleanup != "" {
+		return false
+	}
 	c.st.mu.Lock()
 	fence, fenced := c.st.CompletedRuns[n]
 	c.st.mu.Unlock()
@@ -259,6 +278,13 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	}
 	check, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	if j.RemoteControl != nil {
+		if fenced {
+			c.clearRemoteControl(j)
+		} else if !c.checkRemoteHook(check, host, j) {
+			return false
+		}
+	}
 	if !fenced {
 		pending, err := c.completionPRPending(check, j)
 		if err != nil || pending {
@@ -291,7 +317,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		}
 		agents, err = c.actionList(check, host)
 		second, valid := completionOccupant(agents, j, native)
-		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq {
+		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq || !c.checkRemoteHook(check, host, j) || check.Err() != nil {
 			return false
 		}
 		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring", PublicationUnconfirmed: publicationUnconfirmed}
@@ -323,6 +349,9 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			readPrivateActionJSON(filepath.Join(record, "teardown-anchor.json"), &anchor) == nil
 	}
 	if readIntent() && c.teardownObserveOne(check, intent) {
+		if host.stopRemoteRun(check, j) != nil || check.Err() != nil {
+			return true
+		}
 		c.st.mu.Lock()
 		prior := c.st.CompletedRuns[n]
 		fence.Phase = "observed"
@@ -348,7 +377,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	}
 	agents, err := c.actionList(check, host)
 	before, valid := completionOccupant(agents, j, native)
-	if err != nil || !valid || before.StateChangeSeq != fence.StateChangeSeq {
+	if err != nil || !valid || before.StateChangeSeq != fence.StateChangeSeq || !c.checkRemoteHook(check, host, j) {
 		log.Printf("issue #%d: completion-cleanup-unproven", n)
 		return true
 	}
@@ -360,9 +389,13 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	}
 	agents, err = c.actionList(check, host)
 	after, valid := completionOccupant(agents, j, native)
-	if err != nil || !valid || after.StateChangeSeq != before.StateChangeSeq {
+	if err != nil || !valid || after.StateChangeSeq != before.StateChangeSeq || !c.checkRemoteHook(check, host, j) {
 		return true
 	}
+	if err = host.stopRemoteRun(check, j); err != nil {
+		return true
+	}
+	c.clearRemoteControl(j)
 	fence.CloseAttempts++
 	c.st.mu.Lock()
 	prior := c.st.CompletedRuns[n]

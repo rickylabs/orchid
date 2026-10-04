@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "runId": "orchid-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "nativeSessionId": "fixture-native-root",
+  "host": "fixture-host",
+  "paneId": "fixture-pane",
+  "workspaceId": "fixture-workspace",
+  "vendor": "chatgpt",
+  "state": "connected",
+  "reason": null,
+  "sessionName": "#7 synthetic task",
+  "link": null,
+  "observedAt": "2026-01-01T00:00:00Z",
+  "validUntil": "2026-01-01T00:00:30Z"
+}

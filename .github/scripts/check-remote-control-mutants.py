@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Compiled Remote Control guard mutations. Every mutation must fail an assertion."""
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+
+def replace(code, old, new):
+    if code.count(old) != 1:
+        raise RuntimeError('mutation anchor must be unique')
+    return code.replace(old, new, 1)
+
+def function_replace(code, function, old, new):
+    start = code.index(function)
+    end = code.find('\nfunc ', start + len(function))
+    if end < 0:
+        end = len(code)
+    return code[:start] + replace(code[start:end], old, new) + code[end:]
+
+# File, function (or whole file), exact anchor, replacement, focused control.
+MUTANTS = [
+    ('peer-owner', 'remote_control_transport.go', None, "struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[1]!=uid", "struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[1]<0", 'TestRemoteControlForeignOwnerInputs/peer'),
+    ('socket-owner', 'remote_control_transport.go', None, 'before.st_uid!=uid', 'before.st_uid<0', 'TestRemoteControlForeignOwnerInputs/socket-owner'),
+    ('directory-owner', 'remote_control_transport.go', None, 'd.st_uid!=uid', 'd.st_uid<0', 'TestRemoteControlForeignOwnerInputs/directory-owner'),
+    ('connection', 'remote_control_transport.go', 'func (p *goalRPC) remoteConnected', 'status.Status != "connected"', 'false', 'TestRemoteControlPreparationRequiresConnectionAndReadback/absent'),
+    ('resume-id', 'remote_control_transport.go', 'func decodeRemoteThread', '(!newThread && v.Thread.ID != r.NativeSessionID)', 'false', 'TestRemoteControlPreparationRequiresConnectionAndReadback/wrong-resume-id'),
+    ('name-readback', 'remote_control_transport.go', 'func (p *goalRPC) verifyRemoteThread', '*v.Thread.Name != r.Name', 'false', 'TestRemoteControlPreparationRequiresConnectionAndReadback/wrong-name'),
+    ('trust-scope', 'remote_control_transport.go', 'func remoteThreadParams', 'r.Cwd: map[string]string{"trust_level": "trusted"}', 'r.Cwd: map[string]string{"trust_level": "trusted"}, "foreign": map[string]string{"trust_level": "trusted"}', 'TestRemoteControlScopedTrustAndExplicitDaemon'),
+    ('rpc-thread-scope', 'native_goal_rpc.go', 'func (p *goalRPC) request', 'scope.ThreadID != p.thread', 'false', 'TestRemoteControlRPCScopes'),
+    ('late-hook', 'native_goal.go', 'func acquireNativeGoalBinding', 'publishNativeIdentity(ctx, id, r.writeNativeIdentity)', 'publishNativeIdentity(context.Background(), id, r.writeNativeIdentity)', 'TestRemoteControlPostPromptHookCannotReplacePreparedThread/late'),
+    ('consent', 'native_prompt.go', 'func deliverCodexPrompt', 'if d.noConsent {', 'if false {', 'TestRemoteControlNeverAnswersTrustConsent'),
+    ('bare-rc', 'remote_control.go', 'func claudeRemoteConnected', 'if len(screen) == 0', 'if screen == "/rc" { return true }; if len(screen) == 0', 'TestRemoteControlClaudeConnectedProof'),
+    ('footer-thread', 'remote_control_identity.go', 'func verifyCodexFooterAttachment', 'id != run.NativeSessionID', 'false', 'TestRemoteControlContinuousFooterIdentity/foreign'),
+    ('footer-deadline', 'remote_control_identity.go', 'func verifyCodexFooterAttachment', ' || ctx.Err() != nil', '', 'TestRemoteControlContinuousFooterIdentity/late'),
+    ('ephemeral-descendants', 'remote_control_stop.go', 'func (p *goalRPC) remoteChildren', 'loaded, err := p.remoteLoadedChildren()', 'loaded, err := []nativeRemoteChild{}, error(nil)', 'TestRemoteControlLoadedDescendants/active-ephemeral'),
+    ('archived-descendants', 'remote_control_stop.go', 'func (p *goalRPC) remoteChildren', '[]bool{false, true}', '[]bool{false}', 'TestRemoteControlArchivedChildNeverProvesShutdown'),
+    ('streaming', 'remote_control_stop.go', 'func (p *goalRPC) remoteThreadIdle', 'case "completed", "interrupted", "failed":', 'case "completed", "interrupted", "failed", "inProgress":', 'TestRemoteControlNativeWorkQuiescence/streaming'),
+    ('queue', 'remote_control_stop.go', 'func (p *goalRPC) remoteThreadIdle', 'len(page.Data) != 0', 'len(page.Data) > 1', 'TestRemoteControlNativeWorkQuiescence/queue'),
+    ('terminate-readback', 'remote_control_stop.go', 'func (p *goalRPC) stopRemoteThread', '!result.Terminated', 'false', 'TestRemoteControlNativeStopReadbackAndDeadline/terminate-false'),
+    ('native-turn-notice', 'remote_control_native_turn.go', 'func (p *goalRPC) nativeTurnAgrees', 'return p.turnEvents[i].ID == id && p.turnEvents[i].Status == status', 'return true', 'TestRemoteControlNativeTurnSignals/started'),
+    ('native-final', 'native_goal_rpc.go', 'func (p *goalRPC) lastTurnCompleted', 'final := false', 'final := true', 'TestRemoteControlNativeTurnSignals/no-final'),
+    ('capacity', 'main.go', 'func occupiesAdmissionSlot', 'if j != nil && j.RemoteControl != nil {', 'if false {', 'TestRemoteControlCapacityHeldUntilRemoval'),
+    ('goal-binding-deadline', 'remote_control_goal_binding.go', 'func bindRemoteNativeGoal', 'err != nil || ctx.Err() != nil ||', 'err != nil ||', 'TestRemoteControlPreparedGoalBindingRechecks/late'),
+    ('goal-native-binding', 'remote_control_goal_binding.go', 'func bindRemoteNativeGoal', 'id != j.RemoteControl.NativeSessionID', 'false', 'TestRemoteControlPreparedGoalBindingRechecks/wrong-private-id'),
+    ('teardown-occupant', 'remote_control_cleanup.go', 'func (c *Coord) remoteTeardownOccupant', 'return c.checkRemoteHook(ctx, h, j)', 'return true', 'TestRemoteControlTeardownNeedsAttachedIdentity'),
+]
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--go', default='go')
+    parser.add_argument('--only', action='append', default=[])
+    args = parser.parse_args()
+    selected = [m for m in MUTANTS if not args.only or m[0] in args.only]
+    if args.only and set(args.only) != {m[0] for m in selected}:
+        parser.error('unknown mutation name')
+    env = dict(os.environ)
+    env['TMPDIR'] = '/tmp'
+    files = {name: ROOT / 'cmd/divybot' / name for _, name, *_ in MUTANTS}
+    originals = {name: path.read_text() for name, path in files.items()}
+    failed = False
+    try:
+        baseline = subprocess.run([args.go, 'test', './cmd/divybot', '-run', '^TestRemoteControl', '-count=1'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
+        if baseline.returncode:
+            print('baseline FAIL', flush=True)
+            print(baseline.stdout + baseline.stderr)
+            return 1
+        print('baseline GREEN', flush=True)
+        for name, file, function, old, new, control in selected:
+            path = files[file]
+            try:
+                code = function_replace(originals[file], function, old, new) if function else replace(originals[file], old, new)
+                path.write_text(code)
+                result = subprocess.run([args.go, 'test', './cmd/divybot', '-run', '^' + control + '$', '-count=1'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=90)
+                output = result.stdout + result.stderr
+                red = result.returncode != 0 and '--- FAIL:' in output and '[build failed]' not in output
+                print(name + (' ASSERTION RED' if red else ' INVALID OR SURVIVED'), flush=True)
+                if not red:
+                    failed = True
+                    print(output, flush=True)
+            finally:
+                path.write_text(originals[file])
+    finally:
+        for name, path in files.items():
+            path.write_text(originals[name])
+    return 1 if failed else 0
+
+if __name__ == '__main__':
+    sys.exit(main())

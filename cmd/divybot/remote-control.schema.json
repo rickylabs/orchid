@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private Orchid operator remoteControl observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "nativeSessionId",
+    "host",
+    "paneId",
+    "workspaceId",
+    "vendor",
+    "state",
+    "reason",
+    "sessionName",
+    "link",
+    "observedAt",
+    "validUntil"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^orchid-[a-f0-9]{64}$"
+    },
+    "nativeSessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1
+    },
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vendor": {
+      "enum": [
+        "claude",
+        "chatgpt"
+      ]
+    },
+    "state": {
+      "enum": [
+        "connected",
+        "unconfirmed"
+      ]
+    },
+    "reason": {
+      "enum": [
+        null,
+        "remote-control-unconfirmed"
+      ]
+    },
+    "sessionName": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 192
+    },
+    "link": {
+      "type": "null"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "validUntil": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "connected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "unconfirmed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "const": "remote-control-unconfirmed"
+          },
+          "sessionName": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}
