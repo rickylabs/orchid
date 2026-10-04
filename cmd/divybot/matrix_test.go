@@ -66,8 +66,11 @@ func TestCommonMatrixAttempt(t *testing.T) {
 							func(context.Context, string, int, string) error { return nil })
 					}
 				},
-				read: func(context.Context, string, string, string) (string, error) {
+				read: func(_ context.Context, repo, revision, name string) (string, error) {
 					events = append(events, "profile")
+					if strings.HasPrefix(name, "profiles/") && (repo != matrixSourceRepository || revision != cfg.Matrix.Revision) {
+						return "", errMatrix
+					}
 					return "| `routing` | matrix `implementation` row |", nil
 				},
 				resolve: func(_ context.Context, _ MatrixConfig, req matrixRequest) (matrixRoute, error) {
@@ -95,7 +98,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					var public map[string]json.RawMessage
 					if err != nil || json.Unmarshal(data, &binding) != nil || json.Unmarshal(data, &public) != nil ||
 						public["profileRevision"] == nil || public["matrixSource"] == nil || public["matrixRevision"] == nil ||
-						binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" || binding.ProfileRevision != cfg.Matrix.TargetRevisions["example/project"] || binding.MatrixSource != "rickylabs/harness" || binding.MatrixRevision != cfg.Matrix.Revision {
+						binding.Issue.Repo != "example/inbox" || binding.Issue.Number != 1 || binding.ParentRunID != nil || binding.Profile != "leaf" || binding.Provider != "synthetic-router" || binding.State != "reserved" || binding.Host != "fixture-node" || binding.ProfileRevision != cfg.Matrix.Revision || binding.MatrixSource != "rickylabs/harness" || binding.MatrixRevision != cfg.Matrix.Revision {
 						t.Fatal("authoritative inbox issue was not bound before launch")
 					}
 					policyBytes, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "receipt.json"))

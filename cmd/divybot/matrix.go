@@ -28,6 +28,7 @@ import (
 type MatrixConfig struct {
 	Source          string                      `json:"source"`
 	Revision        string                      `json:"revision"`
+	ProfileRevision string                      `json:"profile_revision,omitempty"`
 	ReceiptOwnerUID *int                        `json:"receipt_owner_uid,omitempty"`
 	ReceiptOwnerGID *int                        `json:"receipt_owner_gid,omitempty"`
 	ReceiptRoot     string                      `json:"receipt_root"`
@@ -35,6 +36,15 @@ type MatrixConfig struct {
 	Pins            map[string]MatrixPin        `json:"pins"`
 	Grants          []MatrixGrant               `json:"grants"`
 	BudgetDefaults  map[string]map[string]int64 `json:"budget_defaults,omitempty"`
+}
+
+// profileRevision pins the Harness profiles, as the cockpit's profile pin does. Unset,
+// profiles come from the same Harness revision as the routing source.
+func (m MatrixConfig) profileRevision() string {
+	if m.ProfileRevision != "" {
+		return m.ProfileRevision
+	}
+	return m.Revision
 }
 
 // The identity travels with every new revision pin. An older receipt without this
@@ -392,7 +402,10 @@ func strictJSON(b []byte, out any) error {
 	return nil
 }
 
-// readRoutingFile reads only a pinned target revision; content and private filenames never reach logs.
+// profilePath names a profile inside the Harness repository.
+func profilePath(profile string) string { return "profiles/" + profile + ".md" }
+
+// readRoutingFile reads only a pinned revision; content and private filenames never reach logs.
 func readRoutingFile(ctx context.Context, repo, revision, name string) (string, error) {
 	if !repositoryName.MatchString(repo) || !sourceRevision.MatchString(revision) || filepath.IsAbs(name) || strings.Contains(name, "\\") || filepath.ToSlash(filepath.Clean(name)) != name || strings.HasPrefix(name, "../") {
 		return "", matrixSite("routing-file.arguments", errMatrix)
@@ -720,11 +733,11 @@ type retryExpectation struct {
 	Role        string
 }
 
-func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, targetRevision, profile string, route matrixRoute, host Host) bool {
+func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, profile string, route matrixRoute, host Host) bool {
 	d := expected.Dispatch
 	return actionIDPattern.MatchString(expected.OperationID) && d.State == "dispatched" &&
 		d.Source == route.Transport && d.Provider == route.Provider && d.Model == route.Model && d.Effort == route.Effort &&
-		d.Profile == profile && d.ProfileRevision == targetRevision && d.MatrixSource == matrixSourceRepository && d.MatrixRevision == cfg.Revision &&
+		d.Profile == profile && d.ProfileRevision == cfg.profileRevision() && d.MatrixSource == matrixSourceRepository && d.MatrixRevision == cfg.Revision &&
 		d.Host == host.Name && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
 		expected.Tier == route.Tier && expected.Role == route.Role
 }
@@ -774,7 +787,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if !profileStem.MatchString(o.Profile) {
 		return refuse("profile-invalid")
 	}
-	req.ProfileText, e = d.read(ctx, target.Repo, revision, "profiles/"+o.Profile+".md")
+	profileRevision := cfg.profileRevision()
+	if !sourceRevision.MatchString(profileRevision) { // guard:profile-revision
+		return refuse("revision-invalid")
+	}
+	// Profiles are Harness Markdown (decision B), read at the pinned Harness profile revision
+	// the cockpit lists from, never from the target repository, which need not carry any.
+	req.ProfileText, e = d.read(ctx, matrixSourceRepository, profileRevision, profilePath(o.Profile)) // guard:profile-source
 	if e != nil || req.ProfileText == "" {
 		report(refusalWithReason(matrixSite("attempt.profile-read", e), "profile-unavailable"))
 		return "", false
@@ -889,7 +908,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if !ok || !placementHostName.MatchString(host.Name) {
 		return refuse("host-unavailable")
 	}
-	if d.retry != nil && !retryPinsMatch(*d.retry, cfg, revision, o.Profile, route, host) {
+	if d.retry != nil && !retryPinsMatch(*d.retry, cfg, o.Profile, route, host) {
 		return refuse("retry-pins-unavailable")
 	}
 	if c.dry || d.preflight {
@@ -899,7 +918,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		IssueID, Repo, BriefDigest, ProfileRevision, ProfileDigest, Host string
 		Request                                                          matrixRequest
 		Route                                                            matrixRoute
-	}{is.ID, target.Repo, briefDigest(is), revision, shaText([]byte(req.ProfileText)), host.Name, req, route}
+	}{is.ID, target.Repo, briefDigest(is), profileRevision, shaText([]byte(req.ProfileText)), host.Name, req, route}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
 	if d.retry != nil {
@@ -922,7 +941,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
-		Host: host.Name, Profile: o.Profile, ProfileRevision: revision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
+		Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
 		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	if e := handle.writeDispatch("reserved", nil); e != nil {

@@ -140,6 +140,9 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 			bad(fmt.Sprintf("matrix.target_revisions (target %d)", i), "full-lowercase-commit-required")
 		}
 	}
+	if m.ProfileRevision != "" && !sourceRevision.MatchString(m.ProfileRevision) { // guard:profile-revision-config
+		bad("matrix.profile_revision", "full-lowercase-commit-required")
+	}
 	for repo, revision := range m.TargetRevisions {
 		if !repositoryName.MatchString(repo) || !sourceRevision.MatchString(revision) {
 			bad("matrix.target_revisions", "invalid-repository-or-commit")
@@ -257,9 +260,9 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 	if !profileStem.MatchString(profile) {
 		return configProblem("issue.profile", "profile-invalid")
 	}
-	req.ProfileText, err = d.read(ctx, repo, cfg.Matrix.TargetRevisions[repo], "profiles/"+profile+".md")
+	req.ProfileText, err = d.read(ctx, matrixSourceRepository, cfg.Matrix.profileRevision(), profilePath(profile)) // guard:preflight-profile-source
 	if err != nil || req.ProfileText == "" {
-		return configProblem("matrix.target_revisions", "profile-unavailable")
+		return configProblem("matrix.profile_revision", "profile-unavailable")
 	}
 	if req.Override != nil {
 		req.WorklogText, err = d.read(ctx, repo, cfg.Matrix.TargetRevisions[repo], req.Override.WorklogPath)
