@@ -93,12 +93,12 @@ print('{}')
 func TestGoalDeliveryConfirmationRequiresDurablePersistence(t *testing.T) {
 	c := &Coord{st: loadState(filepath.Join(t.TempDir(), "missing", "state.json"))}
 	j := &Job{GoalDelivery: "pending", NativeGoal: &dispatchGoal{}}
-	if c.confirmGoalDelivery(j) == nil || j.NativeGoal.PromptConfirmed || !goalDeliveryUnconfirmed(j) {
+	if c.confirmGoalDelivery(context.Background(), j) == nil || j.NativeGoal.PromptConfirmed || !goalDeliveryUnconfirmed(j) {
 		t.Fatal("failed persistence certified delivery")
 	}
 	c.st = loadState(filepath.Join(t.TempDir(), "state.json"))
 	c.st.Jobs[7] = j
-	if err := c.confirmGoalDelivery(j); err != nil || goalDeliveryUnconfirmed(j) {
+	if err := c.confirmGoalDelivery(context.Background(), j); err != nil || goalDeliveryUnconfirmed(j) {
 		t.Fatal("persisted confirmation refused")
 	}
 	if loaded := loadState(c.st.path).Jobs[7]; loaded == nil || goalDeliveryUnconfirmed(loaded) {
