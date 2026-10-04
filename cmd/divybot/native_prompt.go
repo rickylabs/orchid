@@ -22,11 +22,12 @@ type promptSnapshot struct {
 }
 
 type promptCalls struct {
-	observe func(context.Context) (promptSnapshot, error)
-	submit  func(context.Context, string) error
-	enter   func(context.Context) error
-	wait    func(context.Context) bool
-	now     func() time.Time
+	noConsent bool
+	observe   func(context.Context) (promptSnapshot, error)
+	submit    func(context.Context, string) error
+	enter     func(context.Context) error
+	wait      func(context.Context) bool
+	now       func() time.Time
 }
 
 func samePromptOccupant(a, b AgentInfo) bool {
@@ -103,11 +104,17 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 	var before, prior promptSnapshot
 	stable := false
 	for {
+		if ctx.Err() != nil {
+			return errPromptUnconfirmed
+		}
 		s, err := d.observe(ctx)
 		if err != nil || !samePromptOccupant(expected, s.Agent) {
 			return errPromptUnconfirmed
 		}
 		if codexTrustDialog(s.Screen) {
+			if d.noConsent {
+				return errPromptUnconfirmed
+			}
 			if err := d.enter(ctx); err != nil {
 				return errPromptUnconfirmed
 			}
@@ -128,6 +135,9 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 			return errPromptUnconfirmed
 		}
 	}
+	if ctx.Err() != nil {
+		return errPromptUnconfirmed
+	}
 	sent, marker, err := markedCodexPrompt(goal)
 	if err != nil || markerVisible(before.Screen, marker) {
 		return errPromptUnconfirmed
@@ -143,6 +153,9 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 			return errPromptUnconfirmed
 		}
 		if codexPromptConsumed(after, before, marker) {
+			if ctx.Err() != nil {
+				return errPromptUnconfirmed
+			}
 			return nil
 		}
 		at := strings.LastIndex(after.Screen, "›")
@@ -219,7 +232,14 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
 	return deliverCodexPrompt(ctx, expected, goal, promptCalls{
-		observe: func(ctx context.Context) (promptSnapshot, error) { return h.promptSnapshot(ctx, target) },
+		noConsent: h.CanonicalCodex,
+		observe: func(ctx context.Context) (promptSnapshot, error) {
+			s, err := h.promptSnapshot(ctx, target)
+			if h.RemoteRun != nil && (nativeCodexFooterIdentity(s.Screen) != h.RemoteRun.NativeSessionID || ctx.Err() != nil) {
+				return promptSnapshot{}, errPromptUnconfirmed
+			}
+			return s, err
+		},
 		submit: func(ctx context.Context, goal string) error {
 			_, err := h.herdr(ctx, "agent", "prompt", target, goal)
 			return err

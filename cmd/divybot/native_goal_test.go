@@ -273,20 +273,20 @@ func TestNativeGoalNotificationGuards(t *testing.T) {
 		bad := *g
 		mutate(&bad)
 		p, _ := goalPort(response(2, map[string]any{"goal": &bad}), updated(&bad))
-		if _, e := p.set(map[string]any{}, fixtureIntent(), "active"); e == nil {
+		if _, e := p.set(map[string]any{"threadId": p.thread}, fixtureIntent(), "active"); e == nil {
 			t.Fatal("write response changed intended goal")
 		}
 	}
 	for _, event := range []any{nil, map[string]any{}, map[string]any{"id": 3, "result": nil}, map[string]any{"method": "thread/goal/updated", "params": map[string]any{"threadId": "fixture-thread", "goal": fixtureGoal("paused")}}, map[string]any{"method": "thread/goal/cleared", "params": map[string]any{"threadId": "fixture-thread"}}} {
 		p, _ := goalPort(response(2, map[string]any{"goal": g}), event)
-		if _, e := p.set(map[string]any{}, fixtureIntent(), "active"); e == nil {
+		if _, e := p.set(map[string]any{"threadId": p.thread}, fixtureIntent(), "active"); e == nil {
 			t.Fatal("missing/mismatched notification accepted")
 		}
 	}
 	other := *g
 	other.ThreadID = "other-thread"
 	p, _ := goalPort(updated(&other), map[string]any{"method": "unrelated", "params": nil}, response(2, map[string]any{"goal": g}), updated(g))
-	if _, e := p.set(nil, fixtureIntent(), "active"); e != nil {
+	if _, e := p.set(map[string]any{"threadId": p.thread}, fixtureIntent(), "active"); e != nil {
 		t.Fatal("unrelated traffic blocked matching notification")
 	}
 	p, _ = goalPort()
@@ -617,7 +617,7 @@ func TestNativeGoalFrameAndLoopBounds(t *testing.T) {
 	}
 	frames = append(frames, updated(g))
 	p, _ = goalPort(frames...)
-	if _, e := p.set(nil, fixtureIntent(), "active"); e != goalError("goal-notification-limit") {
+	if _, e := p.set(map[string]any{"threadId": p.thread}, fixtureIntent(), "active"); e != goalError("goal-notification-limit") {
 		t.Fatal("write consumed unbounded notifications")
 	}
 	r, j, root := fixtureGoalBinding(t)
@@ -653,7 +653,7 @@ func TestNativeGoalFreshWriteNotification(t *testing.T) {
 		if e := p.notification(mapRaw(updated(g))); e != nil {
 			t.Fatal("fixture update failed")
 		}
-		_, e := p.set(nil, fixtureIntent(), "active")
+		_, e := p.set(map[string]any{"threadId": p.thread}, fixtureIntent(), "active")
 		if fresh && e != nil {
 			t.Fatal("fresh matching update refused")
 		}

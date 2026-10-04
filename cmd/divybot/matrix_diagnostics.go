@@ -243,6 +243,18 @@ func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post 
 }
 
 var matrixSites = map[string]bool{
+	"spawn.remote-control-mode":           true,
+	"spawn.remote-control-name":           true,
+	"spawn.remote-control-prepare":        true,
+	"spawn.remote-control-render":         true,
+	"spawn.remote-control-staged-binding": true,
+	"spawn.remote-control-identity":       true,
+	"spawn.remote-control-proof":          true,
+	"spawn.remote-control-proven-binding": true,
+	"spawn.remote-control-deadline":       true,
+	"spawn.remote-control-observation":    true,
+	"launch.remote-control-binding":       true,
+
 	"spawn.opencode-route": true, "spawn.opencode-environment": true, "spawn.opencode-preflight": true, "launch.opencode-route": true,
 	"spawn.native-store-binding": true, "spawn.agy-trust": true, "spawn.agy-readiness": true,
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-budget": true,

@@ -246,6 +246,17 @@ func (c *Coord) deliverRetryAction(ctx context.Context, req actionRequest, r *ac
 		r.Outcome, r.Reason = "rejected", "retry_pins_unavailable"
 		return
 	}
+	var remote remoteControlRun
+	if _, statErr := os.Lstat(filepath.Join(source.Record, "remote-control-run.json")); statErr == nil {
+		if readPrivateActionJSON(filepath.Join(source.Record, "remote-control-run.json"), &remote) != nil || remote.NativeSessionID != source.NativeSessionID {
+			r.Outcome, r.Reason = "rejected", "retry_pins_unavailable"
+			return
+		}
+		host.CanonicalCodex = true
+	} else if !os.IsNotExist(statErr) {
+		r.Outcome, r.Reason = "rejected", "retry_pins_unavailable"
+		return
+	}
 	failed, err := c.retryNativeFailed(ctx, host, source.NativeSessionID)
 	if err != nil || !failed {
 		r.Outcome, r.Reason = "rejected", "retry_terminal_unproven"
