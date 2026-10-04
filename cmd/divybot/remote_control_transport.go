@@ -170,9 +170,13 @@ func (h Host) withCanonicalConnection(ctx context.Context, thread string, use fu
 		return goalError("remote-control-binding-invalid")
 	}
 	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s", shq(h.agentHome()), shq(canonicalCodexBridge))
-	return h.withGoalScript(ctx, script, thread, func(p *goalRPC) (err error) {
-		p.shadow = h.ShadowScope.open(shadowCodexCanonical, thread)
-		defer func() { p.shadow.close(err) }()
+	// Finalize the shadow source on the whole operation's result, including
+	// the transport's own refusal after the callback returns (cancellation,
+	// deadline, framing). Closing on the callback's result alone stays live.
+	var shadow *shadowPublisher
+	err := h.withGoalScript(ctx, script, thread, func(p *goalRPC) error {
+		shadow = h.ShadowScope.open(shadowCodexCanonical, thread)
+		p.shadow = shadow
 		if h.RemoteRun != nil {
 			if err := p.verifyRemoteThread(h.RemoteRun, false); err != nil {
 				return err
@@ -180,6 +184,12 @@ func (h Host) withCanonicalConnection(ctx context.Context, thread string, use fu
 		}
 		return use(p)
 	})
+	final := err
+	if final == nil {
+		final = ctx.Err() // defense in depth; never a clean close after cancellation
+	}
+	shadow.close(final) // guard:final-result
+	return err
 }
 
 func (h Host) withGoalScript(ctx context.Context, script, thread string, use func(*goalRPC) error) error {

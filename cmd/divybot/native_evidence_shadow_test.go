@@ -420,3 +420,135 @@ func TestShadowIsEffectFreeBesideTodaysChecks(t *testing.T) {
 		t.Fatalf("exact canonical notification not observed by shadow: %+v", v)
 	}
 }
+
+func TestShadowCurrentTurnOutcomeRescopesAndConflictsStick(t *testing.T) {
+	for _, mode := range []string{"valid-terminal", "next-working", "next-turn-terminal", "conflicting-terminal", "conflicting-success", "duplicate-terminal", "conflict-then-next-turn"} {
+		t.Run(mode, func(t *testing.T) {
+			r, root, e := shadowFixtureReducer(t)
+			mustIngest(t, r, shadowRowAt(e, 1, shadowActivity, "working", root, "turn-one", shadowT0))
+			first := "completed"
+			if mode == "conflicting-success" {
+				first = "failed"
+			}
+			mustIngest(t, r, shadowRowAt(e, 2, shadowTurnOutcome, first, root, "turn-one", shadowT0))
+			switch mode {
+			case "next-working":
+				mustIngest(t, r, shadowRowAt(e, 3, shadowActivity, "working", root, "turn-two", shadowT0))
+			case "next-turn-terminal":
+				mustIngest(t, r, shadowRowAt(e, 3, shadowActivity, "working", root, "turn-two", shadowT0))
+				mustIngest(t, r, shadowRowAt(e, 4, shadowTurnOutcome, "failed", root, "turn-two", shadowT0))
+			case "conflicting-terminal":
+				mustIngest(t, r, shadowRowAt(e, 3, shadowTurnOutcome, "failed", root, "turn-one", shadowT0))
+			case "conflicting-success":
+				mustIngest(t, r, shadowRowAt(e, 3, shadowTurnOutcome, "completed", root, "turn-one", shadowT0))
+			case "duplicate-terminal":
+				mustIngest(t, r, shadowRowAt(e, 3, shadowTurnOutcome, "completed", root, "turn-one", shadowT0))
+			case "conflict-then-next-turn":
+				mustIngest(t, r, shadowRowAt(e, 3, shadowTurnOutcome, "interrupted", root, "turn-one", shadowT0))
+				mustIngest(t, r, shadowRowAt(e, 4, shadowActivity, "working", root, "turn-two", shadowT0))
+				mustIngest(t, r, shadowRowAt(e, 5, shadowTurnOutcome, "completed", root, "turn-two", shadowT0))
+			}
+			want := map[string]string{"valid-terminal": "completed", "duplicate-terminal": "completed", "next-turn-terminal": "failed"}[mode]
+			if want == "" {
+				want = "unknown"
+			}
+			if got := r.decide(shadowTurnOutcome, shadowT0); got.Value != want {
+				t.Fatalf("current-turn outcome: got %+v, want %s", got, want)
+			}
+			activity := r.decide(shadowActivity, shadowT0)
+			if mode == "next-working" && activity.Value != "working" {
+				t.Fatalf("new current turn not working: %+v", activity)
+			}
+			if strings.HasPrefix(mode, "conflict") && (activity.Value != "unknown" || activity.Reason != "conflict-unreconciled") {
+				t.Fatalf("same-turn terminal contradiction not sticky: %+v", activity)
+			}
+		})
+	}
+}
+
+func TestShadowRouteBindingChangeResetsToUnproven(t *testing.T) {
+	for _, mode := range []string{"unchanged", "hook-confirmed", "cwd", "model", "effort", "name", "label", "issue", "repo", "identity-source", "pane"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newNativeEvidenceShadow(func() time.Time { return shadowT0 })
+			j := shadowFixtureJob(t, "codex")
+			j.Repo = "fixture/repo"
+			j.RemoteControl.HookConfirmed = false
+			original := s.scope(j)
+			p := original.open(shadowCodexCanonical, j.RemoteControl.NativeSessionID)
+			p.connection(true)
+			next := *j
+			run := *j.RemoteControl
+			next.RemoteControl = &run
+			switch mode {
+			case "hook-confirmed":
+				run.HookConfirmed = true // confirmation of the same identity, not a new route
+			case "cwd":
+				run.Cwd += "/different"
+			case "model":
+				run.Model += "-different"
+			case "effort":
+				run.Effort = "high"
+			case "name":
+				run.Name += " different"
+			case "label":
+				next.Label += "-different"
+			case "issue":
+				next.Issue++
+			case "repo":
+				next.Repo = "fixture/other"
+			case "identity-source":
+				run.IdentitySource = "codex-native-status"
+			case "pane":
+				next.Pane += "-different"
+			}
+			scope := s.scope(&next)
+			p.connection(true) // delayed publisher from the original binding
+			got := s.verdict(&next, shadowConnection)
+			if mode == "unchanged" || mode == "hook-confirmed" {
+				if scope.invocation != original.invocation || got.Value != "connected" {
+					t.Fatalf("same invocation lost its proof: %+v", got)
+				}
+				return
+			}
+			if scope.invocation == original.invocation || got.Value != "unknown" {
+				t.Fatalf("changed %s inherited the prior invocation proof or publisher: %+v", mode, got)
+			}
+		})
+	}
+}
+
+func TestShadowPublisherClosesOnFinalTransportResult(t *testing.T) {
+	for _, mode := range []string{"clean", "cancel-after-read", "callback-error"} {
+		t.Run(mode, func(t *testing.T) {
+			j := shadowFixtureJob(t, "codex")
+			s := newNativeEvidenceShadow(func() time.Time { return shadowT0 })
+			h := canonicalFixtureHost(t, "valid", func(string, map[string]any) any { return map[string]string{"status": "connected"} })
+			h.ShadowScope = s.scope(j)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := h.withCanonicalConnection(ctx, j.RemoteControl.NativeSessionID, func(p *goalRPC) error {
+				e := p.remoteConnected()
+				switch mode {
+				case "cancel-after-read":
+					cancel()
+				case "callback-error":
+					return goalError("fixture-refusal")
+				}
+				return e
+			})
+			got := s.verdict(j, shadowConnection)
+			if mode == "clean" {
+				if err != nil || got.Value != "connected" || !got.Live {
+					t.Fatalf("clean canonical read lost: err=%v %+v", err, got)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("today's transport accepted a refused operation")
+			}
+			if got.Value != "unknown" || got.Live {
+				t.Fatalf("refused native transport left a live shadow fact: %+v", got)
+			}
+		})
+	}
+}

@@ -46,9 +46,13 @@ const (
 	shadowMaxScopes   = 128
 )
 
-// Dispatcher-owned invocation binding. Any change is a new invocation epoch.
+// Dispatcher-owned invocation binding: dispatch, route, cwd, native identity,
+// placement and process. Any change is a new invocation epoch with no proof.
+// HookConfirmed is a later confirmation of the same identity, not a route.
 type shadowBinding struct {
 	Key, Vendor, Root, Host, Pane, Workspace, IdentitySource string
+	Issue                                                    int
+	Label, Repo, Cwd, Name, Model, Effort                    string
 	TUI                                                      remoteTUIProcess
 }
 
@@ -56,7 +60,9 @@ func shadowBindingFor(j *Job) (shadowBinding, bool) {
 	if j == nil || j.RemoteControl == nil || (j.Agent != "codex" && j.Agent != "claude") || !digestPattern.MatchString(j.DispatchKey) || !privateNativeID(j.RemoteControl.NativeSessionID) {
 		return shadowBinding{}, false
 	}
-	b := shadowBinding{Key: j.DispatchKey, Vendor: j.Agent, Root: j.RemoteControl.NativeSessionID, Host: j.Host, Pane: j.Pane, Workspace: j.Workspace, IdentitySource: j.RemoteControl.IdentitySource}
+	run := j.RemoteControl
+	b := shadowBinding{Key: j.DispatchKey, Vendor: j.Agent, Root: run.NativeSessionID, Host: j.Host, Pane: j.Pane, Workspace: j.Workspace, IdentitySource: run.IdentitySource,
+		Issue: j.Issue, Label: j.Label, Repo: j.Repo, Cwd: run.Cwd, Name: run.Name, Model: run.Model, Effort: run.Effort} // guard:route-binding
 	if j.RemoteControl.TUIProcess != nil {
 		b.TUI = *j.RemoteControl.TUIProcess
 	}
@@ -182,11 +188,20 @@ func (r *shadowReducer) apply(row shadowRow) {
 		if _, terminal := r.outcomes[row.Turn]; terminal { // guard:sticky-restart
 			r.conflict = "conflict-unreconciled"
 		}
+		if row.Turn != r.current { // guard:turn-rescope
+			delete(r.facts, shadowTurnOutcome) // the prior turn's outcome stays history only
+		}
 		r.current = row.Turn
 		r.facts[row.Fact] = row
 	case shadowTurnOutcome:
 		if row.Turn == "" { // guard:turn-association
 			return // an unassociated terminal is never assigned to the newest turn
+		}
+		if prior, seen := r.outcomes[row.Turn]; seen && prior != row.Value { // guard:terminal-conflict
+			// Equal-authority contradiction; a higher sequence is not causal
+			// reconciliation. Keep the first value as history and stay unknown.
+			r.conflict = "conflict-unreconciled"
+			return
 		}
 		r.outcomes[row.Turn] = row.Value
 		if row.Turn == r.current { // guard:turn-lineage
