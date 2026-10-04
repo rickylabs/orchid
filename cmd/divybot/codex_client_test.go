@@ -31,6 +31,14 @@ func TestCodexServerVersionFromUserAgent(t *testing.T) {
 	}
 }
 
+// A fake client: --version reports its version. Launched as the TUI, it models
+// the native startup order: an update prompt that runs before any daemon attach
+// unless check_for_update_on_startup=false is passed (codex tui lib.rs).
+func fakeCodexScript(reports string) string {
+	return "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli " + reports + "' && exit 0\n" +
+		"case \"$*\" in *check_for_update_on_startup=false*) echo attached;; *) echo update-prompt;; esac\n"
+}
+
 // A synthetic host home: version-named standalone releases plus a PATH codex.
 // Each fake reports a version through --version, exactly as the real client does.
 func codexClientHome(t *testing.T, releases map[string]string, pathVersion string) string {
@@ -38,13 +46,13 @@ func codexClientHome(t *testing.T, releases map[string]string, pathVersion strin
 	home := t.TempDir()
 	for dir, reports := range releases {
 		bin := filepath.Join(home, ".codex", "packages", "standalone", "releases", dir, "bin")
-		writeFixture(t, filepath.Join(bin, "codex"), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli "+reports+"'\n")
+		writeFixture(t, filepath.Join(bin, "codex"), fakeCodexScript(reports))
 		if os.Chmod(filepath.Join(bin, "codex"), 0700) != nil {
 			t.Fatal("fixture client unavailable")
 		}
 	}
 	if pathVersion != "" {
-		writeFixture(t, filepath.Join(home, ".local", "bin", "codex"), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli "+pathVersion+"'\n")
+		writeFixture(t, filepath.Join(home, ".local", "bin", "codex"), fakeCodexScript(pathVersion))
 		if os.Chmod(filepath.Join(home, ".local", "bin", "codex"), 0700) != nil {
 			t.Fatal("fixture client unavailable")
 		}
@@ -100,7 +108,7 @@ func TestResolveCodexClientMatchesDaemonVersion(t *testing.T) {
 // A fake client that reports its version, at an arbitrary path.
 func fakeCodexAt(t *testing.T, path, reports string) {
 	t.Helper()
-	writeFixture(t, path, "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli "+reports+"'\n")
+	writeFixture(t, path, fakeCodexScript(reports))
 	if os.Chmod(path, 0700) != nil {
 		t.Fatal("fixture client unavailable")
 	}
@@ -224,8 +232,12 @@ elif args[:2]==['pane','run']:
  open(os.environ['RC_CLIENT_PANE'],'a').write(args[3]+'\n');print(json.dumps({'result':{}}))
 elif args[:2]==['agent','start']:
  env=dict(os.environ,HOME=os.environ['RC_CLIENT_HOME'])
- out=subprocess.run(['bash','-c',open(os.environ['RC_CLIENT_PANE']).read()+'codex --version\n'],env=env,capture_output=True,text=True).stdout.strip()
+ pane=open(os.environ['RC_CLIENT_PANE']).read()
+ out=subprocess.run(['bash','-c',pane+'codex --version\n'],env=env,capture_output=True,text=True).stdout.strip()
  open(os.environ['RC_CLIENT_STARTED'],'w').write(out)
+ # Herdr starts the canonical codex with the agent-start argv after "--".
+ attach=subprocess.run(['bash','-c',pane+'codex "$@"\n','herdr']+args[args.index('--')+1:],env=env,capture_output=True,text=True).stdout.strip()
+ open(os.environ['RC_CLIENT_STARTED']+'.attach','w').write(attach)
  print(json.dumps({'error':{'code':'agent_not_ready','message':'fixture stops after start'}}));sys.exit(1)
 else:print(json.dumps({'result':{}}))
 `)
@@ -255,6 +267,10 @@ else:print(json.dumps({'result':{}}))
 					t.Fatalf("a changed pinned binary reached agent start or was served as a clean block: err=%v herdr=%s", err, log)
 				}
 				return
+			}
+			attach, _ := os.ReadFile(started + ".attach")
+			if string(attach) != "attached" {
+				t.Fatalf("the launched TUI stops at its startup update prompt before attaching: %q", attach)
 			}
 			got, _ := os.ReadFile(started)
 			if string(got) != tc.wantClient {

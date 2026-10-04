@@ -110,3 +110,18 @@ func TestStartupDialogDiagnosisPreservesCancellation(t *testing.T) {
 		}
 	}
 }
+
+// Every managed interactive Codex launch (plain and Remote Control) skips the
+// startup update prompt, which otherwise runs before any app-server attach.
+func TestManagedCodexSkipsStartupUpdatePrompt(t *testing.T) {
+	_, args, err := managedInteractiveAgentArgs("codex", Overrides{Model: "fixture-model", Effort: "high"}, "/fixture/issue-7")
+	found := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-c" && args[i+1] == "check_for_update_on_startup=false" {
+			found = true
+		}
+	}
+	if err != nil || !found {
+		t.Fatalf("managed Codex can stop at its startup update prompt: %v %q", err, args)
+	}
+}
