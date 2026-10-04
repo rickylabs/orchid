@@ -50,6 +50,8 @@ type goalRPC struct {
 	turnEvents []remoteNativeTurn
 	turnProofs map[string]remoteNativeTurnProof
 	shadow     *shadowPublisher
+	// Optional ordered journal for scoped turn notices; nil for other callers.
+	onTurnNotice func(remoteNativeTurn) error
 }
 
 func newGoalRPC(input io.Writer, output io.Reader, thread string) *goalRPC {

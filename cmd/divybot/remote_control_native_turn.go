@@ -41,6 +41,9 @@ func (p *goalRPC) nativeTurnNotification(method string, params json.RawMessage) 
 	}
 	p.turnEvents = append(p.turnEvents, remoteNativeTurn{n.ThreadID, n.Turn.ID, n.Turn.Status})
 	p.shadow.turn(n.ThreadID, n.Turn.ID, n.Turn.Status)
+	if p.onTurnNotice != nil {
+		return p.onTurnNotice(remoteNativeTurn{n.ThreadID, n.Turn.ID, n.Turn.Status})
+	}
 	return nil
 }
 

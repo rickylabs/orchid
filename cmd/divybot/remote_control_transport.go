@@ -16,6 +16,7 @@ class EndpointRefusal(Exception):pass
 def refuse(reason):raise EndpointRefusal(reason)
 def stamp(s):return (s.st_dev,s.st_ino,s.st_uid,s.st_mode,s.st_mtime_ns,s.st_ctime_ns)
 def dir_stamp(s):return (s.st_dev,s.st_ino,s.st_uid,s.st_mode)
+END=sys.argv[1:]==['end']
 def run():
  home=os.environ.get('CODEX_HOME') or os.path.join(os.environ['HOME'],'.codex')
  directory=os.path.join(home,'app-server-control'); entry=os.path.join(directory,'app-server-control.sock');path=entry
@@ -96,30 +97,52 @@ def run():
    if not p: raise ValueError()
    b.extend(p)
   return bytes(b)
+ def frame():
+  a,b=take(2);opcode=a&15;n=b&127
+  if a&0x70 or not a&0x80 or b&0x80: raise ValueError()
+  if n==126:n=struct.unpack('!H',take(2))[0]
+  elif n==127:n=struct.unpack('!Q',take(8))[0]
+  if n>1048576 or opcode not in (1,8,9,10) or (opcode>=8 and n>125):raise ValueError()
+  return opcode,take(n)
+ def forward(body):
+  body.decode('utf-8')
+  if b'\n' in body or b'\r' in body:raise ValueError()
+  sys.stdout.buffer.write(body+b'\n');sys.stdout.buffer.flush()
+ # End mode: only a deliberate stdin EOF ends cleanly. Already-readable peer
+ # data is drained first, so a queued close or bad frame is never hidden.
+ def finish():
+  for drained in range(256):
+   if not select.select([s],[],[],0)[0]:break
+   opcode,body=frame()
+   if opcode==8:sys.exit(3)
+   if opcode==9:send(body,10);continue
+   if opcode==10:continue
+   forward(body)
+  else:raise ValueError()
+  send(b'',8)
+  if stamp(os.lstat(entry))!=stamp(entry_before) or stamp(os.lstat(path))!=stamp(before):refuse('remote-control-endpoint-changed')
+  sys.exit(0)
  pending=bytearray()
  while True:
   ready,_,_=select.select([s,sys.stdin],[],[],10)
   if not ready: raise ValueError()
   if sys.stdin in ready:
    b=os.read(sys.stdin.fileno(),4096)
-   if not b: return
+   if not b:
+    if END:finish()
+    return
    pending.extend(b)
    if len(pending)>1048576: raise ValueError()
    while b'\n' in pending:
     line,_,rest=pending.partition(b'\n');pending=bytearray(rest);send(bytes(line))
   if s in ready:
-   a,b=take(2);opcode=a&15;n=b&127
-   if a&0x70 or not a&0x80 or b&0x80: raise ValueError()
-   if n==126:n=struct.unpack('!H',take(2))[0]
-   elif n==127:n=struct.unpack('!Q',take(8))[0]
-   if n>1048576 or opcode not in (1,8,9,10) or (opcode>=8 and n>125):raise ValueError()
-   body=take(n)
-   if opcode==8:return
+   opcode,body=frame()
+   if opcode==8:
+    if END:sys.exit(3)
+    return
    if opcode==9:send(body,10);continue
    if opcode==10:continue
-   body.decode('utf-8')
-   if b'\n' in body or b'\r' in body:raise ValueError()
-   sys.stdout.buffer.write(body+b'\n');sys.stdout.buffer.flush()
+   forward(body)
 try:run()
 except EndpointRefusal as e:sys.stderr.write(str(e)+'\n');sys.exit(2)
 except Exception:sys.stderr.write('remote-control-endpoint-unavailable\n');sys.exit(2)

@@ -312,6 +312,9 @@ func retryBoundGoalEligible(j *Job) bool {
 	if j == nil || j.NativeGoal == nil || !j.NativeGoal.PromptConfirmed || j.NativeGoal.Owned {
 		return false
 	}
+	if rcCodex(j) && !deliveryConfirmed(j) {
+		return false
+	}
 	switch j.NativeGoal.Reason {
 	case "native-session-unavailable", "goal-identity-source-unavailable":
 		return true

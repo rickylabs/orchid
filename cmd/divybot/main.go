@@ -83,6 +83,7 @@ type Host struct {
 	CanonicalCodex bool                 `json:"-"`
 	RemoteRun      *remoteControlRun    `json:"-"`
 	ShadowScope    *nativeShadowScope   `json:"-"`
+	Acceptance     *codexAcceptance     `json:"-"`
 	Name           string               `json:"name"`
 	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
 	Key            string               `json:"key"`          // ssh key path; "" = default/agent
@@ -299,7 +300,8 @@ type Job struct {
 	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"`
 	OwnerMismatchNotice   string            `json:"owner_mismatch_notice,omitempty"`
 	CompletionUnprovenSeq *uint64           `json:"completion_unproven_seq,omitempty"`
-	GoalDelivery          string            `json:"goal_delivery,omitempty"` // pending|confirmed|blocked; separate from native goal ownership
+	GoalDelivery          string            `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
+	GoalDeliveryCommit    string            `json:"goal_delivery_commit,omitempty"` // RC Codex on-time native commit marker
 	NativeGoal            *dispatchGoal     `json:"native_goal,omitempty"`
 	DispatchKey           string            `json:"dispatch_key,omitempty"` // private launch receipt key
 	Issue                 int               `json:"issue"`
@@ -347,6 +349,7 @@ type State struct {
 	LaunchBlocks  map[int]launchBlock  `json:"launch_blocks,omitempty"`
 	RetryFlights  map[int]retryFlight  `json:"retry_flights,omitempty"`
 	mu            sync.Mutex
+	fs            *stateFS     // test-only durability fault injection; nil uses the OS
 	Jobs          map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
@@ -424,7 +427,7 @@ func (s *State) saveLocked() error {
 		return err
 	}
 	if _, err = f.Write(b); err == nil {
-		err = f.Sync()
+		err = s.fs.fileSync(f)
 	}
 	closeErr := f.Close()
 	if err != nil {
@@ -433,15 +436,19 @@ func (s *State) saveLocked() error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(tmp, s.path); err != nil {
+	if err = s.fs.move(tmp, s.path); err != nil {
 		return err
 	}
+	// The pathname now names the new state; later failures are durability-only.
 	dir, err := os.Open(filepath.Dir(s.path))
 	if err != nil {
-		return err
+		return stateSaveError{afterRename: true, err: err}
 	}
 	defer dir.Close()
-	return dir.Sync()
+	if err = s.fs.dirSync(dir); err != nil {
+		return stateSaveError{afterRename: true, err: err}
+	}
+	return nil
 }
 
 // ============================ exec helpers ============================
@@ -2436,18 +2443,7 @@ func (c *Coord) tick(ctx context.Context) {
 	}
 
 	status, up := c.fleetStatus(ctx)
-	// Completion cleanup precedes admission and every possible continuation send.
-	c.st.mu.Lock()
-	finishing := make(map[int]*Job, len(c.st.Jobs))
-	for n, j := range c.st.Jobs {
-		finishing[n] = j
-	}
-	c.st.mu.Unlock()
-	for n, j := range finishing {
-		ref, known := status[n]
-		c.observeFinalReport(ctx, j, ref, known)
-		c.retireCompleted(ctx, n, j, ref, known)
-	}
+	c.completionPass(ctx, status)
 	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return ghIssueStateByNum(ctx, c.cfg.Inbox, n) })
 
 	// A persistently absent agent is an abandoned launch, not permission to retry.
@@ -3250,6 +3246,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			}
 		}
 		var deliveryErr error
+		remoteCodex := agent == "codex" && j.RemoteControl != nil
 		host = host.forJob(j)
 		if agent == "opencode" {
 			deliveryErr = host.injectOpenCodeGoal(gctx, j, goal, func() error {
@@ -3263,6 +3260,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 				// Existing staged transports keep their pointer delivery.
 				inject = runPointer
 			}
+			if remoteCodex {
+				host.Acceptance = c.codexAcceptanceFor(gctx, host, j)
+			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
 		if deliveryErr != nil {
@@ -3274,7 +3274,14 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			gcancel()
 			return matrixReason("goal-prompt-unconfirmed")
 		}
-		if err := confirmGoalDeliveryBeforeDeadline(gctx, func() error { return c.confirmGoalDelivery(j) }); err != nil {
+		var confirmErr error
+		if remoteCodex {
+			deadline, _ := gctx.Deadline()
+			confirmErr = c.commitRemoteCodexDelivery(gctx, deadline, j)
+		} else {
+			confirmErr = confirmGoalDeliveryBeforeDeadline(gctx, func() error { return c.confirmGoalDelivery(j) })
+		}
+		if confirmErr != nil {
 			gcancel()
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")
@@ -3289,6 +3296,21 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	}
 	log.Printf("issue #%d: launch-started", n)
 	return nil
+}
+
+// Completion cleanup precedes admission and every possible continuation send.
+func (c *Coord) completionPass(ctx context.Context, status map[int]agentRef) {
+	c.st.mu.Lock()
+	finishing := make(map[int]*Job, len(c.st.Jobs))
+	for n, j := range c.st.Jobs {
+		finishing[n] = j
+	}
+	c.st.mu.Unlock()
+	for n, j := range finishing {
+		ref, known := status[n]
+		c.observeFinalReport(ctx, j, ref, known)
+		c.retireCompleted(ctx, n, j, ref, known)
+	}
 }
 
 func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
