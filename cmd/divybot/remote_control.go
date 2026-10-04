@@ -54,6 +54,7 @@ type remoteControlRun struct {
 	TUIProcess      *remoteTUIProcess `json:"tuiProcess"`
 	// The daemon version this run's TUI client was pinned to, and that client's directory.
 	ClientVersion string `json:"-"`
+	ClientBinary  string `json:"-"`
 	ClientDir     string `json:"-"`
 }
 

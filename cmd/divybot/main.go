@@ -806,6 +806,13 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			return pane, ws, matrixSite("spawn.remote-control-staged-binding", errMatrix)
 		}
 	}
+	if remote != nil && agent == "codex" {
+		// The pane's PATH names the pinned directory; it must still hold exactly the
+		// verified binary when Herdr starts the canonical codex from it.
+		if e := h.verifyCodexClient(ctx, remote); e != nil { // guard:client-recheck
+			return pane, ws, matrixSite("spawn.codex-client-recheck", e)
+		}
+	}
 	if !strings.HasSuffix(agent, "-run") {
 		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", strconv.FormatInt(startBudget.Milliseconds(), 10), "--"}
 		args = append(args, nativeArgs...)

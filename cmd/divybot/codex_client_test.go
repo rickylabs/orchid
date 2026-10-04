@@ -82,16 +82,56 @@ func TestResolveCodexClientMatchesDaemonVersion(t *testing.T) {
 			h := Host{Name: "fixture-host", Home: home}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			dir, err := h.resolveCodexClient(ctx, tc.version)
+			binary, err := h.resolveCodexClient(ctx, tc.version)
 			if tc.wantDir == "" {
-				if err != codexClientUnavailable || dir != "" {
-					t.Fatalf("no exact client must refuse: dir=%q err=%v", dir, err)
+				if err != codexClientUnavailable || binary != "" {
+					t.Fatalf("no exact client must refuse: binary=%q err=%v", binary, err)
 				}
-			} else if err != nil || dir != filepath.Join(home, tc.wantDir) {
-				t.Fatalf("resolved %q (%v), want %q", dir, err, filepath.Join(home, tc.wantDir))
+			} else if want, _ := filepath.EvalSymlinks(filepath.Join(home, tc.wantDir, "codex")); err != nil || binary != want {
+				t.Fatalf("resolved %q (%v), want the real binary %q", binary, err, want)
 			}
 			if _, statErr := os.Stat(filepath.Join(home, "pwned")); statErr == nil {
 				t.Fatal("version text reached the shell")
+			}
+		})
+	}
+}
+
+// A fake client that reports its version, at an arbitrary path.
+func fakeCodexAt(t *testing.T, path, reports string) {
+	t.Helper()
+	writeFixture(t, path, "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli "+reports+"'\n")
+	if os.Chmod(path, 0700) != nil {
+		t.Fatal("fixture client unavailable")
+	}
+}
+
+// The resolver pins the real executable behind every symlink, never an alias.
+func TestResolveCodexClientPinsRealBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, reports, want string
+	}{
+		{"path-alias-resolves-to-real-binary", "opt/9.7.0/bin/codex", "9.7.0", "opt/9.7.0/bin/codex"},
+		{"alias-target-not-named-codex", "opt/9.7.0/bin/codex.js", "9.7.0", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := codexClientHome(t, nil, "")
+			fakeCodexAt(t, filepath.Join(home, tc.target), tc.reports)
+			alias := filepath.Join(home, ".local", "bin", "codex")
+			if os.MkdirAll(filepath.Dir(alias), 0700) != nil || os.Symlink(filepath.Join(home, tc.target), alias) != nil {
+				t.Fatal("alias fixture unavailable")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			binary, err := Host{Name: "fixture-host", Home: home}.resolveCodexClient(ctx, "9.7.0")
+			if tc.want == "" {
+				if err != codexClientUnavailable {
+					t.Fatalf("a client not named codex was pinned: %q", binary)
+				}
+				return
+			}
+			if want, _ := filepath.EvalSymlinks(filepath.Join(home, tc.want)); err != nil || binary != want {
+				t.Fatalf("pinned %q (%v), want the real binary %q", binary, err, want)
 			}
 		})
 	}
@@ -102,12 +142,23 @@ func TestResolveCodexClientMatchesDaemonVersion(t *testing.T) {
 // fake runs exactly the exported pane environment and records which client ran.
 func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		releases   map[string]string
-		wantClient string
+		name        string
+		releases    map[string]string
+		pathVersion string
+		alias       bool   // ~/.local/bin/codex is a symlink to opt/9.1.0/bin/codex; opt/9.2.0 also exists
+		onWorkspace string // runs (with HOME) when Herdr creates the workspace, after selection
+		wantClient  string // "" = refused before spawn; "recheck" = refused before agent start
 	}{
-		{"matching-release-beats-newer-path-client", map[string]string{"9.1.0-x86_64-fixture": "9.1.0"}, "codex-cli 9.1.0"},
-		{"no-matching-client-refuses-before-spawn", map[string]string{"9.0.0-x86_64-fixture": "9.0.0"}, ""},
+		{"matching-release-beats-newer-path-client", map[string]string{"9.1.0-x86_64-fixture": "9.1.0"}, "9.2.0", false, "", "codex-cli 9.1.0"},
+		{"no-matching-client-refuses-before-spawn", map[string]string{"9.0.0-x86_64-fixture": "9.0.0"}, "9.2.0", false, "", ""},
+		// An updater re-points the PATH alias after selection: the verified binary still runs.
+		{"path-alias-retargeted-after-selection", nil, "", true, `ln -sfn "$HOME/opt/9.2.0/bin/codex" "$HOME/.local/bin/codex"`, "codex-cli 9.1.0"},
+		// The pinned binary itself changes before start: no agent is started.
+		{"pinned-binary-replaced-before-start", map[string]string{"9.1.0-x86_64-fixture": "9.1.0"}, "9.2.0", false,
+			`printf '#!/bin/sh\necho codex-cli 9.2.0\n' > "$HOME/.codex/packages/standalone/releases/9.1.0-x86_64-fixture/bin/codex"`, "recheck"},
+		// Swapped for a different binary that reports the same version: still not the verified one.
+		{"pinned-binary-relinked-same-version", map[string]string{"9.1.0-x86_64-fixture": "9.1.0"}, "", true,
+			`ln -sfn "$HOME/opt/9.1.0/bin/codex" "$HOME/.codex/packages/standalone/releases/9.1.0-x86_64-fixture/bin/codex"`, "recheck"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -135,12 +186,27 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 				return map[string]any{}
 			})
 			// The fixture daemon's own home doubles as the host home for clients and Herdr.
-			fixture := codexClientHome(t, tc.releases, "9.2.0")
-			for _, sub := range []string{".codex/packages", ".local"} {
+			fixture := codexClientHome(t, tc.releases, tc.pathVersion)
+			if tc.alias {
+				fakeCodexAt(t, filepath.Join(fixture, "opt", "9.1.0", "bin", "codex"), "9.1.0")
+				fakeCodexAt(t, filepath.Join(fixture, "opt", "9.2.0", "bin", "codex"), "9.2.0")
+				if os.MkdirAll(filepath.Join(fixture, ".local", "bin"), 0700) != nil ||
+					os.Symlink(filepath.Join(h.Home, "opt", "9.1.0", "bin", "codex"), filepath.Join(fixture, ".local", "bin", "codex")) != nil {
+					t.Fatal("alias fixture unavailable")
+				}
+			}
+			for _, sub := range []string{".codex/packages", ".local", "opt"} {
+				if _, err := os.Stat(filepath.Join(fixture, sub)); err != nil {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(h.Home, sub)), 0700); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.Rename(filepath.Join(fixture, sub), filepath.Join(h.Home, sub)); err != nil {
 					t.Fatal(err)
 				}
 			}
+			t.Setenv("RC_CLIENT_ON_WORKSPACE", tc.onWorkspace)
 			calls := filepath.Join(h.Home, "herdr-calls.jsonl")
 			started := filepath.Join(h.Home, "started-client")
 			t.Setenv("RC_CLIENT_CALLS", calls)
@@ -151,7 +217,9 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 import json,os,subprocess,sys
 args=sys.argv[1:]
 with open(os.environ['RC_CLIENT_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
-if args[:2]==['workspace','create']:print(json.dumps({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}}))
+if args[:2]==['workspace','create']:
+ if os.environ['RC_CLIENT_ON_WORKSPACE']:subprocess.run(['bash','-c',os.environ['RC_CLIENT_ON_WORKSPACE']],env=dict(os.environ,HOME=os.environ['RC_CLIENT_HOME']),check=True)
+ print(json.dumps({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}}))
 elif args[:2]==['pane','run']:
  open(os.environ['RC_CLIENT_PANE'],'a').write(args[3]+'\n');print(json.dumps({'result':{}}))
 elif args[:2]==['agent','start']:
@@ -179,6 +247,12 @@ else:print(json.dumps({'result':{}}))
 				}
 				if len(log) != 0 || strings.Contains(seen, "thread/start") {
 					t.Fatalf("a refused launch created effects: herdr=%q daemon=%q", log, seen)
+				}
+				return
+			}
+			if tc.wantClient == "recheck" {
+				if matrixCause(err) != "spawn.codex-client-recheck" || codexClientBlocked(err) || strings.Contains(string(log), `"agent", "start"`) {
+					t.Fatalf("a changed pinned binary reached agent start or was served as a clean block: err=%v herdr=%s", err, log)
 				}
 				return
 			}
