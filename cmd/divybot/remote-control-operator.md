@@ -102,6 +102,9 @@ Completion and Stop reconcile scoped root/child terminal proofs after the last
 native read. Every notice received after that proof must agree; a later matching
 notice cannot erase an intervening conflict. Verified child notices remain in
 scope during root reads, without admitting foreign daemon tenants.
+Proof refresh checks unresolved started turns and retained scoped evidence before
+replacing the proof or advancing its cursor. A coherent newly completed turn can
+replace the prior terminal proof; a stale response cannot erase a conflict.
 Stop additionally pauses the owned native goal, interrupts in-progress turns,
 terminates scoped background terminals and requires terminal readback before
 closing. Neither interrupt/archive acknowledgement nor TUI absence releases

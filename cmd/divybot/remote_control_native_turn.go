@@ -61,11 +61,48 @@ func (p *goalRPC) scopedNativeTurnAgrees(thread, id, status string) bool {
 
 // Only validated full native turn reads enter this set. Metadata-only reads of
 // other daemon tenants confer neither work authority nor a lifecycle proof.
-func (p *goalRPC) recordNativeTurnProof(id, status string) {
+func (p *goalRPC) recordNativeTurnProof(id, status string) error {
+	next := remoteNativeTurnProof{remoteNativeTurn{p.thread, id, status}, len(p.turnEvents)}
+	if err := p.reconcileNativeProofRefresh(next); err != nil {
+		return err
+	}
 	if p.turnProofs == nil {
 		p.turnProofs = map[string]remoteNativeTurnProof{}
 	}
-	p.turnProofs[p.thread] = remoteNativeTurnProof{remoteNativeTurn{p.thread, id, status}, len(p.turnEvents)}
+	p.turnProofs[p.thread] = next
+	return nil
+}
+
+// A new full terminal read can resolve a coherent turn transition, but cannot
+// erase an unfinished different turn or hide contradictions behind the same
+// old terminal response. Check before changing any proof or event cursor.
+func (p *goalRPC) reconcileNativeProofRefresh(next remoteNativeTurnProof) error {
+	pending := map[string]bool{}
+	for _, event := range p.turnEvents {
+		if event.ThreadID != next.ThreadID {
+			continue
+		}
+		if event.Status == "inProgress" {
+			pending[event.ID] = true
+		} else {
+			delete(pending, event.ID)
+		}
+	}
+	if len(pending) != 0 {
+		return goalError("remote-control-work-unconfirmed")
+	}
+	if err := p.reconcileScopedTurnProof(next.ThreadID, next); err != nil {
+		return err
+	}
+	for thread, old := range p.turnProofs {
+		if thread == next.ThreadID && (old.ID != next.ID || old.Status != next.Status) {
+			continue // validated new terminal proof; all started turns are resolved
+		}
+		if err := p.reconcileScopedTurnProof(thread, old); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Reconcile after the final native read: that read may have consumed a newer
@@ -73,14 +110,21 @@ func (p *goalRPC) recordNativeTurnProof(id, status string) {
 // A previously verified child remains in scope during subsequent root reads.
 func (p *goalRPC) reconcileNativeLifecycle() error {
 	for thread, proof := range p.turnProofs {
-		if !p.scopedNativeTurnAgrees(thread, proof.ID, proof.Status) {
-			return goalError("remote-control-work-unconfirmed")
+		if err := p.reconcileScopedTurnProof(thread, proof); err != nil {
+			return err
 		}
-		// A later matching notice cannot erase an intervening contradiction.
-		for _, event := range p.turnEvents[proof.Events:] {
-			if event.ThreadID == thread && (event.ID != proof.ID || event.Status != proof.Status) {
-				return goalError("remote-control-work-unconfirmed")
-			}
+	}
+	return nil
+}
+
+func (p *goalRPC) reconcileScopedTurnProof(thread string, proof remoteNativeTurnProof) error {
+	if !p.scopedNativeTurnAgrees(thread, proof.ID, proof.Status) {
+		return goalError("remote-control-work-unconfirmed")
+	}
+	// A later matching notice cannot erase an intervening contradiction.
+	for _, event := range p.turnEvents[proof.Events:] {
+		if event.ThreadID == thread && (event.ID != proof.ID || event.Status != proof.Status) {
+			return goalError("remote-control-work-unconfirmed")
 		}
 	}
 	return nil

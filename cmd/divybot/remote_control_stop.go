@@ -192,8 +192,7 @@ func (p *goalRPC) remoteThreadIdle(allowEmpty bool) error {
 	}
 	if len(page.Data) == 0 {
 		if allowEmpty {
-			p.recordNativeTurnProof("", "")
-			return nil
+			return p.recordNativeTurnProof("", "")
 		}
 		return goalError("remote-control-work-unconfirmed")
 	}
@@ -226,8 +225,7 @@ func (p *goalRPC) remoteThreadIdle(allowEmpty bool) error {
 			}
 		}
 	}
-	p.recordNativeTurnProof(turn.ID, turn.Status)
-	return nil
+	return p.recordNativeTurnProof(turn.ID, turn.Status)
 }
 
 func (p *goalRPC) stopRemoteThread(intent *goalIntent) error {

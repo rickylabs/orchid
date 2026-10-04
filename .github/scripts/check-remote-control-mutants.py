@@ -40,7 +40,7 @@ MUTANTS = [
     ('streaming', 'remote_control_stop.go', 'func (p *goalRPC) remoteThreadIdle', 'case "completed", "interrupted", "failed":', 'case "completed", "interrupted", "failed", "inProgress":', 'TestRemoteControlNativeWorkQuiescence/streaming'),
     ('queue', 'remote_control_stop.go', 'func (p *goalRPC) remoteThreadIdle', 'len(page.Data) != 0', 'len(page.Data) > 1', 'TestRemoteControlNativeWorkQuiescence/queue'),
     ('terminate-readback', 'remote_control_stop.go', 'func (p *goalRPC) stopRemoteThread', '!result.Terminated', 'false', 'TestRemoteControlNativeStopReadbackAndDeadline/terminate-false'),
-    ('native-turn-notice', 'remote_control_native_turn.go', 'func (p *goalRPC) scopedNativeTurnAgrees', 'return p.turnEvents[i].ID == id && p.turnEvents[i].Status == status', 'return true', 'TestRemoteControlNativeTurnSignals/started'),
+    ('native-turn-notice', 'remote_control_native_turn.go', 'func (p *goalRPC) scopedNativeTurnAgrees', 'return p.turnEvents[i].ID == id && p.turnEvents[i].Status == status', 'return true', 'TestRemoteControlNativeTurnSignals/other-turn'),
     ('native-final', 'native_goal_rpc.go', 'func (p *goalRPC) lastTurnCompleted', 'final := false', 'final := true', 'TestRemoteControlNativeTurnSignals/no-final'),
     ('capacity', 'main.go', 'func occupiesAdmissionSlot', 'if j != nil && j.RemoteControl != nil {', 'if false {', 'TestRemoteControlCapacityHeldUntilRemoval'),
     ('goal-binding-deadline', 'remote_control_goal_binding.go', 'func bindRemoteNativeGoal', 'err != nil || ctx.Err() != nil ||', 'err != nil ||', 'TestRemoteControlPreparedGoalBindingRechecks/late'),
@@ -50,7 +50,13 @@ MUTANTS = [
     ('final-stop-goal-lifecycle', 'remote_control_stop.go', 'func (p *goalRPC) stopRemoteThread', 'return p.reconcileNativeLifecycle()', 'return nil', 'TestRemoteControlStopThreadFinalGoalNotice/late-own'),
     ('final-stop-work-lifecycle', 'remote_control_stop.go', 'func (p *goalRPC) remoteWorkIdle', 'return p.reconcileNativeLifecycle()', 'return nil', 'TestRemoteControlFinalScopedLifecycle/stop/late-root'),
     ('retained-child-notice', 'remote_control_native_turn.go', 'func (p *goalRPC) nativeTurnNotification', ' && p.turnProofs[n.ThreadID].ThreadID != n.ThreadID', '', 'TestRemoteControlFinalScopedLifecycle/stop/late-child'),
-    ('final-interleaving', 'remote_control_native_turn.go', 'func (p *goalRPC) reconcileNativeLifecycle', 'p.turnEvents[proof.Events:]', '[]remoteNativeTurn{}', 'TestRemoteControlFinalScopedLifecycle/stop/late-child-then-old-complete'),
+    ('final-interleaving', 'remote_control_native_turn.go', 'func (p *goalRPC) reconcileScopedTurnProof', 'p.turnEvents[proof.Events:]', '[]remoteNativeTurn{}', 'TestRemoteControlFinalScopedLifecycle/stop/late-child-then-old-complete'),
+    ('proof-refresh-reconciliation', 'remote_control_native_turn.go', 'func (p *goalRPC) recordNativeTurnProof', 'p.reconcileNativeProofRefresh(next)', 'error(nil)', 'TestRemoteControlProofRefreshCannotEraseConflict'),
+    ('proof-refresh-pending-turn', 'remote_control_native_turn.go', 'func (p *goalRPC) reconcileNativeProofRefresh', 'len(pending) != 0', 'false', 'TestRemoteControlProofRefreshTransitions/initial/unresolved'),
+    ('proof-refresh-old-cursor', 'remote_control_native_turn.go', 'func (p *goalRPC) reconcileNativeProofRefresh', 'old.ID != next.ID || old.Status != next.Status', 'true', 'TestRemoteControlProofRefreshCannotEraseConflict/completion/late-root-finished-then-old-complete'),
+    ('last-event-thread-separation', 'remote_control_native_turn.go', 'func (p *goalRPC) scopedNativeTurnAgrees', 'p.turnEvents[i].ThreadID == thread', 'true', 'TestRemoteControlProofRefreshCannotEraseConflict/completion/matching-child'),
+    ('interleaving-thread-separation', 'remote_control_native_turn.go', 'func (p *goalRPC) reconcileScopedTurnProof', 'event.ThreadID == thread', 'true', 'TestRemoteControlProofRefreshCannotEraseConflict/completion/matching-child'),
+    ('omitted-proof-recording', 'remote_control_native_turn.go', 'func (p *goalRPC) recordNativeTurnProof', 'p.turnProofs[p.thread] = next', 'if false { p.turnProofs[p.thread] = next }', 'TestRemoteControlLateNativeTurnCannotCertifyCompletion/late-own'),
 ]
 
 def main():

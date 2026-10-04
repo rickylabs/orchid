@@ -244,7 +244,9 @@ func (p *goalRPC) lastTurnCompleted() (bool, error) {
 		}
 	}
 	if final {
-		p.recordNativeTurnProof(turn.ID, turn.Status)
+		if err := p.recordNativeTurnProof(turn.ID, turn.Status); err != nil {
+			return false, err
+		}
 	}
 	return final, nil
 }
