@@ -127,7 +127,7 @@ func (p *goalRPC) remoteWorkIdle(allowEmpty bool) error {
 	if err != nil || !reflect.DeepEqual(current, children) {
 		return goalError("remote-control-child-work-unconfirmed")
 	}
-	return nil
+	return p.reconcileNativeLifecycle()
 }
 
 func (p *goalRPC) stopRemoteWork(intent *goalIntent) error {
@@ -192,6 +192,7 @@ func (p *goalRPC) remoteThreadIdle(allowEmpty bool) error {
 	}
 	if len(page.Data) == 0 {
 		if allowEmpty {
+			p.recordNativeTurnProof("", "")
 			return nil
 		}
 		return goalError("remote-control-work-unconfirmed")
@@ -225,6 +226,7 @@ func (p *goalRPC) remoteThreadIdle(allowEmpty bool) error {
 			}
 		}
 	}
+	p.recordNativeTurnProof(turn.ID, turn.Status)
 	return nil
 }
 
@@ -309,7 +311,7 @@ func (p *goalRPC) stopRemoteThread(intent *goalIntent) error {
 	if goal != nil && (intent == nil || !sameGoalIntent(goal, *intent) || (goal.Status != "complete" && goal.Status != "paused")) {
 		return goalError("remote-control-goal-mismatch")
 	}
-	return nil
+	return p.reconcileNativeLifecycle()
 }
 
 func (h Host) stopRemoteRun(ctx context.Context, j *Job) error {

@@ -98,6 +98,10 @@ persisted full-turn response remains structured evidence. A conflicting live
 notification, absent/ambiguous native response, active queue/background terminal,
 nonterminal tool or unverified descendant leaves completion unconfirmed. Terminal
 text, the footer, a report file and a marked comment never substitute native Done.
+Completion and Stop reconcile scoped root/child terminal proofs after the last
+native read. Every notice received after that proof must agree; a later matching
+notice cannot erase an intervening conflict. Verified child notices remain in
+scope during root reads, without admitting foreign daemon tenants.
 Stop additionally pauses the owned native goal, interrupts in-progress turns,
 terminates scoped background terminals and requires terminal readback before
 closing. Neither interrupt/archive acknowledgement nor TUI absence releases

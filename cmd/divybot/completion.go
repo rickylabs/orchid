@@ -111,6 +111,9 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 				}
 				goalAllowed = completionGoalAllowsRetirement(j, goal)
 			}
+			if e == nil && j.RemoteControl != nil {
+				e = p.reconcileNativeLifecycle()
+			}
 			return e
 		})
 		if j.RemoteControl != nil && (err != nil || !complete) {

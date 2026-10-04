@@ -68,7 +68,7 @@ func readNativeFixtureFrame(r io.Reader) ([]byte, byte, error) {
 	return data, head[0] & 15, nil
 }
 
-func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[string]any) any) Host {
+func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[string]any) any, notices ...func(string, map[string]any) []any) Host {
 	t.Helper()
 	// Keep AF_UNIX paths beneath the kernel length bound; normal t.TempDir
 	// names can be too long after the native relative suffix is appended.
@@ -128,7 +128,7 @@ func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[st
 		if err != nil {
 			return
 		}
-		for frames := 0; frames < 40; frames++ {
+		for frames := 0; frames < 128; frames++ {
 			b, opcode, err := readNativeFixtureFrame(reader)
 			if err != nil {
 				return
@@ -156,6 +156,14 @@ func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[st
 				result = map[string]string{"userAgent": "fixture"}
 			} else if handler != nil {
 				result = handler(q.Method, q.Params)
+			}
+			for _, notify := range notices {
+				for _, notice := range notify(q.Method, q.Params) {
+					body, err := json.Marshal(notice)
+					if err != nil || nativeFixtureFrame(connection, body, 1) != nil {
+						return
+					}
+				}
 			}
 			body, _ := json.Marshal(response(q.ID, result))
 			if mode == "newline" {

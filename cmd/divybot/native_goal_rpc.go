@@ -48,6 +48,7 @@ type goalRPC struct {
 	thread     string
 	updates    []*nativeGoal
 	turnEvents []remoteNativeTurn
+	turnProofs map[string]remoteNativeTurnProof
 }
 
 func newGoalRPC(input io.Writer, output io.Reader, thread string) *goalRPC {
@@ -241,6 +242,9 @@ func (p *goalRPC) lastTurnCompleted() (bool, error) {
 		if item.Type == "agentMessage" && item.Phase == "final_answer" && strings.TrimSpace(item.Text) != "" {
 			final = true
 		}
+	}
+	if final {
+		p.recordNativeTurnProof(turn.ID, turn.Status)
 	}
 	return final, nil
 }

@@ -8,6 +8,11 @@ type remoteNativeTurn struct {
 	Status   string
 }
 
+type remoteNativeTurnProof struct {
+	remoteNativeTurn
+	Events int
+}
+
 // Canonical notifications are preferred live evidence. They are scoped to the
 // exact native thread; foreign daemon tenants never affect its lifecycle. They
 // cannot replace full native turn/tool/queue/descendant readback for Done.
@@ -22,7 +27,7 @@ func (p *goalRPC) nativeTurnNotification(method string, params json.RawMessage) 
 	if decodeNativeJSON(params, &n) != nil || !privateNativeID(n.ThreadID) {
 		return goalError("goal-response-invalid")
 	}
-	if n.ThreadID != p.thread {
+	if n.ThreadID != p.thread && p.turnProofs[n.ThreadID].ThreadID != n.ThreadID {
 		return nil
 	}
 	if !privateNativeID(n.Turn.ID) {
@@ -39,8 +44,12 @@ func (p *goalRPC) nativeTurnNotification(method string, params json.RawMessage) 
 }
 
 func (p *goalRPC) nativeTurnAgrees(id, status string) bool {
+	return p.scopedNativeTurnAgrees(p.thread, id, status)
+}
+
+func (p *goalRPC) scopedNativeTurnAgrees(thread, id, status string) bool {
 	for i := len(p.turnEvents) - 1; i >= 0; i-- {
-		if p.turnEvents[i].ThreadID == p.thread {
+		if p.turnEvents[i].ThreadID == thread {
 			return p.turnEvents[i].ID == id && p.turnEvents[i].Status == status
 		}
 	}
@@ -48,4 +57,31 @@ func (p *goalRPC) nativeTurnAgrees(id, status string) bool {
 	// canonical persisted full-turn read remains the structured native source;
 	// absence of both is unconfirmed. Never fall back to the terminal footer.
 	return true
+}
+
+// Only validated full native turn reads enter this set. Metadata-only reads of
+// other daemon tenants confer neither work authority nor a lifecycle proof.
+func (p *goalRPC) recordNativeTurnProof(id, status string) {
+	if p.turnProofs == nil {
+		p.turnProofs = map[string]remoteNativeTurnProof{}
+	}
+	p.turnProofs[p.thread] = remoteNativeTurnProof{remoteNativeTurn{p.thread, id, status}, len(p.turnEvents)}
+}
+
+// Reconcile after the final native read: that read may have consumed a newer
+// notice than the terminal proof. Later reads require another reconciliation.
+// A previously verified child remains in scope during subsequent root reads.
+func (p *goalRPC) reconcileNativeLifecycle() error {
+	for thread, proof := range p.turnProofs {
+		if !p.scopedNativeTurnAgrees(thread, proof.ID, proof.Status) {
+			return goalError("remote-control-work-unconfirmed")
+		}
+		// A later matching notice cannot erase an intervening contradiction.
+		for _, event := range p.turnEvents[proof.Events:] {
+			if event.ThreadID == thread && (event.ID != proof.ID || event.Status != proof.Status) {
+				return goalError("remote-control-work-unconfirmed")
+			}
+		}
+	}
+	return nil
 }
