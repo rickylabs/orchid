@@ -764,6 +764,172 @@ func directIn(body *ast.BlockStmt, stmt ast.Stmt) bool {
 	return false
 }
 
+// confirmCommitValid recognizes the non-RC goal commit exactly: Lock, deferred
+// Unlock, the context decision, the two snapshots, the writes, one save, the
+// phase variable, and the before-rename branch restoring exactly those
+// snapshots. After that branch nothing reads the context or refuses.
+func confirmCommitValid(fn *ast.FuncDecl) bool {
+	list := fn.Body.List
+	if len(list) < 10 {
+		return false
+	}
+	stmt := func(s ast.Stmt) string {
+		switch x := s.(type) {
+		case *ast.ExprStmt:
+			return types.ExprString(x.X)
+		case *ast.DeferStmt:
+			return "defer " + types.ExprString(x.Call)
+		case *ast.AssignStmt:
+			if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
+				return types.ExprString(x.Lhs[0]) + " " + x.Tok.String() + " " + types.ExprString(x.Rhs[0])
+			}
+		case *ast.DeclStmt:
+			if g, ok := x.Decl.(*ast.GenDecl); ok && len(g.Specs) == 1 {
+				if v, ok := g.Specs[0].(*ast.ValueSpec); ok && len(v.Names) == 1 && v.Type != nil && len(v.Values) == 0 {
+					return "var " + v.Names[0].Name + " " + types.ExprString(v.Type)
+				}
+			}
+		case *ast.ReturnStmt:
+			parts := []string{}
+			for _, r := range x.Results {
+				parts = append(parts, types.ExprString(r))
+			}
+			return "return " + strings.Join(parts, ", ")
+		}
+		return ""
+	}
+	// The nil-guarded prompt write: `if j.NativeGoal != nil { j.NativeGoal.PromptConfirmed = <v> }`.
+	guarded := func(s ast.Stmt, value string) bool {
+		ifs, ok := s.(*ast.IfStmt)
+		return ok && ifs.Init == nil && ifs.Else == nil && types.ExprString(ifs.Cond) == "j.NativeGoal != nil" &&
+			len(ifs.Body.List) == 1 && stmt(ifs.Body.List[0]) == "j.NativeGoal.PromptConfirmed = "+value
+	}
+	decision, ok := refusingIf(list[2], "errPromptUnconfirmed")
+	if stmt(list[0]) != "c.st.mu.Lock()" || stmt(list[1]) != "defer c.st.mu.Unlock()" || !ok || types.ExprString(decision.Cond) != "ctx.Err() != nil" ||
+		stmt(list[3]) != "priorDelivery := j.GoalDelivery" || stmt(list[4]) != "priorPrompt := j.NativeGoal != nil && j.NativeGoal.PromptConfirmed" ||
+		stmt(list[5]) != `j.GoalDelivery = "confirmed"` || !guarded(list[6], "true") ||
+		stmt(list[7]) != "err := c.st.saveLocked()" || stmt(list[8]) != "var saved stateSaveError" {
+		return false
+	}
+	branch, ok := refusingIfBlock(list[9])
+	if !ok || types.ExprString(branch.Cond) != beforeRenameCond || len(branch.Body.List) != 3 ||
+		stmt(branch.Body.List[0]) != "j.GoalDelivery = priorDelivery" || !guarded(branch.Body.List[1], "priorPrompt") {
+		return false
+	}
+	// After the branch: no context veto and no refusal; the snapshots are used only
+	// by their restores; exactly one save and one Lock/Unlock pair.
+	idents := map[string]int{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			idents[id.Name]++
+		}
+		return true
+	})
+	for _, s := range list[10:] {
+		bad := false
+		ast.Inspect(s, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "ctx" {
+				bad = true
+			}
+			if r, ok := n.(*ast.ReturnStmt); ok && stmt(r) != "return nil" {
+				bad = true
+			}
+			return true
+		})
+		if bad {
+			return false
+		}
+	}
+	saves, locks := 0, 0
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			s := types.ExprString(call.Fun)
+			if s == "c.st.saveLocked" {
+				saves++
+			}
+			if strings.HasSuffix(s, ".Lock") || strings.HasSuffix(s, ".Unlock") {
+				locks++
+			}
+		}
+		return true
+	})
+	return saves == 1 && locks == 2 && idents["priorDelivery"] == 2 && idents["priorPrompt"] == 2 && idents["ctx"] == 1 // the one decision (the parameter is outside the body)
+}
+
+// confirmCallerValid (confirm-hazard V9): in spawn, the non-RC-Codex arm passes
+// the launch's own goal context, declared once in the same block, and the
+// refusal takes the existing block-and-return branch.
+func confirmCallerValid(fn *ast.FuncDecl) bool {
+	calls, gctxDecls, gctxWrites := 0, 0, 0
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			if types.ExprString(x.Fun) == "c.confirmGoalDelivery" {
+				calls++
+			}
+		case *ast.AssignStmt:
+			for _, l := range x.Lhs {
+				if id, ok := l.(*ast.Ident); ok && id.Name == "gctx" {
+					gctxWrites++
+					if x.Tok == token.DEFINE && len(x.Rhs) == 1 && types.ExprString(x.Rhs[0]) == "context.WithTimeout(ctx, 120 * time.Second)" {
+						gctxDecls++
+					}
+				}
+			}
+		}
+		return true
+	})
+	if calls != 1 || gctxDecls != 1 || gctxWrites != 1 {
+		return false
+	}
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		declared := false
+		for i, s := range block.List {
+			if as, ok := s.(*ast.AssignStmt); ok && len(as.Lhs) == 2 && types.ExprString(as.Lhs[0]) == "gctx" {
+				declared = true
+			}
+			ifs, ok := s.(*ast.IfStmt)
+			if !ok || !declared || types.ExprString(ifs.Cond) != "remoteCodex" || i+1 >= len(block.List) {
+				continue
+			}
+			arm, ok := ifs.Else.(*ast.BlockStmt)
+			if !ok || len(arm.List) != 1 {
+				continue
+			}
+			as, ok := arm.List[0].(*ast.AssignStmt)
+			if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 || types.ExprString(as.Lhs[0]) != "confirmErr" || as.Tok != token.ASSIGN ||
+				types.ExprString(as.Rhs[0]) != "c.confirmGoalDelivery(gctx, j)" {
+				continue
+			}
+			next, ok := block.List[i+1].(*ast.IfStmt)
+			if !ok || next.Init != nil || next.Else != nil || types.ExprString(next.Cond) != "confirmErr != nil" || len(next.Body.List) != 3 {
+				continue
+			}
+			body := []string{}
+			for _, b := range next.Body.List {
+				switch y := b.(type) {
+				case *ast.ExprStmt:
+					body = append(body, types.ExprString(y.X))
+				case *ast.ReturnStmt:
+					if len(y.Results) == 1 {
+						body = append(body, "return "+types.ExprString(y.Results[0]))
+					}
+				}
+			}
+			if strings.Join(body, "; ") == `gcancel(); c.blockGoalDelivery(n, j); return matrixReason("goal-prompt-unconfirmed")` {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
 func checkDeliveryInventory(src map[string]string) error {
 	counts, funcs, err := inventoryFile(src)
 	if err != nil {
@@ -773,6 +939,7 @@ func checkDeliveryInventory(src map[string]string) error {
 		"goalDeliveryUnconfirmed":   {2, 1},
 		"retryBoundGoalEligible":    {0, 1},
 		"commitRemoteCodexDelivery": {0, 1},
+		"confirmGoalDelivery":       {0, 1}, // its one snapshot read, validated below
 		"blockGoalDelivery":         {0, 0},
 		"agyBindingEligible":        {1, 0},
 		"openCodeBindingEligible":   {1, 0},
@@ -830,6 +997,15 @@ func checkDeliveryInventory(src map[string]string) error {
 	}
 	if commit := funcs["commitRemoteCodexDelivery"]; commit == nil || !commitSnapshotValid(commit) {
 		return errors.New("commit snapshot read is not bookkeeping-only")
+	}
+	if confirm := funcs["confirmGoalDelivery"]; confirm == nil || !confirmCommitValid(confirm) {
+		return errors.New("goal confirmation is not one on-time decision recorded by one save")
+	}
+	if funcs["confirmGoalDeliveryBeforeDeadline"] != nil {
+		return errors.New("post-save deadline refusal reintroduced")
+	}
+	if spawn := funcs["spawn"]; spawn == nil || !confirmCallerValid(spawn) {
+		return errors.New("goal confirmation caller does not forward its launch context to a blocking refusal")
 	}
 	retry := funcs["retryBoundGoalEligible"]
 	vetoed := false
@@ -904,6 +1080,19 @@ func TestDeliveryAuthorityInventory(t *testing.T) {
 		{"restore-after-rename", "native_codex_commit.go", "err != nil && !(errors.As(err, &saved) && saved.afterRename)", "err != nil && (errors.As(err, &saved) && saved.afterRename)", nil},
 		{"restore-before-phase-check", "native_codex_commit.go", "\t\tj.NativeGoal.PromptConfirmed = priorPrompt\n", "",
 			[][2]string{{"\tvar saved stateSaveError", "\tj.NativeGoal.PromptConfirmed = priorPrompt\n\tvar saved stateSaveError"}}},
+		// The non-RC goal commit (confirm-hazard F2/F3).
+		{"confirm-snapshot-outside-critical-section", "goal_delivery.go", "\tpriorPrompt := j.NativeGoal != nil && j.NativeGoal.PromptConfirmed\n", "",
+			[][2]string{{"func (c *Coord) confirmGoalDelivery(ctx context.Context, j *Job) error {\n", "func (c *Coord) confirmGoalDelivery(ctx context.Context, j *Job) error {\n\tpriorPrompt := j.NativeGoal != nil && j.NativeGoal.PromptConfirmed\n"}}},
+		{"confirm-second-prompt-read", "goal_delivery.go", "\tj.GoalDelivery = \"confirmed\"\n", "\t_ = j.NativeGoal != nil && j.NativeGoal.PromptConfirmed\n\tj.GoalDelivery = \"confirmed\"\n", nil},
+		{"confirm-restore-outside-branch", "goal_delivery.go", "\t\tif j.NativeGoal != nil {\n\t\t\tj.NativeGoal.PromptConfirmed = priorPrompt\n\t\t}\n", "",
+			[][2]string{{"\tif err != nil {\n\t\tlog.Printf(", "\tif j.NativeGoal != nil && err != nil {\n\t\tj.NativeGoal.PromptConfirmed = priorPrompt\n\t}\n\tif err != nil {\n\t\tlog.Printf("}}},
+		{"confirm-context-veto-after-save", "goal_delivery.go", "\treturn nil\n}", "\tif ctx.Err() != nil {\n\t\treturn errPromptUnconfirmed\n\t}\n\treturn nil\n}", nil},
+		{"confirm-decision-dropped", "goal_delivery.go", "\tif ctx.Err() != nil { // guard:confirm-decision\n\t\treturn errPromptUnconfirmed\n\t}\n", "\t_ = ctx\n", nil},
+		{"confirm-unconditional-revert", "goal_delivery.go", "if err != nil && !(errors.As(err, &saved) && saved.afterRename) { // guard:confirm-before-rename", "if err != nil { // guard:confirm-before-rename", nil},
+		{"confirm-caller-background-context", "main.go", "confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller", "confirmErr = c.confirmGoalDelivery(context.Background(), j) // guard:confirm-caller", nil},
+		{"confirm-caller-parent-context", "main.go", "confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller", "confirmErr = c.confirmGoalDelivery(ctx, j) // guard:confirm-caller", nil},
+		{"confirm-caller-refusal-not-blocked", "main.go", "\t\tif confirmErr != nil {\n\t\t\tgcancel()\n\t\t\tc.blockGoalDelivery(n, j)\n", "\t\tif confirmErr != nil {\n\t\t\tgcancel()\n\t\t\t_ = j\n", nil},
+		{"confirm-wrapper-reintroduced", "goal_delivery.go", "func (c *Coord) confirmGoalDelivery(", "func confirmGoalDeliveryBeforeDeadline(ctx context.Context, confirm func() error) error {\n\treturn confirm()\n}\n\nfunc (c *Coord) confirmGoalDelivery(", nil},
 		{"commit-snapshot-after-write", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true\n\tpriorPrompt := j.NativeGoal.PromptConfirmed", nil},
 	}
 	for _, n := range negatives {

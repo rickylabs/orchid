@@ -3299,7 +3299,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			deadline, _ := gctx.Deadline()
 			confirmErr = c.commitRemoteCodexDelivery(gctx, deadline, j)
 		} else {
-			confirmErr = confirmGoalDeliveryBeforeDeadline(gctx, func() error { return c.confirmGoalDelivery(j) })
+			confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller
 		}
 		if confirmErr != nil {
 			gcancel()

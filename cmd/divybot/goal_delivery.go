@@ -1,6 +1,10 @@
 package main
 
-import "context"
+import (
+	"context"
+	"errors"
+	"log"
+)
 
 // Registration and prompt delivery are different effects. Pending legacy Codex
 // jobs cannot acquire a completion verdict from an operator deadline either.
@@ -33,33 +37,34 @@ func (c *Coord) blockGoalDelivery(n int, j *Job) {
 	c.st.blockLaunch(n, "goal-prompt-unconfirmed")
 }
 
-func (c *Coord) confirmGoalDelivery(j *Job) error {
+// The goal commit for every job that is not Remote Control Codex. One on-time
+// decision, recorded by one save: nothing after the save can refuse, so a
+// refusal never leaves `confirmed` on disk. Before the rename the disk never
+// changed and memory gets its prior pair back; after it the pathname names
+// `confirmed`, and only its crash durability is uncertain, as for RC Codex.
+func (c *Coord) confirmGoalDelivery(ctx context.Context, j *Job) error {
 	c.st.mu.Lock()
 	defer c.st.mu.Unlock()
+	if ctx.Err() != nil { // guard:confirm-decision
+		return errPromptUnconfirmed
+	}
+	priorDelivery := j.GoalDelivery
+	priorPrompt := j.NativeGoal != nil && j.NativeGoal.PromptConfirmed
 	j.GoalDelivery = "confirmed"
 	if j.NativeGoal != nil {
 		j.NativeGoal.PromptConfirmed = true
 	}
-	if err := c.st.saveLocked(); err != nil {
-		j.GoalDelivery = "blocked"
+	err := c.st.saveLocked()
+	var saved stateSaveError
+	if err != nil && !(errors.As(err, &saved) && saved.afterRename) { // guard:confirm-before-rename
+		j.GoalDelivery = priorDelivery
 		if j.NativeGoal != nil {
-			j.NativeGoal.PromptConfirmed = false
+			j.NativeGoal.PromptConfirmed = priorPrompt
 		}
 		return errPromptUnconfirmed
 	}
-	return nil
-}
-
-// A successful save/read arriving after its budget cannot confirm a launch.
-func confirmGoalDeliveryBeforeDeadline(ctx context.Context, confirm func() error) error {
-	if ctx.Err() != nil {
-		return errPromptUnconfirmed
-	}
-	if err := confirm(); err != nil {
-		return err
-	}
-	if ctx.Err() != nil {
-		return errPromptUnconfirmed
+	if err != nil {
+		log.Printf("issue #%d: goal-delivery-durability-uncertain", j.Issue)
 	}
 	return nil
 }

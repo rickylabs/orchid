@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,6 +134,14 @@ func TestOpenCodeSpawnDeliversFullRenderedGoalOnce(t *testing.T) {
 
 func testOpenCodeFullGoalSpawn(t *testing.T, mode string) {
 	t.Helper()
+	openCodeFullGoalSpawn(t, mode, "")
+}
+
+// confirmFault faults only the goal confirmation save on the real spawn path:
+// "late-save" cancels the launch context inside it, "dir-sync" fails it after
+// the rename. Either way the on-time decision stands and the launch continues.
+func openCodeFullGoalSpawn(t *testing.T, mode, confirmFault string) {
+	t.Helper()
 	h, _, calls := openCodeHostFixture(t, mode)
 	h.SSH, h.WorkdirRoot = "fixture-host", h.Home
 	cwd := filepath.Join(h.Home, "issue-7")
@@ -171,7 +180,43 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if err := c.spawn(ctx, 7, is, h, "opencode", o, r); err != nil {
+	fired := false
+	if confirmFault != "" {
+		// The confirmation save is the first one whose job already says confirmed.
+		confirming := func() bool {
+			if j := c.st.Jobs[7]; !fired && j != nil && j.GoalDelivery == "confirmed" {
+				fired = true
+				return true
+			}
+			return false
+		}
+		c.st.fs = &stateFS{}
+		if confirmFault == "late-save" {
+			c.st.fs.hold = func(string) {
+				if confirming() {
+					cancel()
+				}
+			}
+		}
+		if confirmFault == "dir-sync" {
+			c.st.fs.syncDir = func(d *os.File) error {
+				if confirming() {
+					return errors.New("injected")
+				}
+				return d.Sync()
+			}
+		}
+	}
+	err := c.spawn(ctx, 7, is, h, "opencode", o, r)
+	if confirmFault != "" {
+		reloaded := loadState(statePath)
+		saved := reloaded.Jobs[7]
+		if !fired || err != nil || saved == nil || !deliveryConfirmed(saved) || len(reloaded.LaunchBlocks) != 0 || len(c.st.LaunchBlocks) != 0 {
+			t.Fatalf("an on-time confirmation was refused on the real caller: fault=%s fired=%v err=%v", confirmFault, fired, err)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatal("full rendered goal launch did not confirm", err)
 	}
 	goal := o.goalPreamble(r.profile) + "\n" + renderGoal(c.cfg.Inbox, "fixture/project", "fixture-target", is.Title, is.Body, cwd, "fixture/7", "", 7) + finalReportInstruction(r.dispatch.Issue, strings.Repeat("d", 64))

@@ -168,28 +168,33 @@ func TestOpenCodePrivateBindingDeadlineCannotPublish(t *testing.T) {
 	}
 }
 
-func TestGoalDeliveryDeadlineCannotConfirm(t *testing.T) {
+// The deadline is a decision-time rule: an expired budget cannot confirm, and a
+// save that finishes after the on-time decision cannot be turned into a refusal.
+func TestGoalDeliveryDecisionIsOnTime(t *testing.T) {
 	for _, phase := range []string{"", "entry", "save"} {
 		t.Run(phase, func(t *testing.T) {
+			c, j, _ := confirmFixture(t, "pending", &dispatchGoal{})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if phase == "entry" {
 				cancel()
 			}
-			calls := 0
-			err := confirmGoalDeliveryBeforeDeadline(ctx, func() error {
-				calls++
+			saves := 0
+			c.st.fs = &stateFS{hold: func(string) {
+				saves++
 				if phase == "save" {
 					cancel()
 				}
-				return nil
-			})
-			if phase == "" {
-				if err != nil || calls != 1 {
-					t.Fatal("live confirmation failed", err, calls)
+			}}
+			err := c.confirmGoalDelivery(ctx, j)
+			if phase == "entry" {
+				if err != errPromptUnconfirmed || saves != 0 || deliveryConfirmed(reloadedJob(c)) {
+					t.Fatal("expired budget confirmed a launch", err, saves)
 				}
-			} else if err != errPromptUnconfirmed || phase == "entry" && calls != 0 {
-				t.Fatal("canceled save could confirm a launch", err, calls)
+				return
+			}
+			if err != nil || saves != 1 || !deliveryConfirmed(reloadedJob(c)) {
+				t.Fatal("on-time confirmation refused or not recorded", err, saves)
 			}
 		})
 	}
