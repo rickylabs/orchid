@@ -5,29 +5,67 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // The daemon's owned Unix socket carries RFC6455, not JSONL. This bounded
 // standard-library adapter runs as the host's agent user, including over SSH.
 // Neither native identifiers nor protocol bodies are command arguments/logs.
 const canonicalCodexBridge = `import os,sys,socket,stat,struct,base64,hashlib,select
+class EndpointRefusal(Exception):pass
+def refuse(reason):raise EndpointRefusal(reason)
+def stamp(s):return (s.st_dev,s.st_ino,s.st_uid,s.st_mode,s.st_mtime_ns,s.st_ctime_ns)
+def dir_stamp(s):return (s.st_dev,s.st_ino,s.st_uid,s.st_mode)
 def run():
  home=os.environ.get('CODEX_HOME') or os.path.join(os.environ['HOME'],'.codex')
- directory=os.path.join(home,'app-server-control'); path=os.path.join(directory,'app-server-control.sock')
- d=os.lstat(directory); before=os.lstat(path); uid=os.getuid()
- if not stat.S_ISDIR(d.st_mode) or d.st_uid!=uid or stat.S_IMODE(d.st_mode)!=0o700: raise ValueError()
- if not stat.S_ISSOCK(before.st_mode) or before.st_uid!=uid or stat.S_IMODE(before.st_mode)!=0o600: raise ValueError()
+ directory=os.path.join(home,'app-server-control'); entry=os.path.join(directory,'app-server-control.sock');path=entry
+ d=os.lstat(directory); entry_before=os.lstat(entry); uid=os.getuid()
+ if not stat.S_ISDIR(d.st_mode) or d.st_uid!=uid or stat.S_IMODE(d.st_mode)!=0o700:refuse('remote-control-endpoint-directory')
+ if stat.S_ISLNK(entry_before.st_mode):
+  if entry_before.st_uid!=uid:refuse('remote-control-endpoint-entry-owner')
+  # One readlink, never recursive realpath/stat or dialing the mutable alias.
+  link=os.readlink(entry)
+  # Keep raw components, including .., for kernel lookup and the parent walk.
+  # Lexical normalization can hide missing/non-directory/symlink traversal
+  # and can even change which socket the alias names. Never collapse it.
+  path=link if os.path.isabs(link) else os.path.join(directory,link)
+ try:before=os.lstat(path)
+ except FileNotFoundError:refuse('remote-control-endpoint-dangling')
+ except NotADirectoryError:refuse('remote-control-endpoint-parent-unsafe')
+ if stat.S_ISLNK(before.st_mode):refuse('remote-control-endpoint-link-chain')
+ if not stat.S_ISSOCK(before.st_mode):refuse('remote-control-endpoint-not-socket')
+ if before.st_uid!=uid:refuse('remote-control-endpoint-socket-owner')
+ if stat.S_IMODE(before.st_mode)!=0o600:refuse('remote-control-endpoint-socket-mode')
+ # Reject symlinks in target parents too. Pin their identity, not directory
+ # timestamps: unrelated native files may legitimately change timestamps.
+ parents=[];parent=os.path.dirname(path);current=os.path.sep
+ for part in parent.split(os.path.sep)[1:]:
+  current=os.path.join(current,part);p=os.lstat(current)
+  if stat.S_ISLNK(p.st_mode):refuse('remote-control-endpoint-link-chain')
+  if not stat.S_ISDIR(p.st_mode):refuse('remote-control-endpoint-parent-unsafe')
+  parents.append((current,dir_stamp(p)))
+ p=os.lstat(parent)
+ if stat.S_IMODE(p.st_mode)&0o022:refuse('remote-control-endpoint-parent-unsafe')
+ parent_fd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ if dir_stamp(os.fstat(parent_fd))!=dir_stamp(p):refuse('remote-control-endpoint-changed')
  s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.settimeout(10);s.connect(path)
  if hasattr(socket,'SO_PEERCRED'):
-  if struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[1]!=uid: raise ValueError()
+  if struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[1]!=uid:refuse('remote-control-endpoint-peer-owner')
  elif hasattr(s,'getpeereid'):
   if s.getpeereid()[0]!=uid: raise ValueError()
  else:
   import ctypes
   peer_uid=ctypes.c_uint();peer_gid=ctypes.c_uint()
   if ctypes.CDLL(None).getpeereid(s.fileno(),ctypes.byref(peer_uid),ctypes.byref(peer_gid))!=0 or peer_uid.value!=uid:raise ValueError()
- after=os.lstat(path)
- if (before.st_dev,before.st_ino,before.st_uid,before.st_mode)!=(after.st_dev,after.st_ino,after.st_uid,after.st_mode): raise ValueError()
+ try:
+  if dir_stamp(d)!=dir_stamp(os.lstat(directory)):refuse('remote-control-endpoint-changed')
+  if stamp(entry_before)!=stamp(os.lstat(entry)):refuse('remote-control-endpoint-changed')
+  if stamp(before)!=stamp(os.lstat(path)):refuse('remote-control-endpoint-changed')
+  if dir_stamp(p)!=dir_stamp(os.fstat(parent_fd)):refuse('remote-control-endpoint-changed')
+  for name,snapshot in parents:
+   if snapshot!=dir_stamp(os.lstat(name)):refuse('remote-control-endpoint-changed')
+ except OSError:refuse('remote-control-endpoint-changed')
+ os.close(parent_fd)
  key=base64.b64encode(os.urandom(16)).decode()
  s.sendall(('GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: '+key+'\r\nSec-WebSocket-Version: 13\r\n\r\n').encode())
  data=bytearray()
@@ -83,8 +121,46 @@ def run():
    if b'\n' in body or b'\r' in body:raise ValueError()
    sys.stdout.buffer.write(body+b'\n');sys.stdout.buffer.flush()
 try:run()
-except Exception:sys.exit(2)
+except EndpointRefusal as e:sys.stderr.write(str(e)+'\n');sys.exit(2)
+except Exception:sys.stderr.write('remote-control-endpoint-unavailable\n');sys.exit(2)
 `
+
+// Read only after the helper has been joined. Unknown or excessive native/SSH
+// stderr cannot become a public diagnostic; only these exact closed codes can.
+type remoteBridgeDiagnostic struct {
+	body     []byte
+	overflow bool
+}
+
+func (d *remoteBridgeDiagnostic) Write(b []byte) (int, error) {
+	n := len(b)
+	if len(d.body)+n > 128 {
+		d.overflow = true
+	}
+	if left := 128 - len(d.body); left > 0 {
+		if len(b) > left {
+			b = b[:left]
+		}
+		d.body = append(d.body, b...)
+	}
+	return n, nil
+}
+
+func (d *remoteBridgeDiagnostic) reason() error {
+	if d.overflow {
+		return nil
+	}
+	switch string(d.body) {
+	case "remote-control-endpoint-directory\n", "remote-control-endpoint-entry-owner\n",
+		"remote-control-endpoint-dangling\n", "remote-control-endpoint-link-chain\n",
+		"remote-control-endpoint-not-socket\n", "remote-control-endpoint-socket-owner\n",
+		"remote-control-endpoint-socket-mode\n", "remote-control-endpoint-parent-unsafe\n",
+		"remote-control-endpoint-changed\n", "remote-control-endpoint-peer-owner\n",
+		"remote-control-endpoint-unavailable\n":
+		return goalError(strings.TrimSuffix(string(d.body), "\n"))
+	}
+	return nil
+}
 
 func (h Host) withCanonicalConnection(ctx context.Context, thread string, use func(*goalRPC) error) error {
 	if ctx.Err() != nil || (thread != "" && !privateNativeID(thread)) {
@@ -121,13 +197,30 @@ func (h Host) withGoalScript(ctx context.Context, script, thread string, use fun
 	if e != nil {
 		return goalError("goal-transport-unavailable")
 	}
+	var diagnostic remoteBridgeDiagnostic
+	cmd.Stderr = &diagnostic
 	if cmd.Start() != nil {
 		return goalError("goal-transport-unavailable")
 	}
-	defer func() { _ = in.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	joined := false
+	join := func() {
+		if !joined {
+			_ = in.Close()
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			joined = true
+		}
+	}
+	defer join()
 	p := newGoalRPC(in, out, thread)
 	p.ctx = ctx
 	if e := p.initialize(); e != nil {
+		join()
+		if ctx.Err() == nil {
+			if reason := diagnostic.reason(); reason != nil {
+				return reason
+			}
+		}
 		return e
 	}
 	if ctx.Err() != nil {
