@@ -82,6 +82,7 @@ type Host struct {
 	RemoteControl  *RemoteControlConfig `json:"-"`
 	CanonicalCodex bool                 `json:"-"`
 	RemoteRun      *remoteControlRun    `json:"-"`
+	ShadowScope    *nativeShadowScope   `json:"-"`
 	Name           string               `json:"name"`
 	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
 	Key            string               `json:"key"`          // ssh key path; "" = default/agent
@@ -2096,8 +2097,9 @@ type Coord struct {
 	st          *State
 	auth        *AuthStore
 	hosts       map[string]Host
-	actions     actionCalls // injected only by action-delivery tests
-	dry         bool        // dry-run: log spawn/adopt decisions, take no spawning action
+	actions     actionCalls           // injected only by action-delivery tests
+	shadow      *nativeEvidenceShadow // private observation-only; never consulted
+	dry         bool                  // dry-run: log spawn/adopt decisions, take no spawning action
 	gov         struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
@@ -2146,7 +2148,7 @@ func newCoord(cfg *Config) *Coord {
 	for _, h := range cfg.Hosts {
 		hosts[h.Name] = h
 	}
-	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts}
+	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now)}
 }
 
 func (c *Coord) run(ctx context.Context) {

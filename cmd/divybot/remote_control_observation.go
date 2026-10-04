@@ -63,6 +63,7 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 	if j == nil || j.RemoteControl == nil || (j.Agent != "codex" && j.Agent != "claude") {
 		return
 	}
+	h.ShadowScope = c.shadow.scope(j)
 	check, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	owner, err := configuredReceiptOwner(c.cfg.Matrix)
@@ -90,6 +91,7 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 	} else {
 		name = h.observedClaudeName(check, j.RemoteControl)
 	}
+	c.shadow.compare(j, shadowSiteConnection, state, remoteProofInputs(j))
 	latest, latestID, bindingErr := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
 	if bindingErr != nil || latestID != id || !reflect.DeepEqual(latest.dispatch, r.dispatch) || check.Err() != nil {
 		c.clearRemoteControl(j)
@@ -105,18 +107,38 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 // a conflict. The invocation-only attached-thread footer also remains exact;
 // an absent daemon-inherited hook is not fabricated into an official report.
 func (c *Coord) checkRemoteHook(ctx context.Context, h Host, j *Job) bool {
-	if j == nil || j.RemoteControl == nil || j.Agent != "codex" {
+	if j == nil || j.RemoteControl == nil {
 		return true
+	}
+	h.ShadowScope = c.shadow.scope(j)
+	ok, inputs := c.checkRemoteHookToday(ctx, h, j)
+	verdict := "refuse"
+	if ok {
+		verdict = "pass"
+	}
+	c.shadow.compare(j, shadowSiteRemoteHook, verdict, inputs)
+	return ok
+}
+
+// Today's decision, unchanged; it only also names the inputs it consumed.
+func (c *Coord) checkRemoteHookToday(ctx context.Context, h Host, j *Job) (bool, []string) {
+	if j.Agent != "codex" {
+		return true, []string{shadowInputUnchecked}
+	}
+	herdrOnly := []string{shadowInputHerdrAgent}
+	attached := []string{shadowInputHerdrAgent, shadowInputScreenFooter}
+	if j.RemoteControl.IdentitySource == "codex-native-status" {
+		attached = append(attached, shadowInputTUIProcess)
 	}
 	check, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	out, err := h.herdr(check, "agent", "get", j.Pane)
 	if err != nil || check.Err() != nil {
-		return false
+		return false, herdrOnly
 	}
 	raw, err := herdrUnwrap(out)
 	if err != nil {
-		return false
+		return false, herdrOnly
 	}
 	id, reason := nativeSessionFromResponse(raw, "agent_info", j.Agent, j.Label, &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace})
 	if reason == nativeUnavailable {
@@ -124,13 +146,13 @@ func (c *Coord) checkRemoteHook(ctx context.Context, h Host, j *Job) bool {
 			if err == goalError("remote-control-hook-mismatch") {
 				c.blockRemoteMismatch(ctx, h, j)
 			}
-			return false
+			return false, attached
 		}
-		return true
+		return true, attached
 	}
 	if reason != "" || id != j.RemoteControl.NativeSessionID {
 		c.blockRemoteMismatch(ctx, h, j)
-		return false
+		return false, herdrOnly
 	}
 	if !j.RemoteControl.HookConfirmed {
 		c.st.mu.Lock()
@@ -142,9 +164,21 @@ func (c *Coord) checkRemoteHook(ctx context.Context, h Host, j *Job) bool {
 		if err == goalError("remote-control-hook-mismatch") {
 			c.blockRemoteMismatch(ctx, h, j)
 		}
-		return false
+		return false, attached
 	}
-	return true
+	return true, attached
+}
+
+// Inputs today's Remote Control connection proof consumes for this vendor.
+func remoteProofInputs(j *Job) []string {
+	if j.Agent != "codex" {
+		return []string{shadowInputHerdrAgent, shadowInputScreenFooter}
+	}
+	inputs := []string{shadowInputHerdrAgent, shadowInputScreenFooter, shadowInputCodexStatus}
+	if j.RemoteControl.IdentitySource == "codex-native-status" {
+		inputs = append(inputs, shadowInputTUIProcess)
+	}
+	return inputs
 }
 
 func (c *Coord) blockRemoteMismatch(ctx context.Context, h Host, j *Job) {

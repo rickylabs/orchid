@@ -170,7 +170,9 @@ func (h Host) withCanonicalConnection(ctx context.Context, thread string, use fu
 		return goalError("remote-control-binding-invalid")
 	}
 	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s", shq(h.agentHome()), shq(canonicalCodexBridge))
-	return h.withGoalScript(ctx, script, thread, func(p *goalRPC) error {
+	return h.withGoalScript(ctx, script, thread, func(p *goalRPC) (err error) {
+		p.shadow = h.ShadowScope.open(shadowCodexCanonical, thread)
+		defer func() { p.shadow.close(err) }()
 		if h.RemoteRun != nil {
 			if err := p.verifyRemoteThread(h.RemoteRun, false); err != nil {
 				return err
@@ -238,7 +240,11 @@ func (p *goalRPC) remoteConnected() error {
 	var status struct {
 		Status string `json:"status"`
 	}
-	if err != nil || decodeNativeJSON(raw, &status) != nil || status.Status != "connected" {
+	decoded := err == nil && decodeNativeJSON(raw, &status) == nil
+	if decoded {
+		p.shadow.connection(status.Status == "connected")
+	}
+	if !decoded || status.Status != "connected" {
 		return goalError("remote-control-unconfirmed")
 	}
 	return nil

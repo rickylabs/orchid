@@ -49,6 +49,7 @@ type goalRPC struct {
 	updates    []*nativeGoal
 	turnEvents []remoteNativeTurn
 	turnProofs map[string]remoteNativeTurnProof
+	shadow     *shadowPublisher
 }
 
 func newGoalRPC(input io.Writer, output io.Reader, thread string) *goalRPC {
