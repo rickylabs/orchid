@@ -22,10 +22,13 @@ def function_replace(code, function, old, new):
 
 # File, function (or whole file), exact anchor, replacement, focused control.
 MUTANTS = [
+    ('endpoint-raw-component-recheck', 'remote_control_transport.go', None, "if snapshot!=dir_stamp(os.lstat(name)):refuse('remote-control-endpoint-changed')", 'if False:pass', 'TestRemoteControlRawComponentRecheckedAfterConnect'),
+    ('endpoint-raw-components', 'remote_control_transport.go', None, 'path=link if os.path.isabs(link) else os.path.join(directory,link)', 'path=os.path.abspath(link if os.path.isabs(link) else os.path.join(directory,link))', 'TestRemoteControlCanonicalAliasPreservesRawComponents'),
+    ('endpoint-component-directory-reason', 'remote_control_transport.go', None, "except NotADirectoryError:refuse('remote-control-endpoint-parent-unsafe')", 'except NotADirectoryError:raise ValueError()', 'TestRemoteControlCanonicalAliasPreservesRawComponents/file-dotdot'),
     ('endpoint-link-owner', 'remote_control_transport.go', None, 'entry_before.st_uid!=uid', 'entry_before.st_uid<0', 'TestRemoteControlCanonicalEndpoint/foreign-link'),
     ('endpoint-target-owner', 'remote_control_transport.go', None, 'if before.st_uid!=uid:', 'if before.st_uid<0:', 'TestRemoteControlCanonicalEndpoint/foreign-target'),
     ('endpoint-target-mode', 'remote_control_transport.go', None, 'stat.S_IMODE(before.st_mode)!=0o600', 'False', 'TestRemoteControlCanonicalEndpoint/socket-0660'),
-    ('endpoint-recursive-link', 'remote_control_transport.go', None, 'path=os.path.abspath(link if os.path.isabs(link) else os.path.join(directory,link))', 'path=os.path.realpath(link if os.path.isabs(link) else os.path.join(directory,link))', 'TestRemoteControlCanonicalEndpoint/chain'),
+    ('endpoint-recursive-link', 'remote_control_transport.go', None, 'path=link if os.path.isabs(link) else os.path.join(directory,link)', 'path=os.path.realpath(link if os.path.isabs(link) else os.path.join(directory,link))', 'TestRemoteControlCanonicalEndpoint/chain'),
     ('endpoint-readlink-once', 'remote_control_transport.go', None, 'link=os.readlink(entry)', 'link=os.readlink(entry);link=os.readlink(entry)', 'TestRemoteControlCanonicalEndpoint/single-read'),
     ('endpoint-dial-resolved', 'remote_control_transport.go', None, 's.connect(path)', 's.connect(entry)', 'TestRemoteControlCanonicalEndpoint/dial-resolved'),
     ('endpoint-socket-type', 'remote_control_transport.go', None, 'not stat.S_ISSOCK(before.st_mode)', 'False', 'TestRemoteControlCanonicalEndpoint/non-socket'),

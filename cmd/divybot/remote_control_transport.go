@@ -25,9 +25,13 @@ def run():
   if entry_before.st_uid!=uid:refuse('remote-control-endpoint-entry-owner')
   # One readlink, never recursive realpath/stat or dialing the mutable alias.
   link=os.readlink(entry)
-  path=os.path.abspath(link if os.path.isabs(link) else os.path.join(directory,link))
+  # Keep raw components, including .., for kernel lookup and the parent walk.
+  # Lexical normalization can hide missing/non-directory/symlink traversal
+  # and can even change which socket the alias names. Never collapse it.
+  path=link if os.path.isabs(link) else os.path.join(directory,link)
  try:before=os.lstat(path)
  except FileNotFoundError:refuse('remote-control-endpoint-dangling')
+ except NotADirectoryError:refuse('remote-control-endpoint-parent-unsafe')
  if stat.S_ISLNK(before.st_mode):refuse('remote-control-endpoint-link-chain')
  if not stat.S_ISSOCK(before.st_mode):refuse('remote-control-endpoint-not-socket')
  if before.st_uid!=uid:refuse('remote-control-endpoint-socket-owner')
