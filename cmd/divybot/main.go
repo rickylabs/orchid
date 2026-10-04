@@ -3009,6 +3009,21 @@ func renderGoal(inbox, targetRepo, label, title, body, workdir, branch, hint str
 	).Replace(workerPrompt)
 }
 
+// workerGoal assembles the launched worker's goal: operator directives with the pinned
+// Harness profile, the rendered task, and the final-report contract.
+func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, runMode bool, commentKey string, ovr Overrides, receipt *durableMatrixReceipt) string {
+	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
+	if runMode {
+		goal += finalCommentBodyInstruction(commentKey)
+	} else {
+		goal += finalReportInstruction(receipt.dispatch.Issue, commentKey)
+	}
+	if pre := ovr.goalPreamble(receipt.profile); pre != "" {
+		goal = pre + "\n" + goal
+	}
+	return goal
+}
+
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
 	if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
 		return matrixReason(reason)
@@ -3105,15 +3120,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	commentKey := strings.TrimPrefix(receipt.dispatch.RunID, "orchid-")
-	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
-	if runMode {
-		goal += finalCommentBodyInstruction(commentKey)
-	} else {
-		goal += finalReportInstruction(receipt.dispatch.Issue, commentKey)
-	}
-	if pre := ovr.goalPreamble(); pre != "" {
-		goal = pre + "\n" + goal
-	}
+	goal := c.workerGoal(n, is, tgt, workdir, branch, runMode, commentKey, ovr, receipt)
 	if opencodeClass {
 		// opencode's bundled runtime extracts a .so into $TMPDIR and dlopens it;
 		// /ephemeral/tmp (the compose default TMPDIR) is a noexec tmpfs, so the

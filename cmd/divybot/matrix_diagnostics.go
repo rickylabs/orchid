@@ -39,7 +39,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"grant-conflict":               {"matrix.grants", "Remove duplicate matching grants or correct tier/role conflicts."},
 	"pin-invalid":                  {"matrix.pins", "Configure the named pin and do not combine it with direct model/effort fields."},
 	"profile-invalid":              {"issue.profile", "Use a valid profile name and a compatible routing row."},
-	"profile-unavailable":          {"matrix.target_revisions", "Ensure the selected profile exists at the pinned target revision and is readable."},
+	"profile-unavailable":          {"matrix.profile_revision", "Ensure the selected profile exists in the Harness repository at matrix.profile_revision (matrix.revision when unset) and is readable."},
 	"override-worklog-unavailable": {"matrix.grants.ownerMatrixOverride.worklogPath", "Ensure the override worklog is readable at the pinned target revision."},
 	"authorization-required":       {"matrix.grants.authorization", "Add a matching brief-bound privileged-tier authorization with a named authorizer and rationale."},
 	"authorization-invalid":        {"matrix.grants.authorization", "Correct the authorizer or rationale in the matching grant."},

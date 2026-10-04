@@ -173,23 +173,25 @@ func TestRetryPinTupleRequiresEverySourceField(t *testing.T) {
 	budget := int64(100)
 	base := retryExpectation{OperationID: testActionID, Tier: "feature", Role: "implementation", Dispatch: dispatchBinding{
 		State: "dispatched", Source: "codex", Provider: "fixture", Model: "fixture-model", Effort: "high", Profile: "leaf",
-		ProfileRevision: strings.Repeat("a", 40), MatrixSource: matrixSourceRepository, MatrixRevision: strings.Repeat("b", 40), Host: "fixture-host", TokenBudget: &budget, BudgetSource: "route"}}
-	cfg := MatrixConfig{Revision: strings.Repeat("b", 40)}
+		ProfileRevision: strings.Repeat("b", 40), MatrixSource: matrixSourceRepository, MatrixRevision: strings.Repeat("b", 40), Host: "fixture-host", TokenBudget: &budget, BudgetSource: "route"}}
+	cfg := MatrixConfig{Revision: strings.Repeat("b", 40), TargetRevisions: map[string]string{"example/work": strings.Repeat("a", 40)}}
 	route := matrixRoute{Transport: "codex", Provider: "fixture", Model: "fixture-model", Effort: "high", Tier: "feature", Role: "implementation", TokenBudget: &budget, BudgetSource: "route"}
 	host := Host{Name: "fixture-host"}
-	if !retryPinsMatch(base, cfg, strings.Repeat("a", 40), "leaf", route, host) {
+	if !retryPinsMatch(base, cfg, "leaf", route, host) {
 		t.Fatal("exact tuple refused")
 	}
 	for _, mutate := range []func(*retryExpectation){
 		func(v *retryExpectation) { v.Dispatch.Model = "other" }, func(v *retryExpectation) { v.Dispatch.Effort = "low" },
 		func(v *retryExpectation) { v.Dispatch.ProfileRevision = strings.Repeat("c", 40) }, func(v *retryExpectation) { v.Dispatch.MatrixRevision = strings.Repeat("c", 40) },
+		// A receipt that pinned the profile at the target revision predates Harness profiles.
+		func(v *retryExpectation) { v.Dispatch.ProfileRevision = cfg.TargetRevisions["example/work"] },
 		func(v *retryExpectation) { v.Dispatch.MatrixSource = "" },
 		func(v *retryExpectation) { v.Dispatch.Host = "other" }, func(v *retryExpectation) { v.Dispatch.TokenBudget = goalInt(101) },
 		func(v *retryExpectation) { v.Tier = "architecture" }, func(v *retryExpectation) { v.Role = "plan" },
 	} {
 		v := base
 		mutate(&v)
-		if retryPinsMatch(v, cfg, strings.Repeat("a", 40), "leaf", route, host) {
+		if retryPinsMatch(v, cfg, "leaf", route, host) {
 			t.Fatal("pin drift accepted")
 		}
 	}
@@ -207,7 +209,7 @@ func TestRetryMatrixAttemptRefusesDriftBeforePersistence(t *testing.T) {
 	route := syntheticRoute()
 	expected := retryExpectation{OperationID: testActionID, Tier: route.Tier, Role: route.Role, Dispatch: dispatchBinding{
 		State: "dispatched", Source: route.Transport, Provider: route.Provider, Model: route.Model, Effort: route.Effort,
-		Profile: "leaf", ProfileRevision: cfg.Matrix.TargetRevisions[dept.Repo], MatrixSource: matrixSourceRepository, MatrixRevision: cfg.Matrix.Revision,
+		Profile: "leaf", ProfileRevision: cfg.Matrix.Revision, MatrixSource: matrixSourceRepository, MatrixRevision: cfg.Matrix.Revision,
 		Host: "fixture-node", BudgetSource: "unset"}}
 	makeDeps := func(e *retryExpectation, persisted *bool, refusal *matrixRefusal) matrixAttemptDeps {
 		return matrixAttemptDeps{retry: e, preflight: true,

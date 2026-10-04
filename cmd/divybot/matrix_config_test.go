@@ -51,7 +51,7 @@ func TestMatrixConfigCLI(t *testing.T) {
 	if os.Mkdir(bin, 0700) != nil {
 		t.Fatal("fixture setup")
 	}
-	script := "#!/bin/sh\ncase \"$*\" in\n 'issue view 1 --repo example/inbox --json id,number,title,body') cat " + shq(issueFile) + ";;\n 'api repos/example/project/commits/HEAD --jq .sha') printf '%s\\n' '" + strings.Repeat("a", 40) + "';;\n 'api repos/example/project/contents/profiles/leaf.md?ref=" + strings.Repeat("a", 40) + "') printf '%s' '{\"content\":\"fCBgcm91dGluZ2AgfCBtYXRyaXggYGltcGxlbWVudGF0aW9uYCByb3cgfA==\",\"encoding\":\"base64\",\"type\":\"file\"}';;\n *) exit 90;;\nesac\n"
+	script := "#!/bin/sh\ncase \"$*\" in\n 'issue view 1 --repo example/inbox --json id,number,title,body') cat " + shq(issueFile) + ";;\n 'api repos/example/project/commits/HEAD --jq .sha') printf '%s\\n' '" + strings.Repeat("a", 40) + "';;\n 'api repos/rickylabs/harness/contents/profiles/leaf.md?ref=" + source.Revision + "') printf '%s' '{\"content\":\"fCBgcm91dGluZ2AgfCBtYXRyaXggYGltcGxlbWVudGF0aW9uYCByb3cgfA==\",\"encoding\":\"base64\",\"type\":\"file\"}';;\n *) exit 90;;\nesac\n"
 	writeFixture(t, filepath.Join(bin, "gh"), script)
 	os.Chmod(filepath.Join(bin, "gh"), 0700)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
