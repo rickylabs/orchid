@@ -449,6 +449,10 @@ func TestAcceptanceJournalIdentity(t *testing.T) {
 		}
 		path := filepath.Join(h.dir, original.Journal)
 		b, _ := os.ReadFile(path)
+		_ = os.WriteFile(path, b[:len(b)-1], 0600) // only the final newline removed
+		if verifyDeliveryEvidence(h.dir, nil) {
+			t.Fatal("verifier accepted an unterminated final record")
+		}
 		_ = os.WriteFile(path, b[:len(b)/2], 0600)
 		if verifyDeliveryEvidence(h.dir, nil) {
 			t.Fatal("verifier accepted a truncated journal")
@@ -1121,5 +1125,87 @@ func TestAcceptancePrivacy(t *testing.T) {
 		if strings.Contains(string(b), canary) {
 			t.Fatalf("readout carries a private value: %q", canary)
 		}
+	}
+}
+
+// F1/F3: absent native fields and malformed post-fence notices never count as
+// success on the real transport and bridge.
+func TestAcceptanceMissingNativeFieldsRefuse(t *testing.T) {
+	t.Run("turn-error-absent", func(t *testing.T) {
+		h := newAccHarness(t)
+		h.newTurn(func(sent string) []any {
+			turn := accTurn(accNewTurn, "inProgress", accUser(sent))
+			delete(turn, "error")
+			return []any{turn}
+		})
+		accRefused(t, h, h.accept(accSent), "")
+		if verifyDeliveryEvidence(h.dir, nil) {
+			t.Fatal("audit verifier accepted evidence for a refused delivery")
+		}
+	})
+	t.Run("next-cursor-absent", func(t *testing.T) {
+		h := newAccHarness(t)
+		h.f.reply = func(f *accFixture, method string, _ map[string]any, full int) *accReply {
+			if full < 0 {
+				return nil
+			}
+			turns, _ := accDefaultPage(f, full)
+			body, _ := json.Marshal(map[string]any{"data": turns})
+			return &accReply{raw: append(append([]byte(`{"id":%ID%,"result":`), body...), '}')}
+		}
+		accRefused(t, h, h.accept(accSent), "")
+	})
+	for name, status := range map[string]any{"unknown": "unknown-status", "absent": nil, "empty": ""} {
+		t.Run("post-fence-status-"+name, func(t *testing.T) {
+			h := newAccHarness(t)
+			n := accNotice("turn/completed", h.acc.run.NativeSessionID, accNewTurn, "completed")
+			turn := n["params"].(map[string]any)["turn"].(map[string]any)
+			if status == nil {
+				delete(turn, "status")
+			} else {
+				turn["status"] = status
+			}
+			b, _ := json.Marshal(n)
+			accAfterFence(h, nil, [][]byte{b})
+			accRefused(t, h, h.accept(accSent), "drain")
+		})
+	}
+}
+
+// F2: the committed page record carries the decision evidence, and different
+// observed inputs produce different committed records.
+func TestAcceptanceJournalCarriesDecisionEvidence(t *testing.T) {
+	var pages [][]byte
+	for _, matching := range []bool{true, false} {
+		h := newAccHarness(t)
+		h.newTurn(func(sent string) []any {
+			if !matching {
+				sent = "different command"
+			}
+			return []any{accTurn(accNewTurn, "inProgress", accUser(sent))}
+		})
+		err := h.accept(accSent)
+		if (err == nil) != matching {
+			t.Fatalf("decision unexpected: %v", err)
+		}
+		for _, r := range h.journal() {
+			if r.Kind != "page" {
+				continue
+			}
+			if r.Page == nil || len(r.Page.Turns) == 0 {
+				t.Fatal("committed page lacks decision evidence")
+			}
+			ev := r.Page.Turns[0]
+			sum := sha256.Sum256([]byte(accSent))
+			if matching && (ev.InputDigest != hex.EncodeToString(sum[:]) || ev.InputLength != len(accSent) || !ev.ErrorNull || ev.Status != "inProgress") {
+				t.Fatalf("committed evidence incomplete: %+v", ev)
+			}
+			b, _ := json.Marshal(r)
+			pages = append(pages, b)
+			break
+		}
+	}
+	if len(pages) != 2 || bytes.Equal(pages[0], pages[1]) {
+		t.Fatal("different observed inputs share one committed decision record")
 	}
 }

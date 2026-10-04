@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -10,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -174,9 +174,9 @@ func readDeliveryReceipt(dir string, owner *receiptOwner) (deliveryReceipt, erro
 	if st.Size() > acceptanceMaxRecord { // guard:receipt-size
 		return r, errors.New("delivery-receipt-invalid")
 	}
-	b := make([]byte, acceptanceMaxRecord+1)
-	n, _ := f.Read(b)
-	if n > acceptanceMaxRecord {
+	b, err := io.ReadAll(io.LimitReader(f, acceptanceMaxRecord+1))
+	n := len(b)
+	if err != nil || n > acceptanceMaxRecord {
 		return r, errors.New("delivery-receipt-invalid")
 	}
 	if strictJSON(b[:n], &r) != nil { // guard:receipt-strict
@@ -216,15 +216,16 @@ func updateDeliveryReceipt(dir string, r deliveryReceipt, owner *receiptOwner, f
 }
 
 type journalRecord struct {
-	Seq        int      `json:"seq"`
-	Kind       string   `json:"kind"`
-	Generation string   `json:"generation,omitempty"`
-	Command    string   `json:"command,omitempty"`
-	Turn       string   `json:"turn,omitempty"`
-	Status     string   `json:"status,omitempty"`
-	Class      string   `json:"class,omitempty"`
-	Turns      []string `json:"turns,omitempty"`
-	Outcome    string   `json:"outcome,omitempty"`
+	Seq        int           `json:"seq"`
+	Kind       string        `json:"kind"`
+	Generation string        `json:"generation,omitempty"`
+	Command    string        `json:"command,omitempty"`
+	Turn       string        `json:"turn,omitempty"`
+	Status     string        `json:"status,omitempty"`
+	Class      string        `json:"class,omitempty"`
+	Turns      []string      `json:"turns,omitempty"`
+	Page       *pageEvidence `json:"page,omitempty"`
+	Outcome    string        `json:"outcome,omitempty"`
 }
 
 // Append-only contiguous journal. A record is a decision input only after its
@@ -270,21 +271,32 @@ func createDeliveryJournal(dir, name, generation, command string, owner *receipt
 }
 
 func (j *deliveryJournal) append(r journalRecord) error {
+	_, err := j.commit(r)
+	return err
+}
+
+// commit appends one record and returns the copy decoded from the exact bytes
+// that were fsynced: the decision consumes only this committed copy.
+func (j *deliveryJournal) commit(r journalRecord) (journalRecord, error) {
+	var committed journalRecord
 	r.Seq = j.seq + 1
 	b, err := json.Marshal(r)
 	if err != nil || len(b) > acceptanceMaxRecord {
-		return errors.New("delivery-journal-invalid")
+		return committed, errors.New("delivery-journal-invalid")
 	}
 	b = append(b, '\n')
 	if _, err = j.f.Write(b); err != nil {
-		return err
+		return committed, err
 	}
 	if err = j.fs.fileSync("journal-"+r.Kind, j.f); err != nil { // guard:journal-fsync
-		return err
+		return committed, err
 	}
 	j.seq = r.Seq
 	j.digest.Write(b)
-	return nil
+	if strictJSON(b[:len(b)-1], &committed) != nil || committed.Seq != r.Seq {
+		return committed, errors.New("delivery-journal-invalid")
+	}
+	return committed, nil
 }
 
 func (j *deliveryJournal) close() {
@@ -328,25 +340,28 @@ func readJournalBytes(f *os.File) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Parse the first n contiguous records and return the sha256 of their bytes.
+// Parse the first n contiguous, newline-terminated records and return the
+// sha256 of exactly those persisted bytes.
 func parseJournal(body []byte, n int) ([]journalRecord, string, error) {
 	var records []journalRecord
 	h := sha256.New()
-	scan := bufio.NewScanner(bytes.NewReader(body))
-	scan.Buffer(make([]byte, 4096), acceptanceMaxRecord+1)
-	for len(records) < n && scan.Scan() {
+	offset := 0
+	for len(records) < n {
+		end := bytes.IndexByte(body[offset:], '\n')
+		if end < 0 { // guard:journal-terminated
+			return nil, "", errors.New("delivery-journal-invalid")
+		}
+		line := body[offset : offset+end]
 		var r journalRecord
-		if strictJSON(scan.Bytes(), &r) != nil || r.Seq != len(records)+1 { // guard:journal-seq
+		if strictJSON(line, &r) != nil || r.Seq != len(records)+1 { // guard:journal-seq
 			return nil, "", errors.New("delivery-journal-invalid")
 		}
 		if len(records) == 0 && r.Kind != "header" {
 			return nil, "", errors.New("delivery-journal-invalid")
 		}
-		h.Write(append(append([]byte(nil), scan.Bytes()...), '\n'))
+		h.Write(body[offset : offset+end+1]) // guard:journal-exact-bytes
+		offset += end + 1
 		records = append(records, r)
-	}
-	if len(records) != n {
-		return nil, "", errors.New("delivery-journal-invalid")
 	}
 	return records, hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -373,76 +388,190 @@ func verifyDeliveryEvidence(dir string, owner *receiptOwner) bool {
 	return prefix == r.PrefixSha256 // guard:verify-digest
 }
 
-// ---- native page decoding and classification ----
+// ---- strict native decoding into decision evidence ----
+//
+// Every field the decision depends on must be present with the expected JSON
+// type. The pinned producer always serializes Turn.error, Turn.itemsView and
+// ThreadTurnsListResponse.nextCursor (null when empty), so absence is never
+// read as "no error" or "no more pages": missing, empty, malformed or
+// truncated input is a SOURCE-GAP.
 
-type nativeTurnRow struct {
-	ID        string
-	Status    string
-	ItemsView string
-	Failed    bool
-	Items     []json.RawMessage
-}
-
-type turnPage struct {
-	Turns      []nativeTurnRow
-	CursorNull bool
-}
-
-func decodeTurnPage(raw json.RawMessage, full bool) (turnPage, error) {
-	var v struct {
-		Data       *[]json.RawMessage `json:"data"`
-		NextCursor json.RawMessage    `json:"nextCursor"`
+// nativeObject strictly decodes a JSON object and requires every named key.
+func nativeObject(raw json.RawMessage, keys ...string) (map[string]json.RawMessage, bool) {
+	var m map[string]json.RawMessage
+	if decodeNativeJSON(raw, &m) != nil || m == nil {
+		return nil, false
 	}
-	var page turnPage
-	if decodeNativeJSON(raw, &v) != nil || v.Data == nil || len(*v.Data) > acceptancePageK { // guard:page-strict
+	for _, k := range keys {
+		if _, ok := m[k]; !ok { // guard:require-keys
+			return nil, false
+		}
+	}
+	return m, true
+}
+
+func nativeIsNull(raw json.RawMessage) bool { return strings.TrimSpace(string(raw)) == "null" }
+
+// nativeText decodes a JSON string; empty is refused unless allowed.
+func nativeText(raw json.RawMessage, allowEmpty bool) (string, bool) {
+	var s string
+	if json.Unmarshal(raw, &s) != nil || nativeIsNull(raw) { // guard:require-string
+		return "", false
+	}
+	return s, allowEmpty || s != "" // guard:require-nonempty
+}
+
+func nativeArray(raw json.RawMessage) ([]json.RawMessage, bool) {
+	var a []json.RawMessage
+	if nativeIsNull(raw) || json.Unmarshal(raw, &a) != nil || a == nil { // guard:require-array
+		return nil, false
+	}
+	return a, true
+}
+
+// Privacy-preserving decision evidence for one turn: the observed input is
+// represented by its digest and length, never its bytes.
+type turnEvidence struct {
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	ErrorNull   bool   `json:"errorNull"`
+	ItemsView   string `json:"itemsView"`
+	Items       int    `json:"items"`
+	Users       int    `json:"users"`
+	FirstType   string `json:"firstType,omitempty"`
+	Parts       int    `json:"parts"`
+	PartType    string `json:"partType,omitempty"`
+	InputDigest string `json:"inputDigest,omitempty"`
+	InputLength int    `json:"inputLength"`
+}
+
+type pageEvidence struct {
+	Turns      []turnEvidence `json:"turns"`
+	CursorNull bool           `json:"cursorNull"`
+}
+
+func decodeTurnPage(raw json.RawMessage, full bool) (pageEvidence, error) {
+	var page pageEvidence
+	v, ok := nativeObject(raw, "data", "nextCursor")
+	if !ok {
 		return page, deliveryGap("page")
 	}
-	switch c := strings.TrimSpace(string(v.NextCursor)); {
-	case c == "" || c == "null":
-		page.CursorNull = true
-	default:
-		var s string
-		if json.Unmarshal(v.NextCursor, &s) != nil || s == "" || len(s) > 1024 { // guard:page-cursor
-			return page, deliveryGap("cursor")
-		}
+	data, ok := nativeArray(v["data"])
+	if !ok || len(data) > acceptancePageK { // guard:page-strict
+		return page, deliveryGap("page")
 	}
+	if nativeIsNull(v["nextCursor"]) {
+		page.CursorNull = true
+	} else if s, ok := nativeText(v["nextCursor"], false); !ok || len(s) > 1024 { // guard:page-cursor
+		return page, deliveryGap("cursor")
+	}
+	page.Turns = []turnEvidence{}
 	seen := map[string]bool{}
-	for _, item := range *v.Data {
-		var t struct {
-			ID        *string            `json:"id"`
-			Status    *string            `json:"status"`
-			ItemsView string             `json:"itemsView"`
-			Error     json.RawMessage    `json:"error"`
-			Items     *[]json.RawMessage `json:"items"`
+	for _, item := range data {
+		t, err := decodeTurnEvidence(item, full)
+		if err != nil {
+			return page, err
 		}
-		if decodeNativeJSON(item, &t) != nil || t.ID == nil || t.Status == nil || t.Items == nil {
-			return page, deliveryGap("page")
-		}
-		if !privateNativeID(*t.ID) { // guard:page-id
+		if seen[t.ID] { // guard:page-unique
 			return page, deliveryGap("id")
 		}
-		if seen[*t.ID] { // guard:page-unique
-			return page, deliveryGap("id")
-		}
-		seen[*t.ID] = true
-		switch *t.Status {
-		case "inProgress", "completed", "failed", "interrupted":
-		default:
-			return page, deliveryGap("page")
-		}
-		if full && t.ItemsView != "full" { // guard:page-full
-			return page, deliveryGap("page")
-		}
-		if len(*t.Items) > acceptanceMaxItems { // guard:page-items
-			return page, deliveryGap("bounds")
-		}
-		e := strings.TrimSpace(string(t.Error))
-		page.Turns = append(page.Turns, nativeTurnRow{ID: *t.ID, Status: *t.Status, ItemsView: t.ItemsView, Failed: e != "" && e != "null", Items: *t.Items})
+		seen[t.ID] = true
+		page.Turns = append(page.Turns, t)
 	}
 	return page, nil
 }
 
-func pageIDs(p turnPage) []string {
+func decodeTurnEvidence(raw json.RawMessage, full bool) (turnEvidence, error) {
+	var t turnEvidence
+	m, ok := nativeObject(raw, "id", "status", "items", "itemsView", "error")
+	if !ok { // guard:turn-keys
+		return t, deliveryGap("page")
+	}
+	id, ok := nativeText(m["id"], false)
+	if !ok || !privateNativeID(id) { // guard:page-id
+		return t, deliveryGap("id")
+	}
+	t.ID = id
+	if t.Status, ok = nativeText(m["status"], false); !ok {
+		return t, deliveryGap("page")
+	}
+	switch t.Status {
+	case "inProgress", "completed", "failed", "interrupted":
+	default: // guard:turn-status-vocabulary
+		return t, deliveryGap("page")
+	}
+	if t.ItemsView, ok = nativeText(m["itemsView"], false); !ok {
+		return t, deliveryGap("page")
+	}
+	if full && t.ItemsView != "full" { // guard:page-full
+		return t, deliveryGap("page")
+	}
+	if nativeIsNull(m["error"]) {
+		t.ErrorNull = true
+	} else if _, ok := nativeObject(m["error"]); !ok { // guard:turn-error-shape
+		return t, deliveryGap("page")
+	}
+	items, ok := nativeArray(m["items"])
+	if !ok {
+		return t, deliveryGap("page")
+	}
+	if len(items) > acceptanceMaxItems { // guard:page-items
+		return t, deliveryGap("bounds")
+	}
+	t.Items = len(items)
+	if !full {
+		return t, nil
+	}
+	for i, raw := range items {
+		item, ok := nativeObject(raw, "type")
+		if !ok {
+			return t, deliveryGap("page")
+		}
+		kind, ok := nativeText(item["type"], false)
+		if !ok { // guard:item-type
+			return t, deliveryGap("page")
+		}
+		if kind == "userMessage" {
+			t.Users++
+		}
+		if i != 0 {
+			continue
+		}
+		t.FirstType = kind
+		content, present := item["content"]
+		if kind != "userMessage" && !present {
+			continue
+		}
+		parts, ok := nativeArray(content)
+		if !ok { // guard:user-content
+			return t, deliveryGap("page")
+		}
+		t.Parts = len(parts)
+		if len(parts) == 0 {
+			continue
+		}
+		part, ok := nativeObject(parts[0], "type")
+		if !ok {
+			return t, deliveryGap("page")
+		}
+		if t.PartType, ok = nativeText(part["type"], false); !ok { // guard:part-type
+			return t, deliveryGap("page")
+		}
+		if t.PartType != "text" {
+			continue
+		}
+		textRaw, present := part["text"]
+		text, ok := nativeText(textRaw, true)
+		if !present || !ok { // guard:part-text
+			return t, deliveryGap("page")
+		}
+		sum := sha256.Sum256([]byte(text))
+		t.InputDigest, t.InputLength = hex.EncodeToString(sum[:]), len(text)
+	}
+	return t, nil
+}
+
+func pageIDs(p pageEvidence) []string {
 	ids := make([]string, 0, len(p.Turns))
 	for _, t := range p.Turns {
 		ids = append(ids, t.ID)
@@ -450,7 +579,7 @@ func pageIDs(p turnPage) []string {
 	return ids
 }
 
-func baselineFromPage(p turnPage) (*acceptanceBaseline, error) {
+func baselineFromPage(p pageEvidence) (*acceptanceBaseline, error) {
 	b := len(p.Turns)
 	if b == 0 && !p.CursorNull || b < acceptancePageK && !p.CursorNull {
 		return nil, deliveryGap("baseline")
@@ -459,7 +588,7 @@ func baselineFromPage(p turnPage) (*acceptanceBaseline, error) {
 }
 
 // classifyPage returns the number of new turns or a HISTORY-AMBIGUOUS error.
-func classifyPage(base *acceptanceBaseline, p turnPage) (int, error) {
+func classifyPage(base *acceptanceBaseline, p pageEvidence) (int, error) {
 	K, b := acceptancePageK, len(base.IDs)
 	ids := pageIDs(p)
 	if b == 0 {
@@ -492,57 +621,58 @@ func classifyPage(base *acceptanceBaseline, p turnPage) (int, error) {
 	return n, nil
 }
 
-// Exact input: the first item is the only user message, with exactly one
-// text part whose bytes are the transported argument.
-func candidateRefusal(t nativeTurnRow, digest string, length int) string {
+// Exact input, from committed evidence: the first item is the only user
+// message, with exactly one text part whose bytes are the transported argument.
+func candidateRefusal(t turnEvidence, digest string, length int) string {
 	if t.Status != "inProgress" && t.Status != "completed" { // guard:candidate-status
 		return "turn-failed"
 	}
-	if t.Failed { // guard:candidate-error
+	if !t.ErrorNull { // guard:candidate-error
 		return "turn-failed"
 	}
-	if len(t.Items) == 0 {
+	if t.Items == 0 || t.FirstType != "userMessage" { // guard:candidate-first
 		return "input-mismatch"
 	}
-	users := 0
-	for i, raw := range t.Items {
-		var item struct {
-			Type    string            `json:"type"`
-			Content []json.RawMessage `json:"content"`
-		}
-		if json.Unmarshal(raw, &item) != nil {
-			return "input-mismatch"
-		}
-		if item.Type == "userMessage" {
-			users++
-		}
-		if i == 0 && item.Type != "userMessage" { // guard:candidate-first
-			return "input-mismatch"
-		}
-		if i == 0 {
-			if len(item.Content) != 1 { // guard:candidate-single-part
-				return "input-mismatch"
-			}
-			var part struct {
-				Type string  `json:"type"`
-				Text *string `json:"text"`
-			}
-			if json.Unmarshal(item.Content[0], &part) != nil || part.Type != "text" || part.Text == nil { // guard:candidate-text
-				return "input-mismatch"
-			}
-			if len(*part.Text) > acceptanceMaxText { // guard:candidate-bound
-				return "bounds"
-			}
-			sum := sha256.Sum256([]byte(*part.Text))
-			if hex.EncodeToString(sum[:]) != digest || len(*part.Text) != length { // guard:candidate-digest
-				return "input-mismatch"
-			}
-		}
+	if t.Parts != 1 { // guard:candidate-single-part
+		return "input-mismatch"
 	}
-	if users != 1 { // guard:candidate-only-input
+	if t.PartType != "text" || t.InputDigest == "" { // guard:candidate-text
+		return "input-mismatch"
+	}
+	if t.InputLength > acceptanceMaxText { // guard:candidate-bound
+		return "bounds"
+	}
+	if t.InputDigest != digest || t.InputLength != length { // guard:candidate-digest
+		return "input-mismatch"
+	}
+	if t.Users != 1 { // guard:candidate-only-input
 		return "input-mismatch"
 	}
 	return ""
+}
+
+// parseTurnNotice strictly decodes a turn notice: every key present, valid
+// native identities and a status from the method's vocabulary.
+func parseTurnNotice(method string, params json.RawMessage) (remoteNativeTurn, bool) {
+	var n remoteNativeTurn
+	p, ok := nativeObject(params, "threadId", "turn")
+	if !ok {
+		return n, false
+	}
+	turn, ok := nativeObject(p["turn"], "id", "status")
+	if !ok {
+		return n, false
+	}
+	thread, ok1 := nativeText(p["threadId"], false)
+	id, ok2 := nativeText(turn["id"], false)
+	status, ok3 := nativeText(turn["status"], false)
+	if !ok1 || !ok2 || !ok3 || !privateNativeID(thread) || !privateNativeID(id) {
+		return n, false
+	}
+	if !nativeTurnStatusValid(method, status) { // guard:notice-vocabulary
+		return n, false
+	}
+	return remoteNativeTurn{thread, id, status}, true
 }
 
 // ---- the acceptance operation ----
@@ -644,23 +774,17 @@ func (h Host) acceptCodexPrompt(ctx context.Context, a *codexAcceptance, sent st
 		if method != "turn/started" && method != "turn/completed" {
 			return nil
 		}
-		var n struct {
-			ThreadID string `json:"threadId"`
-			Turn     struct {
-				ID     string `json:"id"`
-				Status string `json:"status"`
-			} `json:"turn"`
-		}
-		if decodeNativeJSON(m["params"], &n) != nil || !privateNativeID(n.ThreadID) || !privateNativeID(n.Turn.ID) {
+		n, ok := parseTurnNotice(method, m["params"])
+		if !ok { // guard:drain-notice
 			return deliveryGap("drain")
 		}
 		if n.ThreadID != a.run.NativeSessionID {
 			return nil
 		}
-		if err := j.append(journalRecord{Kind: "post-fence", Turn: n.Turn.ID, Status: n.Turn.Status}); err != nil {
+		if err := j.append(journalRecord{Kind: "post-fence", Turn: n.ID, Status: n.Status}); err != nil {
 			return deliveryGap("journal")
 		}
-		j.post = append(j.post, remoteNativeTurn{n.ThreadID, n.Turn.ID, n.Turn.Status}) // guard:post-fence-history
+		j.post = append(j.post, n) // guard:post-fence-history
 		return nil
 	}
 	h.RemoteRun = a.run
@@ -706,17 +830,17 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 	a, j := r.acc, r.journal
 	// Baseline: native idle thread and an anchored or empty-complete page.
 	raw, err := p.request("thread/read", map[string]any{"threadId": p.thread, "includeTurns": false})
-	var thread struct {
-		Thread struct {
-			Status struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		} `json:"thread"`
-	}
-	if err != nil || json.Unmarshal(raw, &thread) != nil {
+	if err != nil {
 		return deliveryGap("baseline")
 	}
-	if thread.Thread.Status.Type != "idle" { // guard:baseline-idle
+	threadObj, ok := nativeObject(raw, "thread")
+	threadFields, ok2 := nativeObject(threadObj["thread"], "status")
+	status, ok3 := nativeObject(threadFields["status"], "type")
+	kind, ok4 := nativeText(status["type"], false)
+	if !ok || !ok2 || !ok3 || !ok4 { // guard:baseline-status-shape
+		return deliveryGap("baseline")
+	}
+	if kind != "idle" { // guard:baseline-idle
 		return deliveryRefused("baseline-active")
 	}
 	raw, err = p.request("thread/turns/list", map[string]any{"threadId": p.thread, "limit": acceptancePageK, "sortDirection": "desc", "itemsView": "notLoaded"})
@@ -731,7 +855,7 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 	if err != nil {
 		return err
 	}
-	if err := j.append(journalRecord{Kind: "baseline", Turns: base.IDs, Class: map[bool]string{true: "cursor-null", false: "cursor-more"}[base.CursorNull]}); err != nil {
+	if err := j.append(journalRecord{Kind: "baseline", Page: &page}); err != nil {
 		return deliveryGap("journal")
 	}
 	// 3: attempted, fully durable, before the effect.
@@ -751,24 +875,23 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 	if err := submit(ctx); err != nil { // guard:lost-ack
 		return deliveryRefused("submit-uncertain")
 	}
-	read := func(kind string) (turnPage, int, error) {
+	// Decode strictly, commit the complete evidence, then decide only from
+	// the committed copy.
+	read := func(kind string) (pageEvidence, int, error) {
 		raw, err := p.request("thread/turns/list", map[string]any{"threadId": p.thread, "limit": acceptancePageK, "sortDirection": "desc", "itemsView": "full"})
 		if err != nil {
-			return turnPage{}, 0, err
+			return pageEvidence{}, 0, err
 		}
-		page, err := decodeTurnPage(raw, true)
+		observed, err := decodeTurnPage(raw, true)
 		if err != nil {
-			return turnPage{}, 0, err // guard:sticky-gap
+			return pageEvidence{}, 0, err // guard:sticky-gap
 		}
-		n, cerr := classifyPage(base, page)
-		class := "complete"
-		if cerr != nil {
-			class = "history-ambiguous"
+		committed, err := j.commit(journalRecord{Kind: kind, Page: &observed})
+		if err != nil || committed.Page == nil {
+			return pageEvidence{}, 0, deliveryGap("journal")
 		}
-		if err := j.append(journalRecord{Kind: kind, Class: class, Turns: pageIDs(page)[:max(n, 0)]}); err != nil {
-			return turnPage{}, 0, deliveryGap("journal")
-		}
-		return page, n, cerr
+		n, cerr := classifyPage(base, *committed.Page) // guard:committed-copy
+		return *committed.Page, n, cerr
 	}
 	reconcile := func(turn string) error {
 		for _, n := range j.notices { // guard:sticky-notices

@@ -8,6 +8,17 @@ type remoteNativeTurn struct {
 	Status   string
 }
 
+// The one native turn-notice vocabulary, shared by every reader.
+func nativeTurnStatusValid(method, status string) bool {
+	switch method {
+	case "turn/started":
+		return status == "inProgress"
+	case "turn/completed":
+		return status == "completed" || status == "failed" || status == "interrupted"
+	}
+	return false
+}
+
 type remoteNativeTurnProof struct {
 	remoteNativeTurn
 	Events int
@@ -33,7 +44,7 @@ func (p *goalRPC) nativeTurnNotification(method string, params json.RawMessage) 
 	if !privateNativeID(n.Turn.ID) {
 		return goalError("goal-response-invalid")
 	}
-	if method == "turn/started" && n.Turn.Status != "inProgress" || method == "turn/completed" && n.Turn.Status != "completed" && n.Turn.Status != "failed" && n.Turn.Status != "interrupted" {
+	if !nativeTurnStatusValid(method, n.Turn.Status) {
 		return goalError("goal-response-invalid")
 	}
 	if len(p.turnEvents) >= 128 {

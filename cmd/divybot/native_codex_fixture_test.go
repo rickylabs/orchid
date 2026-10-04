@@ -259,6 +259,7 @@ type accHarness struct {
 	onSubmit  func()
 	binding   func(call int) error
 	calls     int
+	after     func(t *testing.T)
 }
 
 func newAccHarness(t *testing.T) *accHarness {

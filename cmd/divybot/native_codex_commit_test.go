@@ -10,10 +10,12 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,7 +79,28 @@ func TestAcceptanceScreenNeverDecides(t *testing.T) {
 	}{
 		{"marker-and-working-without-native-turn", noTurn, func(_ *accPrompt, sent string) promptSnapshot { return consumedPrompt(sent) }, false},
 		{"exact-native-turn-blank-screen", func(*accHarness) {}, func(*accPrompt, string) promptSnapshot { return promptSnapshot{} }, true},
-		{"unchanged-screen", noTurn, func(*accPrompt, string) promptSnapshot { return promptFixture() }, false},
+		// R3: the unchanged screen persists for at least ten seconds of the
+		// acceptance clock; the native loop still sends once and never Enter.
+		{"unchanged-screen", func(h *accHarness) {
+			noTurn(h)
+			start := time.Unix(1000, 0)
+			var mu sync.Mutex
+			now := start
+			h.acc.now = func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				now = now.Add(time.Second)
+				return now
+			}
+			h.acc.deadline = start.Add(15 * time.Second)
+			h.after = func(t *testing.T) {
+				mu.Lock()
+				defer mu.Unlock()
+				if now.Sub(start) < 10*time.Second {
+					t.Fatalf("unchanged screen covered only %v", now.Sub(start))
+				}
+			}
+		}, func(*accPrompt, string) promptSnapshot { return promptFixture() }, false},
 		{"collapsed-placeholder", noTurn, placeholder, false},
 		{"partial-composer", noTurn, func(_ *accPrompt, sent string) promptSnapshot {
 			s := promptFixture()
@@ -106,6 +129,9 @@ func TestAcceptanceScreenNeverDecides(t *testing.T) {
 			if c.accept != (err == nil) {
 				t.Fatalf("decision: err=%v accept=%v", err, c.accept)
 			}
+			if h.after != nil {
+				h.after(t)
+			}
 		})
 	}
 }
@@ -130,7 +156,7 @@ func TestAcceptanceStagedPointerThroughInjectGoal(t *testing.T) {
 	}
 	agent, _ := json.Marshal(map[string]any{"result": map[string]any{"agent": map[string]any{"agent": "codex", "name": "codex-fixture", "pane_id": "w1:p1", "workspace_id": "w1",
 		"agent_status": "idle", "state_change_seq": 1, "interactive_ready": true, "cwd": "/fixture/project"}}})
-	screen := "OpenAI Codex (v0.159.3)\n› Anything interesting on the docket?\n" + h.acc.run.NativeSessionID + " gpt · 100% left\n"
+	screen := "OpenAI Codex (v0.159.3)\n› Anything interesting on the docket?\n" + h.acc.run.NativeSessionID + " fixture-footer\n"
 	_ = os.WriteFile(filepath.Join(state, "agent"), agent, 0600)
 	_ = os.WriteFile(filepath.Join(state, "screen"), []byte(screen), 0600)
 	script := `#!/usr/bin/env python3
@@ -384,7 +410,7 @@ func newConsumerFixture(t *testing.T, marker, prompt bool) *consumerFixture {
 	a["cwd"], a["agent_status"], a["name"], a["pane_id"], a["workspace_id"] = run.Cwd, "idle", j.Label, j.Pane, j.Workspace
 	agent, _ := json.Marshal(map[string]any{"result": row})
 	_ = os.WriteFile(filepath.Join(state, "agent"), agent, 0600)
-	_ = os.WriteFile(filepath.Join(state, "screen"), []byte("OpenAI Codex (v0.159.3)\n› Ask Codex to do anything\n"+run.NativeSessionID+" gpt · 100% left\n"), 0600)
+	_ = os.WriteFile(filepath.Join(state, "screen"), []byte("OpenAI Codex (v0.159.3)\n› Ask Codex to do anything\n"+run.NativeSessionID+" fixture-footer\n"), 0600)
 	script := `#!/usr/bin/env python3
 import json,os,sys
 d=os.environ['ACC_CONSUMER']; a=sys.argv[1:]
@@ -472,16 +498,23 @@ func TestDeliveryAuthorityConsumers(t *testing.T) {
 		}
 	})
 	t.Run("direct-seams", func(t *testing.T) {
-		f := newConsumerFixture(t, false, true)
-		if f.c.finalProof(context.Background(), f.c.hosts[f.j.Host], f.j, finalReportScope{}) == nil {
+		f := newConsumerFixture(t, true, true)
+		_, scope, err := f.c.finalScope(f.j)
+		if err != nil {
+			t.Fatal("persisted final scope unavailable")
+		}
+		host := f.c.hosts[f.j.Host]
+		// The committed positive passes with the real scope, so only the
+		// delivery predicate can refuse the markerless job below.
+		if f.c.finalProof(context.Background(), host, f.j, scope) != nil || !retryBoundGoalEligible(f.j) {
+			t.Fatal("committed positive refused at a direct seam")
+		}
+		f.j.GoalDeliveryCommit = ""
+		if f.c.finalProof(context.Background(), host, f.j, scope) == nil {
 			t.Fatal("finalProof accepted a markerless job")
 		}
 		if retryBoundGoalEligible(f.j) {
 			t.Fatal("goal retry accepted a markerless job")
-		}
-		f.j.GoalDeliveryCommit = deliveryCommitMark
-		if !retryBoundGoalEligible(f.j) {
-			t.Fatal("goal retry refused a committed job")
 		}
 	})
 }
@@ -556,52 +589,114 @@ func exprText(e ast.Node) string {
 	return b.String()
 }
 
-// commitSnapshotValid enforces the one rollback-snapshot read (F5-R7-A).
-func commitSnapshotValid(fn *ast.FuncDecl) bool {
-	var lockAt, setAt token.Pos
-	snap := ""
-	var snapAt token.Pos
-	uses := 0
-	restores := 0
-	for _, stmt := range fn.Body.List {
-		ast.Inspect(stmt, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Lock" && lockAt == token.NoPos {
-					lockAt = call.Pos()
-				}
-			}
-			if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 {
-				if sel, ok := as.Rhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "PromptConfirmed" {
-					if id, ok := as.Lhs[0].(*ast.Ident); ok {
-						snap, snapAt = id.Name, as.Pos()
-					}
-				}
-				if sel, ok := as.Lhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "PromptConfirmed" {
-					if id, ok := as.Rhs[0].(*ast.Ident); ok && id.Name == "true" && setAt == token.NoPos {
-						setAt = as.Pos()
-					}
-				}
-			}
-			return true
-		})
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
 	}
-	if snap == "" || lockAt == token.NoPos || setAt == token.NoPos || !(lockAt < snapAt && snapAt < setAt) {
+}
+
+// operands flattens a chain of one boolean operator, through parentheses.
+func operands(e ast.Expr, op token.Token) []ast.Expr {
+	e = unparen(e)
+	if b, ok := e.(*ast.BinaryExpr); ok && b.Op == op {
+		return append(operands(b.X, op), operands(b.Y, op)...)
+	}
+	return []ast.Expr{e}
+}
+
+func hasOperand(e ast.Expr, op token.Token, want string) bool {
+	for _, x := range operands(e, op) {
+		if types.ExprString(unparen(x)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func returnsAt(body *ast.BlockStmt) bool {
+	return len(body.List) > 0 && func() bool { _, ok := body.List[len(body.List)-1].(*ast.ReturnStmt); return ok }()
+}
+
+// guardedIf finds an if statement whose condition has want as a direct
+// operand of op (not nested under another operator) and whose body returns.
+func guardedIf(fn *ast.FuncDecl, op token.Token, want string) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if ifs, ok := n.(*ast.IfStmt); ok && returnsAt(ifs.Body) && hasOperand(ifs.Cond, op, want) {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// commitSnapshotValid enforces the one rollback-snapshot read (F5-R7-A) in
+// its real role: inside the c.st.mu critical section held by a deferred
+// unlock, before the set, restored only in the before-rename failure branch.
+func commitSnapshotValid(fn *ast.FuncDecl) bool {
+	list := fn.Body.List
+	lockAt, snapAt, setAt := -1, -1, -1
+	snap := ""
+	for i, stmt := range list {
+		switch x := stmt.(type) {
+		case *ast.ExprStmt:
+			if types.ExprString(x.X) == "c.st.mu.Lock()" && lockAt < 0 && i+1 < len(list) {
+				if d, ok := list[i+1].(*ast.DeferStmt); ok && types.ExprString(d.Call) == "c.st.mu.Unlock()" {
+					lockAt = i
+				}
+			}
+		case *ast.AssignStmt:
+			if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
+				if types.ExprString(x.Rhs[0]) == "j.NativeGoal.PromptConfirmed" {
+					if id, ok := x.Lhs[0].(*ast.Ident); ok {
+						snap, snapAt = id.Name, i
+					}
+				}
+				if types.ExprString(x.Lhs[0]) == "j.NativeGoal.PromptConfirmed" && types.ExprString(x.Rhs[0]) == "true" && setAt < 0 {
+					setAt = i
+				}
+			}
+		}
+	}
+	if lockAt < 0 || snap == "" || !(lockAt+1 < snapAt && snapAt < setAt) {
 		return false
 	}
+	locks := 0
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && id.Name == snap && id.Pos() != snapAt {
-			uses++
-		}
-		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 {
-			if sel, ok := as.Lhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "PromptConfirmed" {
-				if id, ok := as.Rhs[0].(*ast.Ident); ok && id.Name == snap {
-					restores++
-				}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if s := types.ExprString(call.Fun); strings.HasSuffix(s, ".Lock") || strings.HasSuffix(s, ".Unlock") {
+				locks++
 			}
 		}
 		return true
 	})
-	return uses == restores && restores >= 1
+	if locks != 2 { // exactly the Lock and its deferred Unlock
+		return false
+	}
+	restores, uses := 0, 0
+	for _, stmt := range list {
+		ifs, ok := stmt.(*ast.IfStmt)
+		inFailure := ok && strings.Contains(types.ExprString(ifs.Cond), "afterRename") && returnsAt(ifs.Body) &&
+			types.ExprString(ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt).Results[0]) == "errPromptUnconfirmed"
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 &&
+				types.ExprString(as.Lhs[0]) == "j.NativeGoal.PromptConfirmed" && types.ExprString(as.Rhs[0]) == snap {
+				if !inFailure {
+					restores = -100
+				}
+				restores++
+			}
+			if id, ok := n.(*ast.Ident); ok && id.Name == snap {
+				uses++
+			}
+			return true
+		})
+	}
+	return restores == 1 && uses == 2 // the snapshot declaration and its one restore
 }
 
 func checkDeliveryInventory(src map[string]string) error {
@@ -626,24 +721,26 @@ func checkDeliveryInventory(src map[string]string) error {
 			return errors.New("raw delivery read outside its allowance: " + name)
 		}
 	}
-	// The required guards (T3h-1), located structurally.
-	guard := func(expr string) string {
-		e, err := parser.ParseExpr(expr)
-		if err != nil {
-			return "\x00"
-		}
-		return exprText(e)
+	// T3h-1: each required guard is a direct operand in its decisive place.
+	g := funcs["goalDeliveryUnconfirmed"]
+	ok := false
+	if g != nil {
+		ast.Inspect(g.Body, func(n ast.Node) bool {
+			if r, isRet := n.(*ast.ReturnStmt); isRet && len(r.Results) == 1 {
+				for _, conj := range operands(r.Results[0], token.LAND) {
+					if hasOperand(conj, token.LOR, "rcCodex(j) && !deliveryConfirmed(j)") {
+						ok = true
+					}
+				}
+			}
+			return true
+		})
 	}
-	rcGuard, plainGuard := guard("rcCodex(j) && !deliveryConfirmed(j)"), guard("!deliveryConfirmed(j)")
-	want := map[string]string{
-		"goalDeliveryUnconfirmed": rcGuard,
-		"observeFinalReport":      plainGuard,
-		"finalProof":              plainGuard,
-		"retryBoundGoalEligible":  rcGuard,
+	if !ok {
+		return errors.New("required guard missing: goalDeliveryUnconfirmed")
 	}
-	for name, guard := range want {
-		fn := funcs[name]
-		if fn == nil || !strings.Contains(exprText(fn.Body), guard) {
+	for _, name := range []string{"observeFinalReport", "finalProof"} {
+		if fn := funcs[name]; fn == nil || !guardedIf(fn, token.LOR, "!deliveryConfirmed(j)") {
 			return errors.New("required guard missing: " + name)
 		}
 	}
@@ -651,39 +748,40 @@ func checkDeliveryInventory(src map[string]string) error {
 	if retire == nil {
 		return errors.New("required guard missing: retireCompleted")
 	}
-	unfenced, fencedUse := false, false
+	unfenced, other := false, 0
 	ast.Inspect(retire.Body, func(n ast.Node) bool {
-		if ifs, ok := n.(*ast.IfStmt); ok {
-			text := exprText(ifs.Cond)
-			if strings.HasPrefix(text, guard("!fenced && x")[:len("&& !fenced ")]) && strings.Contains(text, plainGuard) {
-				unfenced = true
-			} else if strings.Contains(text, "deliveryConfirmed") {
-				fencedUse = true
-			}
+		ifs, isIf := n.(*ast.IfStmt)
+		if !isIf {
+			return true
+		}
+		conj := operands(ifs.Cond, token.LAND)
+		if len(conj) == 2 && types.ExprString(conj[0]) == "!fenced" && hasOperand(conj[1], token.LOR, "!deliveryConfirmed(j)") && returnsAt(ifs.Body) {
+			unfenced = true
+		} else if strings.Contains(types.ExprString(ifs.Cond), "deliveryConfirmed") {
+			other++
 		}
 		return true
 	})
-	if !unfenced || fencedUse {
+	if !unfenced || other != 0 {
 		return errors.New("required guard missing: retireCompleted unfenced gate")
 	}
 	if commit := funcs["commitRemoteCodexDelivery"]; commit == nil || !commitSnapshotValid(commit) {
 		return errors.New("commit snapshot read is not bookkeeping-only")
 	}
-	if a := funcs["retryBoundGoalEligible"]; a != nil {
-		vetoed := false
-		ast.Inspect(a.Body, func(n ast.Node) bool {
-			if ifs, ok := n.(*ast.IfStmt); ok && exprText(ifs.Cond) == rcGuard {
-				for _, s := range ifs.Body.List {
-					if r, ok := s.(*ast.ReturnStmt); ok && len(r.Results) == 1 && exprText(r.Results[0]) == "false " {
-						vetoed = true
-					}
+	retry := funcs["retryBoundGoalEligible"]
+	vetoed := false
+	if retry != nil {
+		ast.Inspect(retry.Body, func(n ast.Node) bool {
+			if ifs, ok := n.(*ast.IfStmt); ok && types.ExprString(unparen(ifs.Cond)) == "rcCodex(j) && !deliveryConfirmed(j)" && len(ifs.Body.List) == 1 {
+				if r, ok := ifs.Body.List[0].(*ast.ReturnStmt); ok && len(r.Results) == 1 && types.ExprString(r.Results[0]) == "false" {
+					vetoed = true
 				}
 			}
 			return true
 		})
-		if !vetoed {
-			return errors.New("required guard missing: retry veto")
-		}
+	}
+	if !vetoed {
+		return errors.New("required guard missing: retry veto")
 	}
 	return nil
 }
@@ -723,6 +821,12 @@ func TestDeliveryAuthorityInventory(t *testing.T) {
 		{"commit-extra-read", "native_codex_commit.go", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark", "\tif j.NativeGoal.PromptConfirmed {\n\t\treturn nil\n\t}\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark"},
 		{"commit-confirmed-comparison", "native_codex_commit.go", "\tpriorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit", "\tif j.GoalDelivery == \"confirmed\" {\n\t\treturn nil\n\t}\n\tpriorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit"},
 		{"commit-snapshot-reused", "native_codex_commit.go", "\tif err != nil {\n\t\tlog.Printf", "\tif priorPrompt {\n\t\treturn nil\n\t}\n\tif err != nil {\n\t\tlog.Printf"},
+		{"outer-publication-bypass", "final_report_publication.go", "j.RunMode || !deliveryConfirmed(j) || !known", "j.RunMode || (false && !deliveryConfirmed(j)) || !known"},
+		{"finalproof-bypass", "final_report_publication.go", "ctx.Err() != nil || !deliveryConfirmed(j) {", "ctx.Err() != nil || (false && !deliveryConfirmed(j)) {"},
+		{"retire-bypass", "completion.go", "j.Issue != n || !deliveryConfirmed(j) || j.RunMode", "j.Issue != n || (false && !deliveryConfirmed(j)) || j.RunMode"},
+		{"goal-unconfirmed-bypass", "goal_delivery.go", "(rcCodex(j) && !deliveryConfirmed(j)))", "(false && rcCodex(j) && !deliveryConfirmed(j)))"},
+		{"snapshot-outside-critical-section", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed", "\tc.st.mu.Unlock()\n\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tc.st.mu.Lock()"},
+		{"restore-outside-failure-branch", "native_codex_commit.go", "\tif err != nil {\n\t\tlog.Printf", "\tj.NativeGoal.PromptConfirmed = priorPrompt\n\tif err != nil {\n\t\tlog.Printf"},
 		{"commit-snapshot-after-write", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true\n\tpriorPrompt := j.NativeGoal.PromptConfirmed"},
 	}
 	for _, n := range negatives {
