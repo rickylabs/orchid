@@ -50,6 +50,8 @@ type goalRPC struct {
 	turnEvents []remoteNativeTurn
 	turnProofs map[string]remoteNativeTurnProof
 	shadow     *shadowPublisher
+	// The server's own version from its initialize userAgent; "" when unparsable.
+	serverVersion string
 	// Optional ordered journal for scoped turn notices; nil for other callers.
 	onTurnNotice func(remoteNativeTurn) error
 }
@@ -347,6 +349,7 @@ func (p *goalRPC) initialize() error {
 	if decodeNativeJSON(raw, &v) != nil || v.UserAgent == "" {
 		return goalError("goal-initialize-invalid")
 	}
+	p.serverVersion = codexServerVersion(v.UserAgent)
 	return p.send(map[string]string{"method": "initialized"})
 }
 func (h Host) withGoalConnection(ctx context.Context, thread string, use func(*goalRPC) error) error {

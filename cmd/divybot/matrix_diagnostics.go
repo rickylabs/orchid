@@ -246,6 +246,8 @@ var matrixSites = map[string]bool{
 	"spawn.remote-control-mode":           true,
 	"spawn.remote-control-name":           true,
 	"spawn.remote-control-prepare":        true,
+	"spawn.codex-client":                  true,
+	"spawn.codex-client-recheck":          true,
 	"spawn.remote-control-render":         true,
 	"spawn.remote-control-staged-binding": true,
 	"spawn.remote-control-identity":       true,

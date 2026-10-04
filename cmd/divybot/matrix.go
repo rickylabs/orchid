@@ -963,7 +963,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		budget["opencode:"+openCodeProvider]-- // no refund after an ambiguous launch effect
 	}
 	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
-		if agySettingsBlocked(e) {
+		if agySettingsBlocked(e) || codexClientBlocked(e) {
 			// spawn already persisted and reported this specific no-seat block.
 			// Keep the one-attempt fence without overwriting it with uncertainty.
 			// No new reason enters the reader's closed launch-state vocabulary.

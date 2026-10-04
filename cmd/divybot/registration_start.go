@@ -73,6 +73,9 @@ func registrationFailureKind(err error) string {
 	if agySettingsBlocked(err) {
 		return string(agySettingsUnreadable)
 	}
+	if codexClientBlocked(err) {
+		return string(codexClientUnavailable)
+	}
 	var failure *agentRegistrationFailure
 	if errors.As(err, &failure) {
 		return failure.kind

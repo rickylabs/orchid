@@ -68,6 +68,9 @@ func readNativeFixtureFrame(r io.Reader) ([]byte, byte, error) {
 	return data, head[0] & 15, nil
 }
 
+const canonicalFixtureVersion = "9.1.0"
+const canonicalFixtureUserAgent = "codex_app_server/" + canonicalFixtureVersion + " (fixture)"
+
 func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[string]any) any, notices ...func(string, map[string]any) []any) Host {
 	t.Helper()
 	// Keep AF_UNIX paths beneath the kernel length bound; normal t.TempDir
@@ -97,11 +100,13 @@ func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[st
 	if mode == "socket-mode" {
 		_ = os.Chmod(path, 0660)
 	}
-	go func() {
-		connection, err := listener.Accept()
-		if err != nil {
-			return
-		}
+	// "multi" serves sequential connections (a handshake-only read, then the
+	// operation's own); every other mode keeps exactly one connection.
+	accepts := 1
+	if mode == "multi" {
+		accepts = 4
+	}
+	serve := func(connection net.Conn) {
 		defer connection.Close()
 		_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
 		reader := bufio.NewReader(connection)
@@ -153,7 +158,8 @@ func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[st
 			}
 			result := any(map[string]any{})
 			if q.Method == "initialize" {
-				result = map[string]string{"userAgent": "fixture"}
+				// The native shape: "<originator>/<version> (...)"; a synthetic version.
+				result = map[string]string{"userAgent": canonicalFixtureUserAgent}
 			} else if handler != nil {
 				result = handler(q.Method, q.Params)
 			}
@@ -196,6 +202,15 @@ func canonicalFixtureHost(t *testing.T, mode string, handler func(string, map[st
 			if nativeFixtureFrame(connection, body, 1) != nil {
 				return
 			}
+		}
+	}
+	go func() {
+		for i := 0; i < accepts; i++ {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			serve(connection)
 		}
 	}()
 	return Host{Home: root, Name: "fixture-host"}
@@ -288,6 +303,7 @@ func TestRemoteControlCanonicalPreparationOverRealFraming(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	run.ClientVersion = canonicalFixtureVersion
 	if h.prepareRemoteCodex(ctx, run, nil) != nil || run.NativeSessionID != id {
 		t.Fatal("native preparation failed canonical framing or scoped trust/name readback")
 	}
