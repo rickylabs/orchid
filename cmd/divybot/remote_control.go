@@ -52,6 +52,9 @@ type remoteControlRun struct {
 	IdentitySource  string            `json:"identitySource"`
 	HookConfirmed   bool              `json:"hookConfirmed"`
 	TUIProcess      *remoteTUIProcess `json:"tuiProcess"`
+	// The daemon version this run's TUI client was pinned to, and that client's directory.
+	ClientVersion string `json:"-"`
+	ClientDir     string `json:"-"`
 }
 
 // Owner/operator-only decoration. This envelope must not enter the public tree.

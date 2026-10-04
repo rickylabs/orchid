@@ -715,6 +715,12 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		nativeArgs = append(nativeArgs, trustArgs...)
 		agyStore = &nativeStore{Source: "agy", Directory: root}
 	}
+	if remote != nil && agent == "codex" {
+		// Before any workspace, thread or agent: the TUI must match the daemon.
+		if e := h.selectCodexClient(ctx, remote); e != nil { // guard:client-before-spawn
+			return "", "", matrixSite("spawn.codex-client", e)
+		}
+	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", matrixSite("spawn.workspace-create", errMatrix)
@@ -756,6 +762,10 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	// pane run does not register it with herdr's agent lifecycle.
 	var b strings.Builder
 	b.WriteString(`export PATH="$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH"; `)
+	if remote != nil && agent == "codex" {
+		// Herdr starts the canonical codex from this shell's PATH: the pinned client.
+		fmt.Fprintf(&b, "export PATH=%s:\"$PATH\"; ", shq(remote.ClientDir)) // guard:client-path
+	}
 	if env == nil {
 		env = map[string]string{}
 	}
@@ -3155,11 +3165,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt, is.Title)
 	if err != nil {
 		log.Printf("issue #%d: agent registration failed; reason=%s; automatic launch abandoned", n, registrationFailureKind(err))
-		blockReason := "registration_failed"
-		if agySettingsBlocked(err) {
-			blockReason = string(agySettingsUnreadable)
-		}
-		c.st.blockLaunch(n, blockReason)
+		c.st.blockLaunch(n, launchBlockReason(err))
 		if ws != "" {
 			cleanup, cancel := context.WithTimeout(ctx, 12*time.Second)
 			_ = host.closeWorkspace(cleanup, ws)
