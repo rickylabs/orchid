@@ -249,6 +249,7 @@ func (c *Coord) actionObserveStops(ctx context.Context, root string) {
 		_, seatErr := os.Lstat(seatFile)
 		_, procErr := os.Lstat(procFile)
 		if seatErr == nil && procErr == nil {
+			c.finishRemoteActionStop(ctx, host, dir, result)
 			continue
 		}
 		inspected++
@@ -280,6 +281,7 @@ func (c *Coord) actionObserveStops(ctx context.Context, root string) {
 				c.actionWriteStopObservation(dir, result, "process_absent", procFile)
 			}
 		}
+		c.finishRemoteActionStop(ctx, host, dir, result)
 	}
 }
 func (c *Coord) actionWriteStopObservation(dir string, r actionReceipt, kind, path string) {

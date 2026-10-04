@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"reflect"
 	"strings"
 	"time"
@@ -42,11 +41,13 @@ func goalNumber(n int64) bool { return n >= 0 && n <= maxGoalNumber }
 
 // A separate write capability. Harness's read-only transport is not widened.
 type goalRPC struct {
-	input   io.Writer
-	scan    *bufio.Scanner
-	serial  int
-	thread  string
-	updates []*nativeGoal
+	ctx        context.Context
+	input      io.Writer
+	scan       *bufio.Scanner
+	serial     int
+	thread     string
+	updates    []*nativeGoal
+	turnEvents []remoteNativeTurn
 }
 
 func newGoalRPC(input io.Writer, output io.Reader, thread string) *goalRPC {
@@ -81,6 +82,9 @@ func (p *goalRPC) notification(m map[string]json.RawMessage) error {
 	if json.Unmarshal(m["method"], &method) != nil {
 		return goalError("goal-response-invalid")
 	}
+	if method == "turn/started" || method == "turn/completed" {
+		return p.nativeTurnNotification(method, m["params"])
+	}
 	if method != "thread/goal/updated" && method != "thread/goal/cleared" {
 		return nil
 	}
@@ -109,8 +113,21 @@ func (p *goalRPC) notification(m map[string]json.RawMessage) error {
 	return nil
 }
 func (p *goalRPC) request(method string, params any) (json.RawMessage, error) {
-	if !(method == "initialize" && p.serial == 0 || (method == "thread/goal/get" || method == "thread/goal/set" || method == "thread/turns/list") && p.serial > 0) {
+	if !goalMethodAllowed(method, p.serial) {
 		return nil, goalError("goal-method-refused")
+	}
+	if method == "thread/start" && p.thread != "" {
+		return nil, goalError("goal-method-refused")
+	}
+	if method != "initialize" && method != "remoteControl/status/read" && method != "thread/start" && method != "thread/loaded/list" {
+		b, e := json.Marshal(params)
+		var scope struct {
+			ThreadID         string `json:"threadId"`
+			AncestorThreadID string `json:"ancestorThreadId"`
+		}
+		if e != nil || json.Unmarshal(b, &scope) != nil || !privateNativeID(p.thread) || ((method != "thread/list" && scope.ThreadID != p.thread) || (method == "thread/list" && scope.AncestorThreadID != p.thread)) {
+			return nil, goalError("goal-response-mismatch")
+		}
 	}
 	p.serial++
 	id := p.serial
@@ -211,6 +228,9 @@ func (p *goalRPC) lastTurnCompleted() (bool, error) {
 	if decodeNativeJSON(result.Data[0], &turn) != nil || turn.ID == "" || turn.Status != "completed" ||
 		turn.ItemsView != "full" || turn.CompletedAt == nil || *turn.CompletedAt <= 0 || *turn.CompletedAt > time.Now().Unix() ||
 		len(turn.Items) == 0 || len(turn.Items) > 512 {
+		return false, nil
+	}
+	if !p.nativeTurnAgrees(turn.ID, turn.Status) {
 		return false, nil
 	}
 	final := false
@@ -321,34 +341,26 @@ func (p *goalRPC) initialize() error {
 	return p.send(map[string]string{"method": "initialized"})
 }
 func (h Host) withGoalConnection(ctx context.Context, thread string, use func(*goalRPC) error) error {
-	defer children.hold()()
 	if !privateNativeID(thread) {
 		return goalError("goal-identity-unavailable")
 	}
-	// Native identity, objective and budget travel over stdin, never argv.
+	if h.CanonicalCodex {
+		return h.withCanonicalConnection(ctx, thread, use)
+	}
 	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; exec codex app-server`, shq(h.agentHome()))
-	var cmd *exec.Cmd
-	if h.isLocal() {
-		cmd = exec.CommandContext(ctx, "bash", "-c", script)
-	} else {
-		cmd = exec.CommandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
+	return h.withGoalScript(ctx, script, thread, use)
+}
+
+func goalMethodAllowed(method string, serial int) bool {
+	if method == "initialize" {
+		return serial == 0
 	}
-	in, e := cmd.StdinPipe()
-	if e != nil {
-		return goalError("goal-transport-unavailable")
+	if serial == 0 {
+		return false
 	}
-	defer in.Close()
-	out, e := cmd.StdoutPipe()
-	if e != nil {
-		return goalError("goal-transport-unavailable")
+	switch method {
+	case "thread/goal/get", "thread/goal/set", "thread/goal/clear", "thread/turns/list", "thread/read", "thread/start", "thread/resume", "thread/name/set", "remoteControl/status/read", "turn/interrupt", "thread/queue/list", "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate", "thread/list", "thread/loaded/list":
+		return true
 	}
-	if cmd.Start() != nil {
-		return goalError("goal-transport-unavailable")
-	}
-	defer func() { _ = in.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	p := newGoalRPC(in, out, thread)
-	if e := p.initialize(); e != nil {
-		return e
-	}
-	return use(p)
+	return false
 }

@@ -274,7 +274,7 @@ func (c *Coord) publishFinalReport(ctx context.Context, j *Job) (int64, error) {
 }
 
 func (c *Coord) observeFinalReport(ctx context.Context, j *Job, ref agentRef, known bool) {
-	if c.dry || j == nil || !j.FinalReportManaged || j.RunMode || j.GoalDelivery != "confirmed" || !known ||
+	if c.dry || j == nil || j.RemoteCleanup != "" || !j.FinalReportManaged || j.RunMode || j.GoalDelivery != "confirmed" || !known ||
 		ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent {
 		return
 	}

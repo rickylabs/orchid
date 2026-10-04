@@ -122,7 +122,10 @@ func acquireNativeGoalBinding(ctx context.Context, r *durableMatrixReceipt, j *J
 		lastUnavailable = "native-session-unavailable"
 		id, reason := nativeSessionFromResponse(raw, "agent_info", "codex", j.Label, r.dispatch.Location)
 		if reason == "" {
-			if e := r.writeNativeIdentity(&id); e != nil {
+			if j.RemoteControl != nil && id != j.RemoteControl.NativeSessionID {
+				return "", goalError("remote-control-hook-mismatch")
+			}
+			if !publishNativeIdentity(ctx, id, r.writeNativeIdentity) {
 				return "", goalError("goal-binding-persistence-failed")
 			}
 			return id, nil
@@ -147,6 +150,11 @@ func goalWait(ctx context.Context) bool {
 	}
 }
 func (h Host) bindDispatchGoal(ctx context.Context, r *durableMatrixReceipt, j *Job) (string, error) {
+	if j != nil && j.RemoteControl != nil && j.RemoteControl.IdentitySource == "codex-native-status" {
+		return bindRemoteNativeGoal(ctx, r, j, func() error {
+			return h.remoteProof(ctx, j.Agent, j.Label, j.RemoteControl, r.dispatch.Location)
+		})
+	}
 	return acquireNativeGoalBinding(ctx, r, j, func() (json.RawMessage, error) {
 		out, e := h.herdr(ctx, "agent", "get", j.Pane)
 		if e != nil {
@@ -407,7 +415,10 @@ func (c *Coord) startDispatchGoal(ctx context.Context, host Host, j *Job, r *dur
 	defer cancel()
 	id, e := host.bindDispatchGoal(ctx, r, j)
 	if e == nil {
-		e = host.withGoalConnection(ctx, id, func(p *goalRPC) error { return createDispatchGoal(p, j.NativeGoal.Intent) })
+		e = host.forJob(j).withGoalConnection(ctx, id, func(p *goalRPC) error { return createDispatchGoal(p, j.NativeGoal.Intent) })
+	}
+	if e == goalError("remote-control-hook-mismatch") {
+		c.blockRemoteMismatch(ctx, host, j)
 	}
 	c.st.mu.Lock()
 	if e == nil {
@@ -449,7 +460,7 @@ func (c *Coord) transitionGoal(ctx context.Context, j *Job, status string) {
 		if !ok {
 			e = goalError("goal-host-unavailable")
 		} else {
-			e = host.withGoalConnection(ctx, id, func(p *goalRPC) error {
+			e = host.forJob(j).withGoalConnection(ctx, id, func(p *goalRPC) error {
 				var updateErr error
 				changed, updateErr = transitionDispatchGoal(p, j.NativeGoal.Intent, status)
 				return updateErr
