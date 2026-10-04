@@ -243,6 +243,12 @@ func TestRemoteControlForeignOwnerInputs(t *testing.T) {
 					target = "app-server-control"
 				}
 				next = "original_lstat=os.lstat\ndef foreign_stat(path):\n result=original_lstat(path)\n if os.path.basename(path)==" + shq(target) + ":\n  fields=list(result);fields[4]=os.getuid()+1;return os.stat_result(fields)\n return result\nos.lstat=foreign_stat\ndef run():"
+				if mode == "directory-owner" {
+					// Supply the same foreign directory owner to its pinned fd
+					// readback, so the ownership guard's mutant is not masked by
+					// an inconsistent path-vs-fd stat-input fixture.
+					next = "original_fstat=os.fstat\ndef foreign_fstat(fd):\n fields=list(original_fstat(fd));fields[4]=os.getuid()+1;return os.stat_result(fields)\nos.fstat=foreign_fstat\n" + next
+				}
 			}
 			if strings.Count(canonicalCodexBridge, old) != 1 {
 				t.Fatal("native credential input fixture drifted")
