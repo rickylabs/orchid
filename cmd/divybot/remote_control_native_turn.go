@@ -40,6 +40,7 @@ func (p *goalRPC) nativeTurnNotification(method string, params json.RawMessage) 
 		return goalError("goal-notification-limit")
 	}
 	p.turnEvents = append(p.turnEvents, remoteNativeTurn{n.ThreadID, n.Turn.ID, n.Turn.Status})
+	p.shadow.turn(n.ThreadID, n.Turn.ID, n.Turn.Status)
 	return nil
 }
 
