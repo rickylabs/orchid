@@ -621,17 +621,46 @@ func returnsAt(body *ast.BlockStmt) bool {
 	return len(body.List) > 0 && func() bool { _, ok := body.List[len(body.List)-1].(*ast.ReturnStmt); return ok }()
 }
 
-// guardedIf finds an if statement whose condition has want as a direct
-// operand of op (not nested under another operator) and whose body returns.
-func guardedIf(fn *ast.FuncDecl, op token.Token, want string) bool {
-	found := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if ifs, ok := n.(*ast.IfStmt); ok && returnsAt(ifs.Body) && hasOperand(ifs.Cond, op, want) {
-			found = true
+// predicateUses counts deliveryConfirmed calls in a function: a guarded
+// function has exactly one, so a dead or duplicate copy is refused.
+func predicateUses(fn *ast.FuncDecl) int {
+	n := 0
+	ast.Inspect(fn.Body, func(x ast.Node) bool {
+		if call, ok := x.(*ast.CallExpr); ok && types.ExprString(call.Fun) == "deliveryConfirmed" {
+			n++
 		}
 		return true
 	})
-	return found
+	return n
+}
+
+// refusingIf reports whether stmt is a plain top-level if (no init, no else)
+// whose body is exactly one return of ret ("" for a bare return).
+func refusingIf(stmt ast.Stmt, ret string) (*ast.IfStmt, bool) {
+	ifs, ok := stmt.(*ast.IfStmt)
+	if !ok || ifs.Init != nil || ifs.Else != nil || len(ifs.Body.List) != 1 {
+		return nil, false
+	}
+	r, ok := ifs.Body.List[0].(*ast.ReturnStmt)
+	if !ok {
+		return nil, false
+	}
+	parts := []string{}
+	for _, e := range r.Results {
+		parts = append(parts, types.ExprString(e))
+	}
+	return ifs, strings.Join(parts, ", ") == ret
+}
+
+// leadingGuard requires the operative delivery condition: the function's
+// first statement refuses with ret when want is a direct || operand, and the
+// predicate appears nowhere else in the function.
+func leadingGuard(fn *ast.FuncDecl, want, ret string) bool {
+	if fn == nil || len(fn.Body.List) == 0 || predicateUses(fn) != 1 {
+		return false
+	}
+	ifs, ok := refusingIf(fn.Body.List[0], ret)
+	return ok && hasOperand(ifs.Cond, token.LOR, want)
 }
 
 // commitSnapshotValid enforces the one rollback-snapshot read (F5-R7-A) in
@@ -677,15 +706,29 @@ func commitSnapshotValid(fn *ast.FuncDecl) bool {
 	if locks != 2 { // exactly the Lock and its deferred Unlock
 		return false
 	}
+	// The before-rename failure branch, recognized exactly: the save, the
+	// phase variable, then the top-level if on the before-rename condition.
+	branch := -1
+	for i := setAt + 1; i+2 < len(list); i++ {
+		save, ok := list[i].(*ast.AssignStmt)
+		decl, ok2 := list[i+1].(*ast.DeclStmt)
+		ifs, ok3 := refusingIfBlock(list[i+2])
+		if ok && ok2 && ok3 && types.ExprString(save.Rhs[0]) == "c.st.saveLocked()" &&
+			strings.Contains(types.ExprString(decl.Decl.(*ast.GenDecl).Specs[0].(*ast.ValueSpec).Type), "stateSaveError") &&
+			types.ExprString(ifs.Cond) == beforeRenameCond {
+			branch = i + 2
+			break
+		}
+	}
+	if branch < 0 {
+		return false
+	}
 	restores, uses := 0, 0
-	for _, stmt := range list {
-		ifs, ok := stmt.(*ast.IfStmt)
-		inFailure := ok && strings.Contains(types.ExprString(ifs.Cond), "afterRename") && returnsAt(ifs.Body) &&
-			types.ExprString(ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt).Results[0]) == "errPromptUnconfirmed"
+	for i, stmt := range list {
 		ast.Inspect(stmt, func(n ast.Node) bool {
 			if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 &&
 				types.ExprString(as.Lhs[0]) == "j.NativeGoal.PromptConfirmed" && types.ExprString(as.Rhs[0]) == snap {
-				if !inFailure {
+				if i != branch || !directIn(list[branch].(*ast.IfStmt).Body, as) {
 					restores = -100
 				}
 				restores++
@@ -697,6 +740,28 @@ func commitSnapshotValid(fn *ast.FuncDecl) bool {
 		})
 	}
 	return restores == 1 && uses == 2 // the snapshot declaration and its one restore
+}
+
+const beforeRenameCond = "err != nil && !(errors.As(err, &saved) && saved.afterRename)"
+
+// refusingIfBlock: a plain top-level if (no init, no else) ending in
+// return errPromptUnconfirmed.
+func refusingIfBlock(stmt ast.Stmt) (*ast.IfStmt, bool) {
+	ifs, ok := stmt.(*ast.IfStmt)
+	if !ok || ifs.Init != nil || ifs.Else != nil || !returnsAt(ifs.Body) {
+		return nil, false
+	}
+	r := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt)
+	return ifs, len(r.Results) == 1 && types.ExprString(r.Results[0]) == "errPromptUnconfirmed"
+}
+
+func directIn(body *ast.BlockStmt, stmt ast.Stmt) bool {
+	for _, s := range body.List {
+		if s == stmt {
+			return true
+		}
+	}
+	return false
 }
 
 func checkDeliveryInventory(src map[string]string) error {
@@ -722,47 +787,45 @@ func checkDeliveryInventory(src map[string]string) error {
 		}
 	}
 	// T3h-1: each required guard is a direct operand in its decisive place.
+	// goalDeliveryUnconfirmed is a single return; the RC disjunct is a direct
+	// operand of the || group that is a direct operand of its && chain.
 	g := funcs["goalDeliveryUnconfirmed"]
 	ok := false
-	if g != nil {
-		ast.Inspect(g.Body, func(n ast.Node) bool {
-			if r, isRet := n.(*ast.ReturnStmt); isRet && len(r.Results) == 1 {
-				for _, conj := range operands(r.Results[0], token.LAND) {
-					if hasOperand(conj, token.LOR, "rcCodex(j) && !deliveryConfirmed(j)") {
-						ok = true
-					}
+	if g != nil && len(g.Body.List) == 1 && predicateUses(g) == 1 {
+		if r, isRet := g.Body.List[0].(*ast.ReturnStmt); isRet && len(r.Results) == 1 {
+			for _, conj := range operands(r.Results[0], token.LAND) {
+				if hasOperand(conj, token.LOR, "rcCodex(j) && !deliveryConfirmed(j)") {
+					ok = true
 				}
 			}
-			return true
-		})
+		}
 	}
 	if !ok {
 		return errors.New("required guard missing: goalDeliveryUnconfirmed")
 	}
-	for _, name := range []string{"observeFinalReport", "finalProof"} {
-		if fn := funcs[name]; fn == nil || !guardedIf(fn, token.LOR, "!deliveryConfirmed(j)") {
-			return errors.New("required guard missing: " + name)
-		}
+	if !leadingGuard(funcs["observeFinalReport"], "!deliveryConfirmed(j)", "") {
+		return errors.New("required guard missing: observeFinalReport")
+	}
+	if !leadingGuard(funcs["finalProof"], "!deliveryConfirmed(j)", "errFinalPublication") {
+		return errors.New("required guard missing: finalProof")
 	}
 	retire := funcs["retireCompleted"]
 	if retire == nil {
 		return errors.New("required guard missing: retireCompleted")
 	}
-	unfenced, other := false, 0
-	ast.Inspect(retire.Body, func(n ast.Node) bool {
-		ifs, isIf := n.(*ast.IfStmt)
-		if !isIf {
-			return true
+	// The unfenced gate is a top-level refusing if: !fenced && (... || !deliveryConfirmed(j) || ...).
+	unfenced := false
+	for _, stmt := range retire.Body.List {
+		ifs, ok := refusingIf(stmt, "false")
+		if !ok {
+			continue
 		}
 		conj := operands(ifs.Cond, token.LAND)
-		if len(conj) == 2 && types.ExprString(conj[0]) == "!fenced" && hasOperand(conj[1], token.LOR, "!deliveryConfirmed(j)") && returnsAt(ifs.Body) {
+		if len(conj) == 2 && types.ExprString(conj[0]) == "!fenced" && hasOperand(conj[1], token.LOR, "!deliveryConfirmed(j)") {
 			unfenced = true
-		} else if strings.Contains(types.ExprString(ifs.Cond), "deliveryConfirmed") {
-			other++
 		}
-		return true
-	})
-	if !unfenced || other != 0 {
+	}
+	if !unfenced || predicateUses(retire) != 1 {
 		return errors.New("required guard missing: retireCompleted unfenced gate")
 	}
 	if commit := funcs["commitRemoteCodexDelivery"]; commit == nil || !commitSnapshotValid(commit) {
@@ -770,15 +833,12 @@ func checkDeliveryInventory(src map[string]string) error {
 	}
 	retry := funcs["retryBoundGoalEligible"]
 	vetoed := false
-	if retry != nil {
-		ast.Inspect(retry.Body, func(n ast.Node) bool {
-			if ifs, ok := n.(*ast.IfStmt); ok && types.ExprString(unparen(ifs.Cond)) == "rcCodex(j) && !deliveryConfirmed(j)" && len(ifs.Body.List) == 1 {
-				if r, ok := ifs.Body.List[0].(*ast.ReturnStmt); ok && len(r.Results) == 1 && types.ExprString(r.Results[0]) == "false" {
-					vetoed = true
-				}
+	if retry != nil && predicateUses(retry) == 1 {
+		for _, stmt := range retry.Body.List {
+			if ifs, ok := refusingIf(stmt, "false"); ok && types.ExprString(unparen(ifs.Cond)) == "rcCodex(j) && !deliveryConfirmed(j)" {
+				vetoed = true
 			}
-			return true
-		})
+		}
 	}
 	if !vetoed {
 		return errors.New("required guard missing: retry veto")
@@ -808,26 +868,43 @@ func TestDeliveryAuthorityInventory(t *testing.T) {
 	if err := checkDeliveryInventory(src); err != nil {
 		t.Fatalf("baseline inventory: %v", err)
 	}
-	negatives := []struct{ name, file, old, new string }{
-		{"guard-goalDeliveryUnconfirmed", "goal_delivery.go", " ||\n\t\t(rcCodex(j) && !deliveryConfirmed(j)))", ")"},
-		{"guard-observeFinalReport", "final_report_publication.go", "j.RunMode || !deliveryConfirmed(j) || !known", "j.RunMode || !known"},
-		{"guard-finalProof", "final_report_publication.go", "ctx.Err() != nil || !deliveryConfirmed(j) {", "ctx.Err() != nil || j.GoalDelivery != \"confirmed\" {"},
-		{"guard-retireCompleted", "completion.go", "j.Issue != n || !deliveryConfirmed(j) || j.RunMode", "j.Issue != n || j.RunMode"},
-		{"guard-retry", "native_goal.go", "\tif rcCodex(j) && !deliveryConfirmed(j) {\n\t\treturn false\n\t}\n", ""},
-		{"raw-in-new-function", "goal_delivery.go", "func rcCodex(j *Job) bool {", "func rawConfirmed(j *Job) bool { return j.GoalDelivery == \"confirmed\" }\n\nfunc rcCodex(j *Job) bool {"},
-		{"extra-in-goalDeliveryUnconfirmed", "goal_delivery.go", "return j != nil && !j.RunMode && (", "return j != nil && !j.RunMode && (j.GoalDelivery == \"confirmed\" && false ||"},
-		{"extra-in-retry", "native_goal.go", "\tif rcCodex(j) && !deliveryConfirmed(j) {", "\tif j.NativeGoal.PromptConfirmed && false {\n\t\treturn false\n\t}\n\tif rcCodex(j) && !deliveryConfirmed(j) {"},
-		{"completion-guard-fenced", "completion.go", "\tif j.RemoteControl != nil {\n\t\tif fenced {", "\tif fenced && !deliveryConfirmed(j) {\n\t\treturn false\n\t}\n\tif j.RemoteControl != nil {\n\t\tif fenced {"},
-		{"commit-extra-read", "native_codex_commit.go", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark", "\tif j.NativeGoal.PromptConfirmed {\n\t\treturn nil\n\t}\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark"},
-		{"commit-confirmed-comparison", "native_codex_commit.go", "\tpriorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit", "\tif j.GoalDelivery == \"confirmed\" {\n\t\treturn nil\n\t}\n\tpriorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit"},
-		{"commit-snapshot-reused", "native_codex_commit.go", "\tif err != nil {\n\t\tlog.Printf", "\tif priorPrompt {\n\t\treturn nil\n\t}\n\tif err != nil {\n\t\tlog.Printf"},
-		{"outer-publication-bypass", "final_report_publication.go", "j.RunMode || !deliveryConfirmed(j) || !known", "j.RunMode || (false && !deliveryConfirmed(j)) || !known"},
-		{"finalproof-bypass", "final_report_publication.go", "ctx.Err() != nil || !deliveryConfirmed(j) {", "ctx.Err() != nil || (false && !deliveryConfirmed(j)) {"},
-		{"retire-bypass", "completion.go", "j.Issue != n || !deliveryConfirmed(j) || j.RunMode", "j.Issue != n || (false && !deliveryConfirmed(j)) || j.RunMode"},
-		{"goal-unconfirmed-bypass", "goal_delivery.go", "(rcCodex(j) && !deliveryConfirmed(j)))", "(false && rcCodex(j) && !deliveryConfirmed(j)))"},
-		{"snapshot-outside-critical-section", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed", "\tc.st.mu.Unlock()\n\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tc.st.mu.Lock()"},
-		{"restore-outside-failure-branch", "native_codex_commit.go", "\tif err != nil {\n\t\tlog.Printf", "\tj.NativeGoal.PromptConfirmed = priorPrompt\n\tif err != nil {\n\t\tlog.Printf"},
-		{"commit-snapshot-after-write", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true\n\tpriorPrompt := j.NativeGoal.PromptConfirmed"},
+	negatives := []struct {
+		name, file, old, new string
+		more                 [][2]string
+	}{
+		{"guard-goalDeliveryUnconfirmed", "goal_delivery.go", " ||\n\t\t(rcCodex(j) && !deliveryConfirmed(j)))", ")", nil},
+		{"guard-observeFinalReport", "final_report_publication.go", "j.RunMode || !deliveryConfirmed(j) || !known", "j.RunMode || !known", nil},
+		{"guard-finalProof", "final_report_publication.go", "ctx.Err() != nil || !deliveryConfirmed(j) {", "ctx.Err() != nil || j.GoalDelivery != \"confirmed\" {", nil},
+		{"guard-retireCompleted", "completion.go", "j.Issue != n || !deliveryConfirmed(j) || j.RunMode", "j.Issue != n || j.RunMode", nil},
+		{"guard-retry", "native_goal.go", "\tif rcCodex(j) && !deliveryConfirmed(j) {\n\t\treturn false\n\t}\n", "", nil},
+		{"raw-in-new-function", "goal_delivery.go", "func rcCodex(j *Job) bool {", "func rawConfirmed(j *Job) bool { return j.GoalDelivery == \"confirmed\" }\n\nfunc rcCodex(j *Job) bool {", nil},
+		{"extra-in-goalDeliveryUnconfirmed", "goal_delivery.go", "return j != nil && !j.RunMode && (", "return j != nil && !j.RunMode && (j.GoalDelivery == \"confirmed\" && false ||", nil},
+		{"extra-in-retry", "native_goal.go", "\tif rcCodex(j) && !deliveryConfirmed(j) {", "\tif j.NativeGoal.PromptConfirmed && false {\n\t\treturn false\n\t}\n\tif rcCodex(j) && !deliveryConfirmed(j) {", nil},
+		{"completion-guard-fenced", "completion.go", "\tif j.RemoteControl != nil {\n\t\tif fenced {", "\tif fenced && !deliveryConfirmed(j) {\n\t\treturn false\n\t}\n\tif j.RemoteControl != nil {\n\t\tif fenced {", nil},
+		{"commit-extra-read", "native_codex_commit.go", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark", "\tif j.NativeGoal.PromptConfirmed {\n\t\treturn nil\n\t}\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark", nil},
+		{"commit-confirmed-comparison", "native_codex_commit.go", "\tpriorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit", "\tif j.GoalDelivery == \"confirmed\" {\n\t\treturn nil\n\t}\n\tpriorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit", nil},
+		{"commit-snapshot-reused", "native_codex_commit.go", "\tif err != nil {\n\t\tlog.Printf", "\tif priorPrompt {\n\t\treturn nil\n\t}\n\tif err != nil {\n\t\tlog.Printf", nil},
+		{"outer-publication-bypass", "final_report_publication.go", "j.RunMode || !deliveryConfirmed(j) || !known", "j.RunMode || (false && !deliveryConfirmed(j)) || !known", nil},
+		{"finalproof-bypass", "final_report_publication.go", "ctx.Err() != nil || !deliveryConfirmed(j) {", "ctx.Err() != nil || (false && !deliveryConfirmed(j)) {", nil},
+		{"retire-bypass", "completion.go", "j.Issue != n || !deliveryConfirmed(j) || j.RunMode", "j.Issue != n || (false && !deliveryConfirmed(j)) || j.RunMode", nil},
+		{"goal-unconfirmed-bypass", "goal_delivery.go", "(rcCodex(j) && !deliveryConfirmed(j)))", "(false && rcCodex(j) && !deliveryConfirmed(j)))", nil},
+		{"snapshot-outside-critical-section", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed", "\tc.st.mu.Unlock()\n\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tc.st.mu.Lock()", nil},
+		{"restore-outside-failure-branch", "native_codex_commit.go", "\tif err != nil {\n\t\tlog.Printf", "\tj.NativeGoal.PromptConfirmed = priorPrompt\n\tif err != nil {\n\t\tlog.Printf", nil},
+		// F5a: the predicate moved out of the operative condition into dead code.
+		{"outer-guard-in-dead-branch", "final_report_publication.go", "j.RunMode || !deliveryConfirmed(j) || !known", "j.RunMode || !known",
+			[][2]string{{"func (c *Coord) observeFinalReport(ctx context.Context, j *Job, ref agentRef, known bool) {\n", "func (c *Coord) observeFinalReport(ctx context.Context, j *Job, ref agentRef, known bool) {\n\tif false {\n\t\tif !deliveryConfirmed(j) {\n\t\t\treturn\n\t\t}\n\t}\n"}}},
+		{"finalproof-guard-in-dead-branch", "final_report_publication.go", "if ctx.Err() != nil || !deliveryConfirmed(j) {", "if ctx.Err() != nil {",
+			[][2]string{{"func (c *Coord) finalProof(ctx context.Context, h Host, j *Job, s finalReportScope) error {\n", "func (c *Coord) finalProof(ctx context.Context, h Host, j *Job, s finalReportScope) error {\n\tif false {\n\t\tif !deliveryConfirmed(j) {\n\t\t\treturn errFinalPublication\n\t\t}\n\t}\n"}}},
+		{"outer-guard-duplicated-dead", "final_report_publication.go", "func (c *Coord) observeFinalReport(ctx context.Context, j *Job, ref agentRef, known bool) {\n", "func (c *Coord) observeFinalReport(ctx context.Context, j *Job, ref agentRef, known bool) {\n\tif false && !deliveryConfirmed(j) {\n\t\treturn\n\t}\n", nil},
+		{"outer-guard-not-returning", "final_report_publication.go", "ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent {\n\t\treturn\n\t}", "ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent {\n\t}", nil},
+		{"retire-guard-in-dead-branch", "completion.go", "j.Issue != n || !deliveryConfirmed(j) || j.RunMode", "j.Issue != n || j.RunMode",
+			[][2]string{{"\thost, ok := c.hosts[j.Host]\n\tif !ok {\n\t\treturn fenced\n\t}\n\tcheck, cancel := context.WithTimeout(ctx, 20*time.Second)", "\tif false {\n\t\tif !fenced && !deliveryConfirmed(j) {\n\t\t\treturn false\n\t\t}\n\t}\n\thost, ok := c.hosts[j.Host]\n\tif !ok {\n\t\treturn fenced\n\t}\n\tcheck, cancel := context.WithTimeout(ctx, 20*time.Second)"}}},
+		{"retry-veto-in-dead-branch", "native_goal.go", "\tif rcCodex(j) && !deliveryConfirmed(j) {\n\t\treturn false\n\t}\n", "\tif false {\n\t\tif rcCodex(j) && !deliveryConfirmed(j) {\n\t\t\treturn false\n\t\t}\n\t}\n", nil},
+		// F5b: the rollback restored after the rename (phase inverted) or outside the branch.
+		{"restore-after-rename", "native_codex_commit.go", "err != nil && !(errors.As(err, &saved) && saved.afterRename)", "err != nil && (errors.As(err, &saved) && saved.afterRename)", nil},
+		{"restore-before-phase-check", "native_codex_commit.go", "\t\tj.NativeGoal.PromptConfirmed = priorPrompt\n", "",
+			[][2]string{{"\tvar saved stateSaveError", "\tj.NativeGoal.PromptConfirmed = priorPrompt\n\tvar saved stateSaveError"}}},
+		{"commit-snapshot-after-write", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true\n\tpriorPrompt := j.NativeGoal.PromptConfirmed", nil},
 	}
 	for _, n := range negatives {
 		t.Run(n.name, func(t *testing.T) {
@@ -835,10 +912,12 @@ func TestDeliveryAuthorityInventory(t *testing.T) {
 			for k, v := range src {
 				copySrc[k] = v
 			}
-			if strings.Count(copySrc[n.file], n.old) != 1 {
-				t.Fatalf("negative anchor drifted: %s", n.name)
+			for _, edit := range append([][2]string{{n.old, n.new}}, n.more...) {
+				if strings.Count(copySrc[n.file], edit[0]) != 1 {
+					t.Fatalf("negative anchor drifted: %s", n.name)
+				}
+				copySrc[n.file] = strings.Replace(copySrc[n.file], edit[0], edit[1], 1)
 			}
-			copySrc[n.file] = strings.Replace(copySrc[n.file], n.old, n.new, 1)
 			if checkDeliveryInventory(copySrc) == nil {
 				t.Fatal("inventory accepted a removed or extra delivery read")
 			}
