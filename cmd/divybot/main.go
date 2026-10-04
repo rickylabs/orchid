@@ -2163,6 +2163,11 @@ func (c *Coord) run(ctx context.Context) {
 	go c.authSyncLoop(ctx)
 	go c.governorLoop(ctx)
 	go c.memoryLoop(ctx)
+	go func() {
+		t := time.NewTicker(shadowReadoutEvery)
+		defer t.Stop()
+		c.shadowReadoutLoop(ctx, t.C, time.Now())
+	}()
 	iv := durOr(c.cfg.PollInterval, 30*time.Second)
 	t := time.NewTicker(iv)
 	defer t.Stop()

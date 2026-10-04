@@ -303,9 +303,11 @@ type shadowComparison struct {
 }
 
 type shadowScopeState struct {
-	reducer *shadowReducer
-	ledger  []shadowComparison
-	touched uint64
+	reducer  *shadowReducer
+	ledger   []shadowComparison
+	touched  uint64
+	accepted map[string]int // closed fact codes
+	rejected map[string]int // closed refusal codes
 }
 
 type nativeEvidenceShadow struct {
@@ -313,6 +315,7 @@ type nativeEvidenceShadow struct {
 	now         func() time.Time
 	invocations uint64
 	ticks       uint64
+	version     uint64 // bumped on every recorded change; drives the private readout
 	scopes      map[string]*shadowScopeState
 }
 
@@ -336,7 +339,8 @@ func (s *nativeEvidenceShadow) bindLocked(j *Job) *shadowScopeState {
 			s.evictLocked()
 		}
 		s.invocations++
-		scope = &shadowScopeState{reducer: newShadowReducer(b, s.invocations)}
+		s.version++
+		scope = &shadowScopeState{reducer: newShadowReducer(b, s.invocations), accepted: map[string]int{}, rejected: map[string]int{}}
 		s.scopes[b.Key] = scope
 	}
 	scope.touched = s.ticks
@@ -411,7 +415,12 @@ func (p *shadowPublisher) publish(fact shadowFact, value, thread, turn string) {
 	}
 	now := s.now()
 	p.seq++
-	scope.reducer.ingest(shadowRow{Source: p.source, SourceEpoch: p.epoch, Seq: p.seq, Fact: fact, Value: value, Thread: thread, Turn: turn, ObservedAt: now}, now)
+	if ok, reason := scope.reducer.ingest(shadowRow{Source: p.source, SourceEpoch: p.epoch, Seq: p.seq, Fact: fact, Value: value, Thread: thread, Turn: turn, ObservedAt: now}, now); ok {
+		scope.accepted[string(fact)]++
+	} else {
+		scope.rejected[reason]++
+	}
+	s.version++
 }
 
 // Exact-thread canonical turn notification, already validated by its reader.
@@ -478,6 +487,7 @@ func (s *nativeEvidenceShadow) compare(j *Job, site, today string, inputs []stri
 		scope.ledger = scope.ledger[1:]
 	}
 	scope.ledger = append(scope.ledger, c)
+	s.version++
 }
 
 func shadowAgreement(site, today string, v shadowVerdict) string {
