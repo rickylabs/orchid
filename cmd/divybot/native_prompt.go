@@ -28,6 +28,9 @@ type promptCalls struct {
 	enter     func(context.Context) error
 	wait      func(context.Context) bool
 	now       func() time.Time
+	// RC Codex: native acceptance replaces everything after the marker. It
+	// owns the single submit; no Enter, replay or screen read follows.
+	native func(ctx context.Context, sent string, submit func(context.Context) error) error
 }
 
 func samePromptOccupant(a, b AgentInfo) bool {
@@ -142,6 +145,9 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 	if err != nil || markerVisible(before.Screen, marker) {
 		return errPromptUnconfirmed
 	}
+	if d.native != nil { // guard:native-branch
+		return d.native(ctx, sent, func(ctx context.Context) error { return d.submit(ctx, sent) })
+	}
 	if err := d.submit(ctx, sent); err != nil {
 		return errPromptUnconfirmed
 	}
@@ -231,7 +237,18 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 }
 
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
+	var native func(context.Context, string, func(context.Context) error) error
+	if h.CanonicalCodex && h.RemoteRun != nil {
+		// Remote Control Codex has no screen-confirmed delivery path.
+		if h.Acceptance == nil {
+			return errPromptUnconfirmed
+		}
+		native = func(ctx context.Context, sent string, submit func(context.Context) error) error {
+			return h.acceptCodexPrompt(ctx, h.Acceptance, sent, submit)
+		}
+	}
 	return deliverCodexPrompt(ctx, expected, goal, promptCalls{
+		native:    native,
 		noConsent: h.CanonicalCodex,
 		observe: func(ctx context.Context) (promptSnapshot, error) {
 			s, err := h.promptSnapshot(ctx, target)

@@ -7,7 +7,18 @@ import "context"
 func goalDeliveryUnconfirmed(j *Job) bool {
 	return j != nil && !j.RunMode && (j.GoalDelivery == "pending" || j.GoalDelivery == "blocked" ||
 		(j.Agent == "codex" && j.GoalDelivery != "confirmed") ||
-		(j.NativeGoal != nil && (j.GoalDelivery != "confirmed" || !j.NativeGoal.PromptConfirmed)))
+		(j.NativeGoal != nil && (j.GoalDelivery != "confirmed" || !j.NativeGoal.PromptConfirmed)) ||
+		(rcCodex(j) && !deliveryConfirmed(j)))
+}
+
+func rcCodex(j *Job) bool { return j != nil && j.RemoteControl != nil && j.Agent == "codex" }
+
+// The one delivery-authority predicate. For every job that is not Remote
+// Control Codex it is the raw confirmation; RC Codex also needs the on-time
+// native commit marker and the prompt-confirmation bit written with it.
+func deliveryConfirmed(j *Job) bool {
+	return j != nil && j.GoalDelivery == "confirmed" &&
+		(!rcCodex(j) || (j.GoalDeliveryCommit == deliveryCommitMark && j.NativeGoal != nil && j.NativeGoal.PromptConfirmed))
 }
 
 func (c *Coord) blockGoalDelivery(n int, j *Job) {

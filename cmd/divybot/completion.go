@@ -271,7 +271,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if !fenced && j.Agent == "agy" && !agyBindingEligible(j) {
 		return false
 	}
-	if !fenced && (!known || j == nil || j.Issue != n || j.GoalDelivery != "confirmed" || j.RunMode ||
+	if !fenced && (!known || j == nil || j.Issue != n || !deliveryConfirmed(j) || j.RunMode ||
 		ref.Status != "done" || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent) {
 		return false
 	}
