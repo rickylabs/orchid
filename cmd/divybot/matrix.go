@@ -552,6 +552,13 @@ type durableMatrixReceipt struct {
 	claimed  bool
 	owner    *receiptOwner
 	dispatch *dispatchBinding
+	profile  *workerProfile
+}
+
+// workerProfile is the Harness profile the dispatcher read and pinned for this launch.
+// The worker receives this exact text; it never reads a profile from the target checkout.
+type workerProfile struct {
+	Name, Revision, Text string
 }
 
 func (r *durableMatrixReceipt) claim(command string) bool {
@@ -944,6 +951,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
 		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
+	handle.profile = &workerProfile{Name: o.Profile, Revision: profileRevision, Text: req.ProfileText} // guard:worker-profile
 	if e := handle.writeDispatch("reserved", nil); e != nil {
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
 		return "", false

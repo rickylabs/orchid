@@ -76,6 +76,9 @@ func TestMatrixProfilesComeFromHarness(t *testing.T) {
 					if err != nil || json.Unmarshal(data, &bound) != nil {
 						t.Fatal("dispatch binding unreadable")
 					}
+					if r.profile == nil || r.profile.Name != bound.Profile || r.profile.Revision != tc.wantRevision || r.profile.Text != profileText {
+						t.Fatal("launch did not receive the pinned Harness profile for the worker goal")
+					}
 					return nil
 				},
 			}
@@ -148,5 +151,42 @@ func TestMatrixProfilesComeFromHarness(t *testing.T) {
 	}
 	if d := matrixReasons["profile-unavailable"]; d.field != "matrix.profile_revision" || !strings.Contains(d.hint, "Harness") {
 		t.Fatal("served remedy still points at the target repository")
+	}
+}
+
+// The launched worker gets the dispatcher's pinned Harness profile text in its goal, and
+// is never told to look for a profile in the target checkout, with or without a profile.
+func TestWorkerGoalCarriesPinnedHarnessProfile(t *testing.T) {
+	c := &Coord{cfg: &Config{Inbox: "example/inbox"}}
+	tgt := Target{Repo: "example/project", Label: "fixture-target"}
+	is := Issue{Number: 3, Title: "Synthetic", Body: "Synthetic task"}
+	text := "Synthetic Harness fix process.\nOne defect, one PR.\n"
+	for _, tc := range []struct {
+		name    string
+		profile *workerProfile
+		runMode bool
+	}{
+		{"interactive-pinned", &workerProfile{Name: "fix", Revision: strings.Repeat("d", 40), Text: text}, false},
+		{"run-mode-pinned", &workerProfile{Name: "fix", Revision: strings.Repeat("d", 40), Text: text}, true},
+		{"no-profile", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &durableMatrixReceipt{dispatch: &dispatchBinding{Issue: dispatchIssue{Repo: "example/inbox", Number: 3}}, profile: tc.profile}
+			goal := c.workerGoal(3, is, tgt, "/work/issue-3", "fixture/3", tc.runMode, strings.Repeat("a", 64), Overrides{Profile: "fix"}, r)
+			if strings.Contains(goal, "profiles/fix.md") || strings.Contains(goal, "repo root") {
+				t.Fatal("goal points the worker at a profile in the target checkout")
+			}
+			if tc.profile == nil {
+				if strings.Contains(goal, "BEGIN PROFILE") {
+					t.Fatal("goal invented a profile the dispatcher did not pin")
+				}
+				return
+			}
+			if !strings.Contains(goal, "----- BEGIN PROFILE fix -----\n"+strings.TrimRight(text, "\n")+"\n----- END PROFILE fix -----") ||
+				!strings.Contains(goal, matrixSourceRepository+" at "+tc.profile.Revision) || !strings.Contains(goal, "sha256 "+shaText([]byte(text))) ||
+				!strings.HasPrefix(goal, "## Operator directives") {
+				t.Fatal("goal lost the pinned Harness profile, its source pin or its digest")
+			}
+		})
 	}
 }

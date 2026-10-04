@@ -157,9 +157,12 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	// Longer than Job.Goal's public summary: that summary cannot supply the prompt.
 	body := "Full brief beginning.\n" + strings.Repeat("synthetic task detail; ", 90) + "\nFull brief end."
 	is := Issue{Number: 7, Title: "Synthetic goal", Body: body, Labels: []string{"fixture-target"}}
-	o := Overrides{Model: "fixture-provider/fixture-model", Router: "fixture-provider", Effort: "high", Prompt: "Synthetic owner instruction: report only; no PR."}
+	o := Overrides{Model: "fixture-provider/fixture-model", Router: "fixture-provider", Effort: "high", Prompt: "Synthetic owner instruction: report only; no PR.", Profile: "fix"}
 	r := registrationReceipt(t, "opencode", o)
 	r.dispatch.Host = h.Name
+	// The dispatcher's pinned Harness profile; the target checkout carries a conflicting decoy.
+	r.profile = &workerProfile{Name: "fix", Revision: strings.Repeat("e", 40), Text: "Synthetic Harness fix process.\n"}
+	writeFixture(t, filepath.Join(cwd, "profiles", "fix.md"), "Synthetic target decoy process.\n")
 	if err := r.writeDispatch("reserved", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -171,10 +174,14 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	if err := c.spawn(ctx, 7, is, h, "opencode", o, r); err != nil {
 		t.Fatal("full rendered goal launch did not confirm", err)
 	}
-	goal := o.goalPreamble() + "\n" + renderGoal(c.cfg.Inbox, "fixture/project", "fixture-target", is.Title, is.Body, cwd, "fixture/7", "", 7) + finalReportInstruction(r.dispatch.Issue, strings.Repeat("d", 64))
+	goal := o.goalPreamble(r.profile) + "\n" + renderGoal(c.cfg.Inbox, "fixture/project", "fixture-target", is.Title, is.Body, cwd, "fixture/7", "", 7) + finalReportInstruction(r.dispatch.Issue, strings.Repeat("d", 64))
 	actual, err := os.ReadFile(filepath.Join(h.Home, "submitted-prompt"))
 	if err != nil || string(actual) != openCodeFirstPrompt(goal) || !strings.Contains(string(actual), body) || !strings.Contains(string(actual), finalReportFile) {
 		t.Fatal("first prompt lost the complete brief, directives or report handoff")
+	}
+	if !strings.Contains(string(actual), "Synthetic Harness fix process.") || !strings.Contains(string(actual), matrixSourceRepository+" at "+strings.Repeat("e", 40)) ||
+		strings.Contains(string(actual), "Synthetic target decoy") || strings.Contains(string(actual), "in the repo root") {
+		t.Fatal("first prompt did not carry the pinned Harness profile, or pointed at the target checkout")
 	}
 	staged, err := os.ReadFile(filepath.Join(cwd, ".divybot-goal.md"))
 	if err != nil || string(staged) != goal+"\n" {
