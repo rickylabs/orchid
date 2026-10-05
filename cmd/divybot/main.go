@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -2788,6 +2789,10 @@ func (c *Coord) admissionTarget(ctx context.Context, n int, is Issue, post func(
 	return tgt, ok
 }
 
+// worktreeOriginMismatch is the prep script's exit code for a checkout whose
+// origin is not the resolved repository.
+const worktreeOriginMismatch = 43
+
 // bindingSourceRef is the source reference a binding issue's title starts with.
 var bindingSourceRef = regexp.MustCompile(`^\[([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[0-9]+\]`)
 
@@ -3176,10 +3181,21 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	prep := fmt.Sprintf(`set -e
 mkdir -p %s; cd %s
 if [ ! -d .git ]; then find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true; git clone --depth=1 https://github.com/%s . ; fi
+o=$(git config --get remote.origin.url || true); o=${o%%.git}; o=${o%%/}
+[ "$(printf %%s "$o" | tr A-Z a-z)" = "$(printf %%s %s | tr A-Z a-z)" ] || exit %d
 git fetch --depth=1 origin %s >/dev/null 2>&1
 git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
-		shq(workdir), shq(workdir), tgt.Repo, shq(c.cfg.Matrix.TargetRevisions[tgt.Repo]), shq(branch))
+		shq(workdir), shq(workdir), tgt.Repo, shq("https://github.com/"+tgt.Repo), worktreeOriginMismatch, shq(c.cfg.Matrix.TargetRevisions[tgt.Repo]), shq(branch))
 	if _, err := host.runRemote(pctx, prep); err != nil {
+		// The checkout must prove it is the resolved repository before any agent
+		// starts: an existing workspace with another origin is refused, never
+		// reused or replaced.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == worktreeOriginMismatch { // guard:worktree-origin
+			pcancel()
+			log.Printf("issue #%d: workspace origin is not the source repository", n)
+			return matrixSite("launch.worktree-origin", errMatrix)
+		}
 		pcancel()
 		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.worktree", errMatrix)
