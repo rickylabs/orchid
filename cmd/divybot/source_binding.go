@@ -268,16 +268,17 @@ func sourceCommentsPath(repo, since string, page int) string {
 // known liveness of each binding, fairness offsets and the rate-limit pause. A
 // restart loses it and costs one unconditional read each.
 type sourceMemory struct {
-	mu        sync.Mutex
-	etags     map[string]string
-	pages     map[string]sourcePageSummary
-	issues    map[string]sourceIssueView
-	open      map[int]bool
-	ignored   map[int64]bool // /swarm comments already logged as ignored, bounded
-	repoTurn  int
-	checkTurn int
-	replyTurn int
-	pauseTill time.Time
+	mu          sync.Mutex
+	etags       map[string]string
+	pages       map[string]sourcePageSummary
+	issues      map[string]sourceIssueView
+	open        map[int]bool
+	ignored     map[int64]bool // /swarm comments already logged as ignored, bounded
+	ignoredFull bool           // the bound was reached; the saturation line was logged
+	repoTurn    int
+	checkTurn   int
+	replyTurn   int
+	pauseTill   time.Time
 }
 
 type sourcePageSummary struct {
@@ -346,24 +347,60 @@ var cockpitLaunchMarker = regexp.MustCompile(`^<!-- cockpit:launch v1 [0-9a-f]{3
 // sourceIgnoredLogLimit bounds the per-process memory of ignored comments.
 const sourceIgnoredLogLimit = 4096
 
+// codeFence is a Markdown fence line: up to three spaces, then three or more
+// backticks or tildes.
+var codeFence = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})")
+
+// hasCockpitLaunchMarker: the last non-blank line is exactly the marker, byte for
+// byte (nothing trimmed from it), and it is not inside a code fence. Blank lines
+// (empty, or spaces and tabs only) after it are allowed.
 func hasCockpitLaunchMarker(body string) bool {
-	lines := strings.Split(strings.TrimRight(body, " \t\n"), "\n")
-	return cockpitLaunchMarker.MatchString(strings.TrimRight(lines[len(lines)-1], " \t")) // guard:source-pr-marker-last-line
+	lines := strings.Split(body, "\n")
+	last := len(lines) - 1
+	for last >= 0 && strings.Trim(lines[last], " \t") == "" {
+		last--
+	}
+	if last < 0 || !cockpitLaunchMarker.MatchString(lines[last]) { // guard:source-pr-marker-exact
+		return false
+	}
+	fence := ""
+	for _, line := range lines[:last] {
+		m := codeFence.FindStringSubmatch(line)
+		switch {
+		case m == nil:
+		case fence == "":
+			if m[1][0] == '`' && strings.Contains(line[len(m[0]):], "`") {
+				continue // not a fence: a backtick fence's info string has no backtick
+			}
+			fence = m[1]
+		case m[1][0] == fence[0] && len(m[1]) >= len(fence) && strings.Trim(line[len(m[0]):], " \t") == "":
+			fence = ""
+		}
+	}
+	return fence == "" // guard:source-pr-marker-unfenced
 }
 
 // ignoreSource logs once per comment why a /swarm comment is not a trigger: an
-// owner's /swarm is never ignored silently, and a re-read never logs again.
+// owner's /swarm is never ignored silently, and a re-read never logs again. The
+// memory is bounded: once full, remembered comments stay quiet and new ones are
+// no longer logged one by one; a single line says so.
 func (c *Coord) ignoreSource(repo string, cm sourceComment, reason string) {
 	mem := c.sourceMem()
 	mem.mu.Lock()
-	seen := mem.ignored[cm.ID]
+	seen, saturated := mem.ignored[cm.ID], false
 	if !seen {
-		if len(mem.ignored) >= sourceIgnoredLogLimit {
-			mem.ignored = map[int64]bool{}
+		if len(mem.ignored) >= sourceIgnoredLogLimit { // guard:source-ignored-bounded
+			saturated = !mem.ignoredFull
+			mem.ignoredFull = true
+			seen = true
+		} else {
+			mem.ignored[cm.ID] = true
 		}
-		mem.ignored[cm.ID] = true
 	}
 	mem.mu.Unlock()
+	if saturated {
+		log.Printf("source triggers: %d ignored comments remembered; further ignored comments are not logged one by one", sourceIgnoredLogLimit)
+	}
 	if !seen { // guard:source-ignored-once
 		log.Printf("source triggers: %s comment %d ignored: %s", repo, cm.ID, reason)
 	}

@@ -153,16 +153,107 @@ func TestSourceTriggerIgnoredOwnerSwarmLogsOnce(t *testing.T) {
 
 func TestCockpitLaunchMarkerIsTheLastLine(t *testing.T) {
 	for body, want := range map[string]bool{
-		markedTrigger:                             true,
-		markedTrigger + "  \n\n":                  true,
-		sourceTrigger + "\n" + launchMarker + " ": true,
-		sourceTrigger:                             false,
-		launchMarker + "\n" + sourceTrigger:       false,
-		sourceTrigger + "\n> " + launchMarker:     false,
+		markedTrigger:               true,
+		markedTrigger + "\n\n \t\n": true, // blank lines after it
+		sourceTrigger + "\n```\ncode\n```\n" + launchMarker:    true, // a fence closed before it
+		sourceTrigger + "\n~~~~\ncode\n~~~~~\n" + launchMarker: true,
+		sourceTrigger + "\n``` x`y\n" + launchMarker:           true,  // not a fence: backtick in its info string
+		sourceTrigger + "\n" + launchMarker + " ":              false, // trailing space on the marker line
+		sourceTrigger + "\n" + launchMarker + "\t":             false, // trailing tab
+		sourceTrigger + "\n" + launchMarker + "\r":             false, // stray CR
+		sourceTrigger + "\n " + launchMarker:                   false, // indented
+		sourceTrigger + "\n```\n" + launchMarker:               false, // inside an open backtick fence
+		sourceTrigger + "\n  ~~~ text\n" + launchMarker:        false, // inside an open tilde fence
+		sourceTrigger + "\n````\n```\n" + launchMarker:         false, // a shorter fence does not close it
+		sourceTrigger + "\n```\n~~~\n" + launchMarker:          false, // the other fence char does not close it
+		sourceTrigger:                                                   false,
+		launchMarker + "\n" + sourceTrigger:                             false,
+		sourceTrigger + "\n> " + launchMarker:                           false,
 		sourceTrigger + "\n" + strings.TrimSuffix(launchMarker, " -->"): false,
+		"": false,
 	} {
 		if hasCockpitLaunchMarker(body) != want {
 			t.Fatalf("marker(%q) != %v", body, want)
 		}
+	}
+}
+
+// Through the trigger path: a marker with trailing whitespace or inside an open
+// fence is not a launch. The comment binds nothing and costs no issue read.
+func TestSourceTriggerMalformedOrFencedPRMarkerIsIgnoredBeforeIssueRead(t *testing.T) {
+	cases := map[string]string{
+		"trailing space":      sourceTrigger + "\n\n" + launchMarker + " \n",
+		"trailing tab":        sourceTrigger + "\n\n" + launchMarker + "\t\n",
+		"open backtick fence": sourceTrigger + "\n```\n" + launchMarker + "\n",
+		"open tilde fence":    sourceTrigger + "\n~~~\n" + launchMarker + "\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, _, at := prFixture(t)
+			reads := 0
+			lookup := func(int) (sourceIssueView, error) {
+				reads++
+				return sourceIssueView{NodeID: "PR_2078", State: "OPEN", PR: true}, nil
+			}
+			cm := sourceComment{ID: 6400000001, Body: body, AuthorID: ownerGitHubID, CreatedAt: at, UpdatedAt: at,
+				HTMLURL:  fmt.Sprintf("https://github.com/%s/pull/2078#issuecomment-6400000001", sourceRepo),
+				IssueURL: fmt.Sprintf("https://api.github.com/repos/%s/issues/2078", sourceRepo)}
+			if !c.considerSourceComment(context.Background(), lookup, sourceRepo, cm, at, at.Add(-time.Second)) {
+				t.Fatal("asked to be read again")
+			}
+			if reads != 0 || len(c.st.SourceBindings) != 0 {
+				t.Fatalf("%s: %d issue reads, %d bindings; want none", name, reads, len(c.st.SourceBindings))
+			}
+		})
+	}
+	// Control: the same comment with the exact marker, CRLF line ends, binds.
+	c, _, at := prFixture(t)
+	cm := sourceComment{ID: 6400000002, Body: strings.ReplaceAll(markedTrigger, "\n", "\r\n"), AuthorID: ownerGitHubID, CreatedAt: at, UpdatedAt: at,
+		HTMLURL:  fmt.Sprintf("https://github.com/%s/pull/2078#issuecomment-6400000002", sourceRepo),
+		IssueURL: fmt.Sprintf("https://api.github.com/repos/%s/issues/2078", sourceRepo)}
+	lookup := func(int) (sourceIssueView, error) {
+		return sourceIssueView{NodeID: "PR_2078", State: "OPEN", PR: true}, nil
+	}
+	c.considerSourceComment(context.Background(), lookup, sourceRepo, cm, at, at.Add(-time.Second))
+	if c.st.SourceBindings[6400000002] == nil {
+		t.Fatal("control: an exact marker with CRLF line ends did not bind")
+	}
+}
+
+// At capacity the ignored-comment memory keeps what it has: a remembered comment
+// re-read stays quiet, a new one is not logged one by one, and one line says so.
+func TestSourceTriggerIgnoredLogStaysQuietAtCapacity(t *testing.T) {
+	c, _, at := prFixture(t)
+	out := captureSourceLog(t)
+	none := func(int) (sourceIssueView, error) {
+		t.Fatal("an unmarked PR comment read its issue")
+		return sourceIssueView{}, nil
+	}
+	ignore := func(id int64) {
+		cm := sourceComment{ID: id, Body: sourceTrigger, AuthorID: ownerGitHubID, CreatedAt: at, UpdatedAt: at,
+			HTMLURL:  fmt.Sprintf("https://github.com/%s/pull/2078#issuecomment-%d", sourceRepo, id),
+			IssueURL: fmt.Sprintf("https://api.github.com/repos/%s/issues/2078", sourceRepo)}
+		c.considerSourceComment(context.Background(), none, sourceRepo, cm, at, at.Add(-time.Second))
+	}
+	first := int64(6500000000)
+	for i := int64(0); i < sourceIgnoredLogLimit; i++ {
+		ignore(first + i)
+	}
+	if got := strings.Count(out.String(), " ignored: "); got != sourceIgnoredLogLimit {
+		t.Fatalf("logged %d of %d distinct ignored comments", got, sourceIgnoredLogLimit)
+	}
+	ignore(first)                         // a re-read at the boundary
+	ignore(first + sourceIgnoredLogLimit) // one past it
+	ignore(first + sourceIgnoredLogLimit + 1)
+	ignore(first) // and a re-read after
+	logged := out.String()
+	if strings.Count(logged, fmt.Sprintf("comment %d ignored:", first)) != 1 {
+		t.Fatal("a remembered comment was logged again")
+	}
+	if strings.Count(logged, " ignored: ") != sourceIgnoredLogLimit {
+		t.Fatal("a comment past the bound was logged one by one")
+	}
+	if strings.Count(logged, "further ignored comments are not logged one by one") != 1 {
+		t.Fatalf("want exactly one saturation line:\n%s", logged[len(logged)-400:])
 	}
 }
