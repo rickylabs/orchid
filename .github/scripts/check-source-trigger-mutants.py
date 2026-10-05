@@ -41,8 +41,18 @@ mutants = [
     ('grant-claim-once', 'owner_native_grant_store.go', 'if subject.comment && !s.claimLocked(intent.OperationID, is.Number) { // guard:grant-claim-once', 'if false { // guard:grant-claim-once'),
     ('comment-key-space', 'owner_native_grant_store.go', 'return shaText([]byte("comment\\x00" + strings.ToLower(subject.repo) + "\\x00" + strconv.Itoa(subject.number)))', 'return s.issueKey(subject.number)'),
     ('binding-digest', 'matrix.go', '\tif is.Source != nil {\n\t\t// A comment binding', '\tif false {\n\t\t// A comment binding'),
+    ('pr-needs-marker', 'source_binding.go', 'if strings.Contains(cm.HTMLURL, "/pull/") && !marked { // guard:source-pr-needs-marker', 'if false { // guard:source-pr-needs-marker'),
+    ('pr-marked-accepted', 'source_binding.go', 'if strings.Contains(cm.HTMLURL, "/pull/") && !marked { // guard:source-pr-needs-marker', 'if strings.Contains(cm.HTMLURL, "/pull/") { // guard:source-pr-needs-marker'),
+    ('pr-view-needs-marker', 'source_binding.go', 'if view.PR && !marked { // guard:source-pr-view-needs-marker', 'if false { // guard:source-pr-view-needs-marker'),
+    ('pr-marker-exact', 'source_binding.go', 'if last < 0 || !cockpitLaunchMarker.MatchString(lines[last]) { // guard:source-pr-marker-exact', 'if last < 0 || !cockpitLaunchMarker.MatchString(strings.TrimRight(lines[last], " \\t")) { // guard:source-pr-marker-exact'),
+    ('pr-marker-unfenced', 'source_binding.go', 'return fence == "" // guard:source-pr-marker-unfenced', 'return fence == "" || true // guard:source-pr-marker-unfenced'),
+    ('ignored-bounded', 'source_binding.go', '\t\t\tsaturated = !mem.ignoredFull\n\t\t\tmem.ignoredFull = true\n\t\t\tseen = true\n', '\t\t\tmem.ignored = map[int64]bool{cm.ID: true}\n'),
+    ('ignored-once', 'source_binding.go', 'if !seen { // guard:source-ignored-once', 'if true { // guard:source-ignored-once'),
+    ('grant-target-trigger-label', 'owner_native_grant_store.go', 'is.Labels = append(append([]string{}, labels...), ownerNativeTrigger) // guard:grant-target-trigger-label', 'is.Labels = append([]string{}, labels...) // guard:grant-target-trigger-label'),
+    ('grant-target-exact', 'owner_native_grant_store.go', 'return reason == "" && !tgt.Disabled && tgt.Repo == repo // guard:grant-target-resolves', 'return reason == "" && !tgt.Disabled // guard:grant-target-resolves'),
+    ('grant-target-enabled', 'owner_native_grant_store.go', 'return reason == "" && !tgt.Disabled && tgt.Repo == repo // guard:grant-target-resolves', 'return reason == "" && tgt.Repo == repo // guard:grant-target-resolves'),
 ]
-tests = '^Test(Source|OwnerNativeCommentGrant)'
+tests = '^Test(Source|OwnerNativeCommentGrant|CockpitLaunchMarker|OwnerNative(InboxGrant|RepoLess|RepoKey|NoTargetLabel|TargetMatches))'
 files = sorted({m[1] for m in mutants})
 paths = {name: root / 'cmd/divybot' / name for name in files}
 originals = {name: path.read_bytes() for name, path in paths.items()}

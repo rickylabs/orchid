@@ -2917,10 +2917,16 @@ var bindingSourceRef = regexp.MustCompile(`^\[([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#
 //   - Without it, the label target applies, unless the title names a different
 //     source repository; that binding refuses instead of working elsewhere.
 func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
+	return resolveTargetIn(c.cfg.Targets, is)
+}
+
+// resolveTargetIn is resolveTarget over a target list, shared with the owner
+// grant store so a grant approves exactly the target the launch will resolve.
+func resolveTargetIn(targets []Target, is Issue) (Target, string, bool) {
 	var labelled *Target
-	for i, tgt := range c.cfg.Targets {
+	for i, tgt := range targets {
 		if contains(is.Labels, tgt.Label) {
-			labelled = &c.cfg.Targets[i]
+			labelled = &targets[i]
 			break
 		}
 	}
@@ -2937,7 +2943,7 @@ func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
 		if o.Repo != "" && !strings.EqualFold(o.Repo, is.Source.Repo) { // guard:source-binding-repo
 			return Target{}, "source-repo-mismatch", true
 		}
-		for _, tgt := range c.cfg.Targets {
+		for _, tgt := range targets {
 			if strings.EqualFold(tgt.Repo, is.Source.Repo) {
 				return tgt, "", true
 			}
@@ -2945,7 +2951,7 @@ func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
 		return Target{}, "source-repo-unavailable", true
 	}
 	if o.Repo != "" { // guard:source-repo-authoritative
-		for _, tgt := range c.cfg.Targets {
+		for _, tgt := range targets {
 			if strings.EqualFold(tgt.Repo, o.Repo) {
 				return tgt, "", true
 			}
