@@ -564,46 +564,100 @@ func readAttemptProgress(path string) (attemptProgress, bool) {
 	return p, true
 }
 
-// jsonKind reports a raw JSON value's type from its first byte.
+// jsonKind reports a raw JSON value's type from its first byte: '"' string,
+// '{' object, '[' array, 't'/'f' boolean, 'n' null, '0' number.
 func jsonKind(v json.RawMessage) byte {
 	t := bytes.TrimSpace(v)
 	if len(t) == 0 {
 		return 0
 	}
-	return t[0]
+	switch c := t[0]; {
+	case c == '-' || (c >= '0' && c <= '9'):
+		return '0'
+	case c == 't' || c == 'f':
+		return 'b'
+	default:
+		return c
+	}
 }
 
-// phaseSourcesTyped checks, before decoding loses the wire types, that every
-// phase source is what the collector writes: stage always present as a JSON
-// string (empty before any stage), and a context end with string kind and
-// stage and a boolean shutdown. A null, missing or other-typed source is not
-// the collector's and is never finished.
-func phaseSourcesTyped(raw []byte) bool {
-	var top map[string]json.RawMessage
-	if json.Unmarshal(raw, &top) != nil {
-		return false
-	}
-	if stage, ok := top["stage"]; !ok || jsonKind(stage) != '"' {
-		return false
-	}
-	var facts map[string]json.RawMessage
-	if json.Unmarshal(top["facts"], &facts) != nil {
-		return false
-	}
-	if e, ok := facts["herdrStartError"]; ok && jsonKind(e) != '"' {
-		return false
-	}
-	ended, ok := facts["contextEnded"]
-	if !ok || jsonKind(ended) == 'n' {
-		return true
-	}
-	var ce map[string]json.RawMessage
-	if json.Unmarshal(ended, &ce) != nil || jsonKind(ce["kind"]) != '"' || jsonKind(ce["stage"]) != '"' {
-		return false
-	}
-	shutdown := jsonKind(ce["shutdown"])
-	return shutdown == 't' || shutdown == 'f'
+// wireField is one member of a record kind on the wire: its JSON kind
+// ('"', '0', 'b', '{'), whether the writer may omit it (omitempty) or write
+// null (a nil pointer), and the record kind of an object member.
+type wireField struct {
+	kind     byte
+	optional bool
+	nullable bool
+	object   map[string]wireField
 }
+
+// The progress record's wire schema, one table for every record kind that
+// reaches a finished decision. Keys are the writer's exact names: an unknown
+// key, including a case alias Go's decoder would accept, is not the writer's.
+var (
+	wireIssue = map[string]wireField{"repo": {kind: '"'}, "number": {kind: '0'}}
+	wireRoute = map[string]wireField{"harness": {kind: '"'}, "model": {kind: '"'}, "effort": {kind: '"'}}
+	wireEnded = map[string]wireField{"kind": {kind: '"'}, "shutdown": {kind: 'b'}, "stage": {kind: '"'}}
+	wireFacts = map[string]wireField{
+		"herdrStartError": {kind: '"', optional: true}, "contextEnded": {kind: '{', optional: true, object: wireEnded},
+		"codexClientUnmatched": {kind: 'b', optional: true}, "codexClientCheckFailed": {kind: 'b', optional: true},
+		"agySettingsUnreadable": {kind: 'b', optional: true}, "registered": {kind: 'b', optional: true},
+		"goalCommitted": {kind: 'b', optional: true}, "runStarted": {kind: 'b', optional: true},
+	}
+	wireDecision = map[string]wireField{"bytes": {kind: '"'}, "observedAt": {kind: '"'}}
+	wireProgress = map[string]wireField{
+		"schemaVersion": {kind: '0'}, "attemptId": {kind: '"'}, "actionDispatchId": {kind: '"'}, "dispatchId": {kind: '"'},
+		"predecessorAttemptId": {kind: '"', nullable: true}, "retryOperationId": {kind: '"', nullable: true},
+		"issue": {kind: '{', object: wireIssue}, "resolvedRoute": {kind: '{', object: wireRoute}, "run": {kind: 'b'},
+		"stage": {kind: '"'}, "facts": {kind: '{', object: wireFacts}, "instance": {kind: '"'}, "startedAt": {kind: '"'},
+		"updatedAt": {kind: '"'}, "decision": {kind: '{', nullable: true, object: wireDecision},
+	}
+)
+
+// wireValid checks one object against its record kind: exactly the writer's
+// keys, every required member present, every member of its JSON kind, null
+// only where the writer can write it, recursively.
+func wireValid(raw json.RawMessage, kind map[string]wireField) bool {
+	if jsonKind(raw) != '{' {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	for key := range obj {
+		if _, ok := kind[key]; !ok { // guard:wire-canonical-keys
+			return false
+		}
+	}
+	for key, f := range kind {
+		v, ok := obj[key]
+		if !ok {
+			if !f.optional { // guard:wire-required
+				return false
+			}
+			continue
+		}
+		got := jsonKind(v)
+		if got == 'n' {
+			if !f.nullable { // guard:wire-null
+				return false
+			}
+			continue
+		}
+		if got != f.kind { // guard:wire-kind
+			return false
+		}
+		if f.object != nil && !wireValid(v, f.object) {
+			return false
+		}
+	}
+	return true
+}
+
+// phaseSourcesTyped validates a progress record on its raw wire types, before
+// decoding can normalize a null, missing, aliased or other-typed value.
+func phaseSourcesTyped(raw []byte) bool { return wireValid(raw, wireProgress) }
 
 // recoverLaunchAttempts completes publication for decided attempts and decides
 // undecided attempts of a dead instance. It never reruns launch work.
