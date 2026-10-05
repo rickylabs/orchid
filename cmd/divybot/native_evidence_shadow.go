@@ -35,9 +35,13 @@ var shadowCapabilities = map[shadowSource]map[shadowFact][]string{
 		shadowActivity:    {"working"},
 		shadowTurnOutcome: {"completed", "failed", "interrupted"},
 	},
+	// Claude's own per-process session record (see native_claude_bridge.go).
+	shadowClaudeSession: {
+		shadowConnection: {"connected", "not-connected"},
+	},
 }
 
-var shadowSourceVendor = map[shadowSource]string{shadowCodexCanonical: "codex"}
+var shadowSourceVendor = map[shadowSource]string{shadowCodexCanonical: "codex", shadowClaudeSession: "claude"}
 
 const (
 	shadowLiveWindow  = remoteControlFreshness
