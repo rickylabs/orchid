@@ -49,7 +49,7 @@ var (
 	}
 	shadowClosedValues = map[string]bool{
 		"unknown": true, "connected": true, "not-connected": true, "working": true,
-		"completed": true, "failed": true, "interrupted": true,
+		"completed": true, "failed": true, "interrupted": true, "present": true, "absent": true,
 	}
 	shadowClosedReasons = map[string]bool{
 		"": true, "duplicate": true, "source-unregistered": true, "source-epoch-foreign": true, "source-unavailable": true,
@@ -57,7 +57,7 @@ var (
 		"row-invalid": true, "row-limit": true, "source-disconnected": true, "native-absent": true, "native-expired": true,
 		"conflict-unreconciled": true, "native-current-connection-unsupported": true, "native-activity-unsupported": true,
 		"native-turn-outcome-unsupported": true, "native-attachment-unsupported": true,
-		"codex-tui-attachment-unproven": true, "claude-tui-attachment-unproven": true,
+		"codex-tui-attachment-unproven": true, "claude-tui-attachment-unproven": true, "no-official-surface": true,
 	}
 )
 
@@ -96,7 +96,7 @@ func (s *nativeEvidenceShadow) readout(started time.Time) shadowReadout {
 		run := shadowReadoutRun{Issue: scope.reducer.binding.Issue, Vendor: vendor,
 			Native: shadowNativeCounts{Accepted: map[string]int{}, Rejected: map[string]int{}}, Comparisons: []shadowComparison{}}
 		for fact, n := range scope.accepted {
-			run.Native.Accepted[shadowClosed(fact, map[string]bool{"connection": true, "activity": true, "turn-outcome": true})] += n
+			run.Native.Accepted[shadowClosed(fact, map[string]bool{"connection": true, "activity": true, "turn-outcome": true, "bridge-identity": true})] += n
 		}
 		for reason, n := range scope.rejected {
 			run.Native.Rejected[shadowClosed(reason, shadowClosedReasons)] += n

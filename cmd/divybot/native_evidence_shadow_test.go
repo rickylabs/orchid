@@ -267,7 +267,7 @@ func TestShadowVendorCapabilitiesStayUnknown(t *testing.T) {
 		t.Fatalf("comparison not recorded: %d", len(got))
 	}
 	c := got[0]
-	if c.Today != "connected" || !c.ScreenDerived || c.Agreement != "shadow-unknown" || len(c.Proposed) == 0 || c.Proposed[0].Value != "unknown" || c.Proposed[0].Reason != "native-current-connection-unsupported" {
+	if c.Today != "connected" || !c.ScreenDerived || c.Agreement != "shadow-unknown" || len(c.Proposed) == 0 || c.Proposed[0].Value != "unknown" || c.Proposed[0].Reason != "no-official-surface" {
 		t.Fatalf("claude screen footer credited as native connection: %+v", c)
 	}
 	codex := shadowFixtureJob(t, "codex")
