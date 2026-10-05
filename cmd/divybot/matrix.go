@@ -91,6 +91,9 @@ type matrixRequest struct {
 	WorklogText       string               `json:"worklogText,omitempty"`
 	Available         []string             `json:"availableTransports"`
 	OpenCodeProviders []string             `json:"openCodeProviders,omitempty"`
+	// The owner's own launch, proven by a verified owner-native grant. Never
+	// sent to the resolver.
+	owner bool
 }
 type matrixRoute struct {
 	Provider        string `json:"provider"`
@@ -457,6 +460,7 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 			req.Role = grant.Role
 		}
 		req.Authorization, req.Override, req.NativeOverride = grant.Authorization, grant.Override, grant.NativeOverride
+		req.owner = grant.NativeOverride != nil // guard:owner-launch
 	}
 	if o.Pin != "" {
 		p, ok := cfg.Pins[o.Pin]
@@ -813,28 +817,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		}
 	}
 	now := time.Now()
-	var quotaConditions []string
-	c.gov.mu.Lock()
-	for _, transport := range matrixTransports {
-		if transport == "opencode" && len(c.cfg.OpenCode.Providers) == 0 {
-			continue // A disabled adapter is not a blocked subscription quota.
-		}
-		q := c.gov.q[transport]
-		cond := availabilityConditions[admissionTransportReason(transport, budget[transport], q, now,
-			c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling, c.cfg.UnmeteredTransports)]
-		if transport == "opencode" {
-			cond = "blocked by capacity"
-			if c.cfg.OpenCode.valid() && budget[transport] > 0 && len(c.cfg.OpenCode.Providers) > 0 {
-				cond = ""
-			}
-		}
-		if cond == "" {
-			req.Available = append(req.Available, transport)
-		} else {
-			quotaConditions = append(quotaConditions, transport+": "+cond)
-		}
-	}
-	c.gov.mu.Unlock()
+	quotaConditions := c.quotaAvailability(&req, budget, now)
 	for provider, limit := range c.cfg.OpenCode.Providers {
 		if limit.MaxActive > 0 && budget["opencode:"+provider] > 0 {
 			req.OpenCodeProviders = append(req.OpenCodeProviders, provider)
@@ -1089,6 +1072,60 @@ func transportAvailabilityReason(budget int, q quota, now time.Time, sampleInter
 		return availabilityMeterStale
 	}
 	return quotaHeadroomReason(q, now, ceiling)
+}
+
+// quotaAvailability fills req.Available with the transports admission offers and
+// returns the conditions of those it withholds.
+func (c *Coord) quotaAvailability(req *matrixRequest, budget map[string]int, now time.Time) []string {
+	var quotaConditions []string
+	c.gov.mu.Lock()
+	for _, transport := range matrixTransports {
+		if transport == "opencode" && len(c.cfg.OpenCode.Providers) == 0 {
+			continue // A disabled adapter is not a blocked subscription quota.
+		}
+		q := c.gov.q[transport]
+		reason := admissionTransportReason(transport, budget[transport], q, now,
+			c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling, c.cfg.UnmeteredTransports)
+		if req.owner && (transport == "claude" || transport == "codex") {
+			// The owner's launch is refused only on native proof that the vendor
+			// limit is reached. An absent, unread or stale meter, or the
+			// autonomous governor cap or ceiling, is not proof the route is down.
+			// Autonomous dispatch keeps those guards unchanged.
+			reason = ownerQuotaReason(q, now) // guard:owner-quota
+		}
+		cond := availabilityConditions[reason]
+		if transport == "opencode" {
+			cond = "blocked by capacity"
+			if c.cfg.OpenCode.valid() && budget[transport] > 0 && len(c.cfg.OpenCode.Providers) > 0 {
+				cond = ""
+			}
+		}
+		if cond == "" {
+			req.Available = append(req.Available, transport)
+		} else {
+			quotaConditions = append(quotaConditions, transport+": "+cond)
+		}
+	}
+	c.gov.mu.Unlock()
+	return quotaConditions
+}
+
+// ownerQuotaReason refuses only on a native meter reading that shows a published
+// window at its vendor limit and not yet reset (served as the existing "over
+// ceiling" condition). Absent, unread or stale meters never refuse the owner.
+func ownerQuotaReason(q quota, now time.Time) string {
+	if !q.ok {
+		return ""
+	}
+	for _, w := range []struct {
+		limit  RateLimit
+		reason string
+	}{{q.five, availabilityFiveHourCeiling}, {q.seven, availabilityWeeklyCeiling}} {
+		if w.limit.ResetsAt > now.Unix() && w.limit.UsedPct >= 100 { // guard:owner-vendor-limit
+			return w.reason
+		}
+	}
+	return ""
 }
 
 func transportQuotaCondition(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {

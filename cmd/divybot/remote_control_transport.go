@@ -400,5 +400,18 @@ func (p *goalRPC) prepareRemoteThread(run *remoteControlRun, params map[string]a
 	if _, err = p.request("thread/name/set", map[string]any{"threadId": p.thread, "name": run.Name}); err != nil {
 		return err
 	}
+	// A fresh thread has no rollout until its first turn, and codex refuses to
+	// resume a thread without one ("no rollout found for thread id"), even while
+	// it is loaded. Reading the paginated thread's turns persists it natively
+	// (codex app-server thread/read: persist_thread), so the TUI can resume it.
+	raw, err = p.request("thread/read", map[string]any{"threadId": p.thread, "includeTurns": true}) // guard:materialize-thread
+	var read struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if err != nil || json.Unmarshal(raw, &read) != nil || read.Thread.ID != p.thread {
+		return goalError("remote-control-binding-invalid")
+	}
 	return p.verifyRemoteThread(run, false)
 }

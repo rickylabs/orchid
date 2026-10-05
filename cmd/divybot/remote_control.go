@@ -95,7 +95,18 @@ func remoteCodexArgs(args []string, cwd, native string) ([]string, error) {
 	// The native remote resume already owns its verified prepared cwd. Explicit
 	// --cd invokes a separate daemon-global folder-trust lookup, ignoring the
 	// per-thread trust map. Do not manufacture or answer that consent dialog.
-	return append(append(append([]string{}, args...), "-c", `tui.status_line=["thread-id"]`, "--remote", "unix://"), "resume", native), nil
+	// Codex refuses permission overrides on a remote resume ("Permission
+	// overrides are not supported when resuming a remote task") and exits before
+	// thread/resume. The prepared thread already carries approvalPolicy=never and
+	// sandbox=danger-full-access from thread/start, so the bypass flag is dropped.
+	out := make([]string, 0, len(args)+6)
+	for _, a := range args {
+		if a == "--dangerously-bypass-approvals-and-sandbox" { // guard:remote-no-permission-override
+			continue
+		}
+		out = append(out, a)
+	}
+	return append(append(out, "-c", `tui.status_line=["thread-id"]`, "--remote", "unix://"), "resume", native), nil
 }
 func validRemoteCwd(cwd string) bool {
 	return filepath.IsAbs(cwd) && filepath.Clean(cwd) == cwd && cwd != string(filepath.Separator) && len(cwd) <= 4096 && utf8.ValidString(cwd) && strings.IndexFunc(cwd, unicode.IsControl) < 0
