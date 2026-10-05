@@ -31,6 +31,9 @@ type promptCalls struct {
 	// RC Codex: native acceptance replaces everything after the marker. It
 	// owns the single submit; no Enter, replay or screen read follows.
 	native func(ctx context.Context, sent string, submit func(context.Context) error) error
+	// Observe-only: records today's readiness verdict beside the native one.
+	// It never changes the decision, the submit or any other effect.
+	readiness func(ctx context.Context, s promptSnapshot, today string)
 }
 
 func samePromptOccupant(a, b AgentInfo) bool {
@@ -105,7 +108,15 @@ func codexPromptConsumed(s, before promptSnapshot, marker string) bool {
 // licenses replay: a changed sequence/session/screen can mean a real turn started.
 func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d promptCalls) error {
 	var before, prior promptSnapshot
-	stable := false
+	stable, observed := false, false
+	recordReadiness := func(s promptSnapshot, today string) {
+		if d.readiness != nil {
+			func() {
+				defer shadowContain()
+				d.readiness(ctx, s, today)
+			}()
+		}
+	}
 	for {
 		if ctx.Err() != nil {
 			return errPromptUnconfirmed
@@ -113,6 +124,14 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 		s, err := d.observe(ctx)
 		if err != nil || !samePromptOccupant(expected, s.Agent) {
 			return errPromptUnconfirmed
+		}
+		if !observed { // guard:readiness-first-observation
+			observed = true
+			today := "not-ready"
+			if codexReady(s) {
+				today = "ready"
+			}
+			recordReadiness(s, today)
 		}
 		if codexTrustDialog(s.Screen) {
 			if d.noConsent {
@@ -138,6 +157,7 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 			return errPromptUnconfirmed
 		}
 	}
+	recordReadiness(before, "ready") // guard:readiness-at-gate
 	if ctx.Err() != nil {
 		return errPromptUnconfirmed
 	}
@@ -238,6 +258,7 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
 	var native func(context.Context, string, func(context.Context) error) error
+	var readiness func(context.Context, promptSnapshot, string)
 	if h.CanonicalCodex && h.RemoteRun != nil {
 		// Remote Control Codex has no screen-confirmed delivery path.
 		if h.Acceptance == nil {
@@ -251,9 +272,15 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 		native = func(ctx context.Context, sent string, submit func(context.Context) error) error {
 			return h.acceptCodexPrompt(ctx, h.Acceptance, sent, submit)
 		}
+		if h.GoalReadiness != nil {
+			readiness = func(ctx context.Context, s promptSnapshot, today string) {
+				h.GoalReadiness.record(today, h.codexGoalReadiness(ctx, s.Agent, s.Stable)) // guard:readiness-structured-only
+			}
+		}
 	}
 	return deliverCodexPrompt(ctx, expected, goal, promptCalls{
 		native:    native,
+		readiness: readiness,
 		noConsent: h.CanonicalCodex,
 		observe: func(ctx context.Context) (promptSnapshot, error) {
 			s, err := h.promptSnapshot(ctx, target)

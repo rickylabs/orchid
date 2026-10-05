@@ -44,12 +44,13 @@ type shadowReadout struct {
 var (
 	shadowRevisionPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	shadowToday           = map[string]map[string]bool{
-		shadowSiteRemoteHook: {"pass": true, "refuse": true},
-		shadowSiteConnection: {"connected": true, "unconfirmed": true},
+		shadowSiteRemoteHook:    {"pass": true, "refuse": true},
+		shadowSiteConnection:    {"connected": true, "unconfirmed": true},
+		shadowSiteGoalReadiness: {"ready": true, "not-ready": true},
 	}
 	shadowClosedValues = map[string]bool{
 		"unknown": true, "connected": true, "not-connected": true, "working": true,
-		"completed": true, "failed": true, "interrupted": true,
+		"completed": true, "failed": true, "interrupted": true, "ready": true, "not-ready": true,
 	}
 	shadowClosedReasons = map[string]bool{
 		"": true, "duplicate": true, "source-unregistered": true, "source-epoch-foreign": true, "source-unavailable": true,
@@ -58,6 +59,8 @@ var (
 		"conflict-unreconciled": true, "native-current-connection-unsupported": true, "native-activity-unsupported": true,
 		"native-turn-outcome-unsupported": true, "native-attachment-unsupported": true,
 		"codex-tui-attachment-unproven": true, "claude-tui-attachment-unproven": true,
+		"occupant-unstable": true, "herdr-not-ready": true, "native-turn-active": true, "native-thread-unreadable": true,
+		"native-thread-not-loaded": true, "native-thread-system-error": true, "native-thread-unknown": true,
 	}
 )
 

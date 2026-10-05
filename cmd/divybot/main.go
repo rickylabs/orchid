@@ -85,6 +85,7 @@ type Host struct {
 	RemoteRun      *remoteControlRun    `json:"-"`
 	ShadowScope    *nativeShadowScope   `json:"-"`
 	Acceptance     *codexAcceptance     `json:"-"`
+	GoalReadiness  *goalReadinessShadow `json:"-"` // observe-only native readiness record
 	Name           string               `json:"name"`
 	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
 	Key            string               `json:"key"`          // ssh key path; "" = default/agent
@@ -3358,6 +3359,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			}
 			if remoteCodex {
 				host.Acceptance = c.codexAcceptanceFor(gctx, host, j)
+				host.GoalReadiness = &goalReadinessShadow{shadow: c.shadow, job: j}
 			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
