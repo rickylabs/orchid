@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -100,16 +101,17 @@ func (h Host) preGoalRemoteIdentity(ctx context.Context, kind, label string, run
 	if err != nil {
 		return err
 	}
-	// The daemon's own trace proves attachment: exactly one codex-tui connection
-	// at the pinned client version ran thread/resume on this freshly prepared
-	// thread. No screen is read and nothing is typed into the agent.
+	// The daemon's native resume record proves attachment once: the canonical
+	// daemon spawned this prepared thread's session for exactly one pinned
+	// codex-tui connection, which then proceeded past a successful resume. No
+	// screen is read and nothing is typed into the agent.
 	err = h.awaitCodexResumeIdentity(ctx, run) // guard:codex-resume-identity
 	if err == nil {
 		run.IdentitySource = "codex-native-status"
 	}
 	current, currentErr := h.remoteTUIProcess(ctx, location.PaneID)
 	if err != nil || currentErr != nil || *process != *current || ctx.Err() != nil {
-		run.IdentitySource = ""
+		run.IdentitySource, run.Resume = "", nil
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	run.TUIProcess = process
@@ -126,8 +128,7 @@ func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remot
 			return goalError("remote-control-identity-unconfirmed")
 		}
 	}
-	err := verifyCodexAttachment(ctx, label, run, location, func() (AgentInfo, error) { return h.agentInfoOf(ctx, location.PaneID) },
-		func() (int, error) { return h.codexResumeConnections(ctx, run) })
+	err := verifyCodexAttachment(ctx, label, run, location, func() (AgentInfo, error) { return h.agentInfoOf(ctx, location.PaneID) })
 	if err != nil {
 		return err
 	}
@@ -143,12 +144,13 @@ func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remot
 	return nil
 }
 
-// verifyCodexAttachment proves the attached Codex TUI from native facts only:
-// Herdr's structured occupant before and after (no change, no conflicting hook),
-// and the daemon trace of exactly one pinned codex-tui resume of this thread.
-func verifyCodexAttachment(ctx context.Context, label string, run *remoteControlRun, location *dispatchLocation,
-	observe func() (AgentInfo, error), resumes func() (int, error)) error {
-	if ctx.Err() != nil || run == nil || location == nil {
+// verifyCodexAttachment supervises an attached Codex TUI from native facts
+// only: the resume proof established once before the goal (kept in private run
+// state with its client pin), and Herdr's structured occupant before and after
+// (no change, no conflicting hook). The daemon log is never re-read here: Codex
+// prunes per-thread log rows, so the original resume record is not durable.
+func verifyCodexAttachment(ctx context.Context, label string, run *remoteControlRun, location *dispatchLocation, observe func() (AgentInfo, error)) error {
+	if ctx.Err() != nil || run == nil || location == nil || !codexResumeProven(run) { // guard:attachment-stored-proof
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	before, err := observe()
@@ -157,9 +159,6 @@ func verifyCodexAttachment(ctx context.Context, label string, run *remoteControl
 	}
 	raw, _ := json.Marshal(map[string]any{"type": "agent_info", "agent": before})
 	if !remoteStatusOccupant(raw, "codex", label, run.Cwd, run.NativeSessionID, location) {
-		return goalError("remote-control-identity-unconfirmed")
-	}
-	if n, err := resumes(); err != nil || n != 1 { // guard:attachment-resume-trace
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	after, err := observe()
@@ -173,53 +172,108 @@ func verifyCodexAttachment(ctx context.Context, label string, run *remoteControl
 	return nil
 }
 
-// codexResumeTracePython counts the distinct codex-tui connections that ran
-// thread/resume on one thread, from the canonical daemon's own structured trace
-// (read-only). Only the thread id, connection id and client fields are used.
-const codexResumeTracePython = `import json,os,re,sqlite3,sys
-tid,ver=sys.argv[1],sys.argv[2]
-home=os.environ.get('CODEX_HOME') or os.path.join(os.environ['HOME'],'.codex')
-c=sqlite3.connect('file:'+os.path.join(home,'logs_2.sqlite')+'?mode=ro',uri=True,timeout=5)
-span=re.compile(r'rpc\.method="thread/resume" .*?app_server\.connection_id=(\d+) .*?app_server\.client_name="([^"]+)" app_server\.client_version="([^"]+)"')
-conns=set()
-for (b,) in c.execute("select feedback_log_body from logs where thread_id=?",(tid,)):
- m=span.search(b or '')
- if m and m.group(2)=='codex-tui' and (not ver or m.group(3)==ver):conns.add(m.group(1))
-print(json.dumps({'connections':len(conns)}))
-`
-
-// codexResumeConnections reads the daemon trace once. The pinned client version
-// is matched when known (pre-goal); a run reloaded from its private record no
-// longer carries it, and the launch-time pin already enforced it.
-func (h Host) codexResumeConnections(ctx context.Context, run *remoteControlRun) (int, error) {
-	if run == nil || !privateNativeID(run.NativeSessionID) || (run.ClientVersion != "" && !codexVersionPattern.MatchString(run.ClientVersion)) {
-		return 0, goalError("remote-control-identity-unconfirmed")
-	}
-	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s", shq(h.agentHome()), shq(codexResumeTracePython), shq(run.NativeSessionID), shq(run.ClientVersion))
-	out, err := h.runRemote(ctx, script)
-	var v struct {
-		Connections int `json:"connections"`
-	}
-	if err != nil || len(out) > 256 || decodeNativeJSON([]byte(strings.TrimSpace(out)), &v) != nil || v.Connections < 0 {
-		return 0, goalError("remote-control-identity-unconfirmed")
-	}
-	return v.Connections, nil
+// codexResumeProof is the native resume record verified once before the goal:
+// the canonical daemon incarnation (a digest of its log producer identity) and
+// that daemon's connection id for the attached codex-tui client.
+type codexResumeProof struct {
+	Producer   string `json:"producer"`
+	Connection string `json:"connection"`
 }
 
-// awaitCodexResumeIdentity waits, within the launch budget, for the daemon to
-// record exactly one pinned codex-tui thread/resume on the prepared thread. Two
-// or more connections are ambiguous and refuse.
+var resumeConnectionPattern = regexp.MustCompile(`^[0-9]{1,19}$`)
+
+// codexResumeProven reports whether run carries a verified resume proof and its
+// client pin. An absent pin (or proof) never widens to a wildcard.
+func codexResumeProven(run *remoteControlRun) bool {
+	return run != nil && run.Resume != nil && digestPattern.MatchString(run.Resume.Producer) &&
+		resumeConnectionPattern.MatchString(run.Resume.Connection) && codexVersionPattern.MatchString(run.ClientVersion)
+}
+
+// codexResumeRecordPython reads the daemon's native log (read-only) once for the
+// prepared thread, by its structured columns (thread_id, process_uuid, target)
+// and start-anchored request spans only:
+//   - producer: the one process_uuid that created the thread under Orchid's own
+//     thread/start request (the canonical daemon incarnation Orchid prepared it on);
+//   - record: that producer spawned the resumed session for a codex-tui
+//     thread/resume request, at the pinned client version;
+//   - outcome: the same producer then received thread/turns/list on that
+//     connection, which the TUI sends only after a successful resume response.
+//
+// Any codex-tui resume of the thread by another producer or connection refuses.
+const codexResumeRecordPython = `import hashlib,json,os,re,sqlite3,sys
+tid,ver,creator=sys.argv[1],sys.argv[2],sys.argv[3]
+def out(state,**k):
+ print(json.dumps(dict(state=state,**k)));sys.exit(0)
+def span(m):
+ return re.compile(r'app_server\.request\{otel\.kind="server" otel\.name="'+m+r'" rpc\.system="jsonrpc" rpc\.method="'+m+r'" rpc\.transport="unix_socket" rpc\.request_id=[^ {}]+ app_server\.connection_id=([0-9]+) app_server\.api_version="v2" app_server\.client_name="([^"]*)" app_server\.client_version="([^"]*)"\}:')
+home=os.environ.get('CODEX_HOME') or os.path.join(os.environ['HOME'],'.codex')
+db=os.path.join(home,'logs_2.sqlite')
+if not os.path.isfile(db):out('pending')
+c=sqlite3.connect('file:'+db+'?mode=ro',uri=True,timeout=5)
+start,resume=span('thread/start'),span('thread/resume')
+creators,tui,spawned=set(),set(),[]
+for i,ts,pu,tgt,b in c.execute("select id,ts,process_uuid,target,feedback_log_body from logs where thread_id=? order by id",(tid,)):
+ b=b or ''
+ m=start.match(b)
+ if m and tgt=='codex_core::shell_snapshot' and m.group(2)==creator and b[m.end():].startswith('app_server.thread_start.create_thread'):creators.add(pu)
+ m=resume.match(b)
+ if m and m.group(2)=='codex-tui':
+  tui.add((pu,m.group(1)))
+  if tgt=='codex_core::shell_snapshot' and b[m.end():].startswith('resume_thread_with_history:thread_spawn'):spawned.append((i,ts,pu,m.group(1),m.group(3)))
+if len(creators)>1 or len(tui)>1:out('refused')
+if not creators or not spawned:out('pending')
+p=next(iter(creators))
+i,ts,pu,conn,v=spawned[0]
+if pu!=p or v!=ver:out('refused')
+pfx='app-server request: thread/turns/list connection_id=ConnectionId('+conn+') '
+if not c.execute("select 1 from logs where process_uuid=? and ts>=? and id>? and thread_id is null and target='codex_app_server::message_processor' and substr(feedback_log_body,1,?)=? limit 1",(p,ts,i,len(pfx),pfx)).fetchone():out('pending')
+out('proven',producer=hashlib.sha256(p.encode()).hexdigest(),connection=conn)
+`
+
+// codexResumeRecord reads the native resume record once.
+func (h Host) codexResumeRecord(ctx context.Context, run *remoteControlRun) (string, *codexResumeProof, error) {
+	if run == nil || !privateNativeID(run.NativeSessionID) || !codexVersionPattern.MatchString(run.ClientVersion) {
+		return "", nil, goalError("remote-control-identity-unconfirmed")
+	}
+	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s %s", shq(h.agentHome()), shq(codexResumeRecordPython),
+		shq(run.NativeSessionID), shq(run.ClientVersion), shq(codexGoalClientName))
+	out, err := h.runRemote(ctx, script)
+	var v struct {
+		State      string `json:"state"`
+		Producer   string `json:"producer"`
+		Connection string `json:"connection"`
+	}
+	if err != nil || len(out) > 512 || decodeNativeJSON([]byte(strings.TrimSpace(out)), &v) != nil {
+		return "", nil, goalError("remote-control-identity-unconfirmed")
+	}
+	switch v.State {
+	case "pending", "refused":
+		return v.State, nil, nil
+	case "proven":
+		proof := &codexResumeProof{Producer: v.Producer, Connection: v.Connection}
+		if !digestPattern.MatchString(proof.Producer) || !resumeConnectionPattern.MatchString(proof.Connection) {
+			return "", nil, goalError("remote-control-identity-unconfirmed")
+		}
+		return v.State, proof, nil
+	}
+	return "", nil, goalError("remote-control-identity-unconfirmed")
+}
+
+// awaitCodexResumeIdentity waits, within the launch budget, for the native
+// resume record of the pinned TUI on the prepared thread, and stores it in the
+// private run state. An ambiguous or foreign record refuses at once.
 func (h Host) awaitCodexResumeIdentity(ctx context.Context, run *remoteControlRun) error {
 	if run == nil || !privateNativeID(run.NativeSessionID) || !codexVersionPattern.MatchString(run.ClientVersion) { // guard:identity-version-pinned
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	for ctx.Err() == nil {
-		n, err := h.codexResumeConnections(ctx, run)
+		state, proof, err := h.codexResumeRecord(ctx, run)
 		if err == nil {
-			switch {
-			case n == 1: // guard:resume-exactly-one
+			switch state {
+			case "proven": // guard:resume-proven
+				run.Resume = proof
 				return nil
-			case n > 1:
+			case "refused":
 				return goalError("remote-control-identity-unconfirmed")
 			}
 		}

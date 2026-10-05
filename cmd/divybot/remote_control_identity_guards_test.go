@@ -10,12 +10,15 @@ import (
 	"time"
 )
 
-// Attachment is proven from Herdr's structured occupant and the daemon's resume
-// trace; a conflicting hook, a changed occupant or an ambiguous trace refuses.
+// Supervision uses the stored proof and Herdr's structured occupant; a changed
+// occupant, changed sequence, conflicting hook or cancellation refuses.
 func TestRemoteCodexAttachmentNative(t *testing.T) {
-	for _, mode := range []string{"valid", "no-resume", "two-resumes", "trace-unreadable", "changed-occupant", "changed-sequence", "conflicting-late-hook", "late"} {
+	for _, mode := range []string{"valid", "no-proof", "changed-occupant", "changed-sequence", "conflicting-late-hook", "late"} {
 		t.Run(mode, func(t *testing.T) {
-			run := syntheticRemoteRun(t)
+			run := provenRun(t)
+			if mode == "no-proof" {
+				run.Resume = nil
+			}
 			agent := promptFixture().Agent
 			agent.Cwd = run.Cwd
 			ctx, cancel := context.WithCancel(context.Background())
@@ -37,16 +40,6 @@ func TestRemoteCodexAttachmentNative(t *testing.T) {
 					}
 				}
 				return v, nil
-			}, func() (int, error) {
-				switch mode {
-				case "no-resume":
-					return 0, nil
-				case "two-resumes":
-					return 2, nil
-				case "trace-unreadable":
-					return 0, goalError("remote-control-identity-unconfirmed")
-				}
-				return 1, nil
 			})
 			if (err == nil) != (mode == "valid") {
 				t.Fatalf("native attachment guard failed: %v", err)

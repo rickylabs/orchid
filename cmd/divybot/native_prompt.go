@@ -243,9 +243,9 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 		if h.Acceptance == nil {
 			return errPromptUnconfirmed
 		}
-		// The attached TUI is proven natively once before delivery; the native
-		// acceptance then binds the goal to exactly this thread.
-		if n, err := h.codexResumeConnections(ctx, h.RemoteRun); err != nil || n != 1 { // guard:delivery-resume-trace
+		// The attached TUI was proven natively once before delivery (stored with
+		// its pin); the native acceptance then binds the goal to exactly this thread.
+		if !codexResumeProven(h.RemoteRun) { // guard:delivery-stored-proof
 			return errPromptUnconfirmed
 		}
 		native = func(ctx context.Context, sent string, submit func(context.Context) error) error {

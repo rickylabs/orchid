@@ -178,19 +178,27 @@ else: print(json.dumps({'result':{}}))
 	return state
 }
 
-// The delivery path proves the attached TUI natively before typing anything:
-// an ambiguous daemon trace (two codex-tui resumes) delivers nothing.
-func TestAcceptanceRefusesAmbiguousResumeTrace(t *testing.T) {
-	h := newAccHarness(t)
-	state := stageHerdrPromptHost(t, h)
-	writeResumeTrace(t, h.f.home, h.acc.run.NativeSessionID, "9.1.0", "253")
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := h.host.injectGoal(ctx, "w1:p1", runPointer, true); err == nil {
-		t.Fatal("goal delivered with an ambiguous attachment")
-	}
-	if _, err := os.Stat(filepath.Join(state, "prompt")); err == nil {
-		t.Fatal("goal typed into an unproven attachment")
+// Delivery uses the resume proof stored before the goal: without it, or with
+// its pin lost, nothing is typed. It never re-reads the native log.
+func TestAcceptanceRefusesWithoutStoredProof(t *testing.T) {
+	for _, mode := range []string{"no-proof", "no-pin"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newAccHarness(t)
+			state := stageHerdrPromptHost(t, h)
+			if mode == "no-proof" {
+				h.host.RemoteRun.Resume = nil
+			} else {
+				h.host.RemoteRun.ClientVersion = ""
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err := h.host.injectGoal(ctx, "w1:p1", runPointer, true); err == nil {
+				t.Fatal("goal delivered without the stored resume proof")
+			}
+			if _, err := os.Stat(filepath.Join(state, "prompt")); err == nil {
+				t.Fatal("goal typed into an unproven attachment")
+			}
+		})
 	}
 }
 
@@ -424,7 +432,7 @@ func newConsumerFixture(t *testing.T, marker, prompt bool) *consumerFixture {
 	host := c.hosts[j.Host]
 	host.Home = t.TempDir()
 	c.hosts[j.Host] = host
-	writeResumeTrace(t, host.Home, run.NativeSessionID, "9.1.0", "252") // the attached TUI's native resume
+	run.ClientVersion, run.Resume = "9.1.0", &codexResumeProof{Producer: strings.Repeat("ab", 32), Connection: "252"} // proven once before the goal
 	c.cfg.Hosts = []Host{host}
 	state := t.TempDir()
 	bin := filepath.Join(host.Home, ".local", "bin")
