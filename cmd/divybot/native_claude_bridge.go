@@ -44,16 +44,24 @@ var errClaudeBridgeUnknown = errors.New("claude-bridge-unknown")
 // single bound record with a bridge id it also reads the session's own
 // transcript (private, regular, owner-only) from the given cursor: every
 // complete line is parsed as JSON before its typed fields are selected, in a
-// bounded chunk; a replaced, shortened or rewritten file (the hash of the
-// bytes before the cursor changed) restarts at zero. It prints
+// bounded chunk; a replaced, shortened or rewritten file (the SHA-256 of all
+// bytes before the cursor changed) restarts at zero. An exited (zombie or
+// dead) process is never bound. It prints
 // structure only.
 const claudeBridgePython = `import hashlib,json,os,re,stat,sys
-sid=sys.argv[1]; cwd=sys.argv[2]; cdev=int(sys.argv[3]); cino=int(sys.argv[4]); coff=int(sys.argv[5]); ctail=sys.argv[6]; pids=[int(x) for x in sys.argv[7:]]
+sid=sys.argv[1]; cwd=sys.argv[2]; cdev=int(sys.argv[3]); cino=int(sys.argv[4]); coff=int(sys.argv[5]); cprefix=sys.argv[6]; pids=[int(x) for x in sys.argv[7:]]
 CHUNK=16777216
 home=os.environ.get('CLAUDE_CONFIG_DIR') or os.path.join(os.environ['HOME'],'.claude')
-def tail(fd,end):
- k=min(4096,end); os.lseek(fd,end-k,0); b=os.read(fd,k)
- return hashlib.sha256(b).hexdigest() if k and len(b)==k else ''
+def running(pid):
+ st=open('/proc/%d/stat'%pid).read().rsplit(')',1)[1].split()
+ return st[19] if st[0] not in ('Z','X','x') else None
+def prefix(fd,end):
+ h=hashlib.sha256(); os.lseek(fd,0,0); left=end
+ while left>0:
+  b=os.read(fd,min(1048576,left))
+  if not b: return None
+  h.update(b); left-=len(b)
+ return h
 def pairs(kv):
  d={}
  for k,v in kv:
@@ -63,7 +71,8 @@ def pairs(kv):
 m=[]; bad=0
 for pid in pids:
  try:
-  start=open('/proc/%d/stat'%pid).read().rsplit(')',1)[1].split()[19]
+  start=running(pid)
+  if start is None: continue
   raw=open(os.path.join(home,'sessions','%d.json'%pid)).read()
  except Exception:
   continue
@@ -81,7 +90,7 @@ for pid in pids:
   m.append((pid,start,d['bridgeSessionId']))
  else:
   bad+=1
-out={'matches':len(m),'malformed':bad>0,'pid':0,'start':'','bridge':'','transcript':'skipped','entry':False,'url':'','dev':0,'ino':0,'offset':0,'tail':'','eof':False,'restarted':False}
+out={'matches':len(m),'malformed':bad>0,'pid':0,'start':'','bridge':'','transcript':'skipped','entry':False,'url':'','dev':0,'ino':0,'offset':0,'prefix':'','eof':False,'restarted':False}
 if len(m)==1 and bad==0:
  out['pid'],out['start'],out['bridge']=m[0]
  if out['bridge'] and cwd:
@@ -103,8 +112,9 @@ if len(m)==1 and bad==0:
      out['transcript']='unreadable'
     else:
      off=coff; restarted=False
-     if (s.st_dev,s.st_ino)!=(cdev,cino) or s.st_size<coff or tail(fd,coff)!=ctail:
-      off=0; restarted=True
+     h=prefix(fd,coff) if (s.st_dev,s.st_ino)==(cdev,cino) and s.st_size>=coff else None
+     if h is None or (coff and h.hexdigest()!=cprefix):
+      off=0; restarted=True; h=hashlib.sha256()
      os.lseek(fd,off,0)
      data=b''
      while len(data)<CHUNK:
@@ -119,7 +129,8 @@ if len(m)==1 and bad==0:
       if isinstance(e,dict) and e.get('type')=='system' and e.get('subtype')=='bridge_status' and e.get('sessionId')==sid:
        if type(e.get('url')) is not str: raise ValueError()
        entry=True; url=e['url']
-     out.update(transcript='parsed',entry=entry,url=url,dev=s.st_dev,ino=s.st_ino,offset=off+end,tail=tail(fd,off+end),eof=len(data)<CHUNK,restarted=restarted)
+     h.update(data[:end])
+     out.update(transcript='parsed',entry=entry,url=url,dev=s.st_dev,ino=s.st_ino,offset=off+end,prefix=h.hexdigest() if off+end else '',eof=len(data)<CHUNK,restarted=restarted)
    except Exception:
     out['transcript']='malformed'
    finally:
@@ -171,7 +182,7 @@ type claudeBridgeRead struct {
 	Dev        uint64 `json:"dev"`
 	Ino        uint64 `json:"ino"`
 	Offset     int64  `json:"offset"`
-	Tail       string `json:"tail"`
+	Prefix     string `json:"prefix"`
 	EOF        bool   `json:"eof"`
 	Restarted  bool   `json:"restarted"`
 }
@@ -181,7 +192,7 @@ type claudeBridgeRead struct {
 type claudeTranscriptCursor struct {
 	dev, ino uint64
 	offset   int64
-	tail     string
+	prefix   string
 	entry    bool
 	url      string
 }
@@ -210,7 +221,7 @@ const (
 	linkIdentityChanged      = "identity-changed"
 )
 
-var claudeTranscriptTail = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var claudeTranscriptPrefix = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 var claudeTranscriptStates = map[string]bool{"skipped": true, "absent": true, "parsed": true, "unreadable": true, "malformed": true}
 
@@ -236,7 +247,7 @@ func (h Host) claudeBridgeSession(ctx context.Context, pane, sessionID, cwd stri
 	for _, pid := range pids {
 		args = append(args, strconv.Itoa(pid))
 	}
-	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s %d %d %d %s %s", shq(h.agentHome()), shq(claudeBridgePython), shq(sessionID), shq(cwd), from.dev, from.ino, from.offset, shq(from.tail), strings.Join(args, " "))
+	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s %d %d %d %s %s", shq(h.agentHome()), shq(claudeBridgePython), shq(sessionID), shq(cwd), from.dev, from.ino, from.offset, shq(from.prefix), strings.Join(args, " "))
 	raw, err := h.runBounded(ctx, script)
 	var v claudeBridgeRead
 	if err != nil || len(raw) > 1024 || strictJSON([]byte(strings.TrimSpace(raw)), &v) != nil { // guard:claude-bridge-closed-response
@@ -254,8 +265,8 @@ func (h Host) claudeBridgeSession(ctx context.Context, pane, sessionID, cwd stri
 	parsed := v.Transcript == "parsed"
 	if v.PID <= 1 || v.Start == "" || !claudeTranscriptStates[v.Transcript] || (v.Bridge == "" && v.Transcript != "skipped") ||
 		(v.URL != "" && !v.Entry) || (v.Entry && !parsed) || v.Offset < 0 ||
-		(!parsed && (v.Dev != 0 || v.Ino != 0 || v.Offset != 0 || v.Tail != "" || v.EOF || v.Restarted)) ||
-		(parsed && !claudeTranscriptTail.MatchString(v.Tail) && (v.Offset != 0 || v.Tail != "")) ||
+		(!parsed && (v.Dev != 0 || v.Ino != 0 || v.Offset != 0 || v.Prefix != "" || v.EOF || v.Restarted)) ||
+		(parsed && !claudeTranscriptPrefix.MatchString(v.Prefix) && (v.Offset != 0 || v.Prefix != "")) ||
 		(v.Bridge != "" && !claudeBridgeSessionID.MatchString(v.Bridge)) { // guard:claude-bridge-session-form
 		return none, linkRecordMalformed
 	}
@@ -286,10 +297,13 @@ func (h Host) claudeLaunchedProcess(ctx context.Context, pane, sessionID string)
 	return nil
 }
 
-// claudeProcessAlivePython reports whether the pid still has the captured
-// kernel start time.
+// claudeProcessAlivePython reports whether the pid still runs with the
+// captured kernel start time: an exited process (zombie or dead state, procfs
+// stat field 3) is ended even before its parent reaps it.
 const claudeProcessAlivePython = `import sys
-try:print('alive' if open('/proc/%d/stat'%int(sys.argv[1])).read().rsplit(')',1)[1].split()[19]==sys.argv[2] else 'ended')
+try:
+ st=open('/proc/%d/stat'%int(sys.argv[1])).read().rsplit(')',1)[1].split()
+ print('alive' if st[0] not in ('Z','X','x') and st[19]==sys.argv[2] else 'ended')
 except Exception:print('ended')`
 
 var claudeProcessStart = regexp.MustCompile(`^[0-9]{1,20}$`)
@@ -363,7 +377,7 @@ func (h Host) readClaudeBridge(j *Job) {
 		if read.Restarted {
 			next = claudeTranscriptCursor{}
 		}
-		next.dev, next.ino, next.offset, next.tail = read.Dev, read.Ino, read.Offset, read.Tail
+		next.dev, next.ino, next.offset, next.prefix = read.Dev, read.Ino, read.Offset, read.Prefix
 		if read.Entry {
 			next.entry, next.url = true, read.URL
 		}

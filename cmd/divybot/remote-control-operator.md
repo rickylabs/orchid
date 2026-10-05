@@ -57,14 +57,17 @@ the native identity proof, with no bridge needed, and keeps it as
 a coordinator restart). A launch whose capture fails still runs, without a link;
 no later process is ever chosen instead, and any other process is refused.
 Every publication of a link first reads, natively and now, that this pid still
-has its captured start time; an ended process withholds the link at once.
+runs with its captured start time; an ended process, including an exited one
+not yet reaped (procfs state Z or X), withholds the link at once, and its record
+is never bound.
 
 The transcript is read from a per-run cursor: every complete line is parsed as
 JSON before its typed fields are selected (no byte pre-filter), in bounded
 16 MiB chunks; the link is withheld until the parse has caught up. A line still
 being written waits until it is complete. A replaced, shortened or rewritten
-file (the hash of the 4 KiB before the cursor changed) is read again from the
-start, and a malformed complete line withholds the link.
+file (the SHA-256 of every byte before the cursor changed, checked on each
+read) is read again from the start, and a malformed complete line withholds the
+link.
 
 The link is exactly `https://claude.ai/code/session_<1-128 alphanumerics>`; it
 is identity, never a connection verdict, and is never read from terminal text.

@@ -765,6 +765,48 @@ func TestClaudeProcessAlive(t *testing.T) {
 	}
 }
 
+// An exited process that its parent has not reaped yet (procfs state Z) keeps
+// its pid and start time, yet it is ended: neither the liveness read nor the
+// bound-record read accepts it.
+func TestClaudeZombieProcessIsEnded(t *testing.T) {
+	child := exec.Command("sleep", "60")
+	if child.Start() != nil {
+		t.Fatal("fixture child")
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	pid := child.Process.Pid
+	p := &claudeProcess{PID: pid, Start: procStart(t, pid)}
+	sid := syntheticRemoteRun(t).NativeSessionID
+	h := claudeBridgeHost(t, []int{pid}, map[int]any{pid: map[string]any{"pid": pid, "sessionId": sid, "procStart": p.Start}})
+	if !h.claudeProcessAlive(context.Background(), p) {
+		t.Fatal("control: running child reads as ended")
+	}
+	if _, reason := h.claudeBridgeSession(context.Background(), "w1:p1", sid, "", claudeTranscriptCursor{}); reason != "" {
+		t.Fatalf("control: running child record not bound: %s", reason)
+	}
+	_ = child.Process.Kill()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			t.Fatal("control: unreaped child vanished")
+		}
+		if fields := strings.Fields(string(raw)[strings.LastIndex(string(raw), ")")+1:]); len(fields) > 0 && fields[0] == "Z" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control: child never reached zombie state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.claudeProcessAlive(context.Background(), p) { // guard:claude-zombie-not-alive
+		t.Fatal("a zombie process reads as alive")
+	}
+	if _, reason := h.claudeBridgeSession(context.Background(), "w1:p1", sid, "", claudeTranscriptCursor{}); reason != linkRecordUnbound { // guard:claude-zombie-not-bound
+		t.Fatalf("a zombie process record was bound: %q", reason)
+	}
+}
+
 // Every complete transcript line is parsed as JSON, from a per-job cursor:
 // a JSON-escaped typed entry counts, a partial last line waits until it is
 // complete, a replaced file restarts, and a long transcript is read in bounded

@@ -135,9 +135,9 @@ func TestReviewBridgeResponseConsistency(t *testing.T) {
 	pid := os.Getpid()
 	url := "https://claude.ai/code/" + fixtureBridge
 	resp := func(bridge, transcript string, entry bool, u string, offset int, eof bool) string {
-		tail := map[bool]string{true: strings.Repeat("a", 64)}[transcript == "parsed" && offset > 0]
-		return fmt.Sprintf(`{"matches":1,"malformed":false,"pid":%d,"start":"1","bridge":%q,"transcript":%q,"entry":%v,"url":%q,"dev":%d,"ino":%d,"offset":%d,"tail":%q,"eof":%v,"restarted":false}`,
-			pid, bridge, transcript, entry, u, map[bool]int{true: 1}[transcript == "parsed"], map[bool]int{true: 2}[transcript == "parsed"], offset, tail, eof)
+		prefix := map[bool]string{true: strings.Repeat("a", 64)}[transcript == "parsed" && offset > 0]
+		return fmt.Sprintf(`{"matches":1,"malformed":false,"pid":%d,"start":"1","bridge":%q,"transcript":%q,"entry":%v,"url":%q,"dev":%d,"ino":%d,"offset":%d,"prefix":%q,"eof":%v,"restarted":false}`,
+			pid, bridge, transcript, entry, u, map[bool]int{true: 1}[transcript == "parsed"], map[bool]int{true: 2}[transcript == "parsed"], offset, prefix, eof)
 	}
 	for _, tc := range []struct {
 		name, response string
@@ -148,11 +148,11 @@ func TestReviewBridgeResponseConsistency(t *testing.T) {
 		{"entry-without-read", resp(fixtureBridge, "absent", true, "", 0, false), false},
 		{"cursor-without-read", resp(fixtureBridge, "unreadable", false, "", 9, false), false},
 		{"negative-offset", resp(fixtureBridge, "parsed", false, "", -1, true), false},
-		{"cursor-without-tail", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"` + fixtureBridge + `","transcript":"parsed","entry":false,"url":"","dev":1,"ino":2,"offset":9,"tail":"","eof":true,"restarted":false}`, false},
+		{"cursor-without-prefix", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"` + fixtureBridge + `","transcript":"parsed","entry":false,"url":"","dev":1,"ino":2,"offset":9,"prefix":"","eof":true,"restarted":false}`, false},
 		{"unknown-transcript-state", resp(fixtureBridge, "maybe", false, "", 0, false), false},
 		{"bridge-wrong-form", resp("bridge_x", "skipped", false, "", 0, false), false},
-		{"unbound-pid", `{"matches":1,"malformed":false,"pid":0,"start":"","bridge":"","transcript":"skipped","entry":false,"url":"","dev":0,"ino":0,"offset":0,"tail":"","eof":false,"restarted":false}`, false},
-		{"unknown-field", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"","transcript":"skipped","entry":false,"url":"","dev":0,"ino":0,"offset":0,"tail":"","eof":false,"restarted":false,"present":true}`, false},
+		{"unbound-pid", `{"matches":1,"malformed":false,"pid":0,"start":"","bridge":"","transcript":"skipped","entry":false,"url":"","dev":0,"ino":0,"offset":0,"prefix":"","eof":false,"restarted":false}`, false},
+		{"unknown-field", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"","transcript":"skipped","entry":false,"url":"","dev":0,"ino":0,"offset":0,"prefix":"","eof":false,"restarted":false,"present":true}`, false},
 		{"consistent-present", resp(fixtureBridge, "parsed", true, url, 9, true), true},
 		{"consistent-absent", resp("", "skipped", false, "", 0, false), true},
 	} {
