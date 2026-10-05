@@ -964,3 +964,140 @@ func writeDispatchFixture(t *testing.T, root, key, body string) {
 		t.Fatal("dispatch fixture")
 	}
 }
+
+// ---- REVIEW-o83c R1: incomplete or inconsistent frozen decisions ----
+
+// decidedProgress is a complete progress record carrying the reducer's own
+// frozen decision for it. edit changes field values and keeps canonical bytes;
+// raw edits the encoded keys (missing or extra fields).
+func decidedProgress(t *testing.T, edit func(o *launchOutcome), raw func(m map[string]any)) attemptProgress {
+	t.Helper()
+	p := completeProgress("fedcba9876543210fedcba9876543210", nil)
+	p.Facts = attemptFacts{Registered: true}
+	o := decideOutcome(p, errMatrix, stamp(fixedNow()))
+	if edit != nil {
+		edit(&o)
+	}
+	body, _ := json.Marshal(o)
+	if raw != nil {
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		raw(m)
+		body, _ = json.Marshal(m)
+	}
+	p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
+	return p
+}
+
+// Fail closed: an incomplete or inconsistent frozen decision is never finished
+// backlog; the snapshot is unknown with one reason and exit 2.
+func TestSnapshotRejectsIncompleteFrozenDecisions(t *testing.T) {
+	remove := func(k string) func(map[string]any) { return func(m map[string]any) { delete(m, k) } }
+	minimal := func(m map[string]any) {
+		for k := range m {
+			if k != "attemptId" && k != "observedAt" {
+				delete(m, k)
+			}
+		}
+		m["outcome"], m["reasonCode"] = "started", "started"
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(o *launchOutcome)
+		raw  func(map[string]any)
+		exit int
+	}{
+		{"complete-decision", nil, nil, 0},
+		{"minimal-four-fields", nil, minimal, 2},
+		{"no-schema", nil, remove("schemaVersion"), 2},
+		{"no-effects", nil, remove("effects"), 2},
+		{"no-phase", nil, remove("phase"), 2},
+		{"no-signal", nil, remove("signal"), 2},
+		{"no-evidence", nil, remove("evidence"), 2},
+		{"extra-field", nil, func(m map[string]any) { m["note"] = "x" }, 2},
+		{"key-order-changed", nil, func(map[string]any) {}, 2},
+		{"other-action-id", func(o *launchOutcome) {
+			o.ActionDispatchID = actionOpaque("assignment", "orchid-"+strings.Repeat("9", 64))
+		}, nil, 2},
+		{"other-issue", func(o *launchOutcome) { o.Issue.Number = 8 }, nil, 2},
+		{"other-dispatch", func(o *launchOutcome) { o.DispatchID = "assignment_" + strings.Repeat("f", 64) }, nil, 2},
+		{"other-attempt", func(o *launchOutcome) { o.AttemptID = attemptIDFor(strings.Repeat("9", 64)) }, nil, 2},
+		{"other-route", func(o *launchOutcome) { o.ResolvedRoute.Model = "other-model" }, nil, 2},
+		{"other-predecessor", func(o *launchOutcome) { x := "attempt_x"; o.PredecessorAttemptID = &x }, nil, 2},
+		{"schema-2", func(o *launchOutcome) { o.SchemaVersion = 2 }, nil, 2},
+		{"unknown-phase", func(o *launchOutcome) { o.Phase = "elsewhere" }, nil, 2},
+		{"started-with-progress-reason", func(o *launchOutcome) { o.Outcome = "started" }, nil, 2},
+		{"effects-mismatch", func(o *launchOutcome) { o.Effects = "none" }, nil, 2},
+		{"signal-mismatch", func(o *launchOutcome) { o.Signal = "orchid-commit" }, nil, 2},
+		{"unknown-evidence", func(o *launchOutcome) { o.Evidence = []string{"screenSaidSo"} }, nil, 2},
+		{"unsorted-evidence", func(o *launchOutcome) { o.Evidence = []string{"registered", "contextEnded"} }, nil, 2},
+		{"duplicate-evidence", func(o *launchOutcome) { o.Evidence = []string{"registered", "registered"} }, nil, 2},
+		{"other-time", func(o *launchOutcome) { o.ObservedAt = stamp(fixedNow().Add(time.Second)) }, nil, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := privateTestRoot(t)
+			_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: liveInstance, StartedAt: stamp(time.Now()), ObservedAt: stamp(time.Now())})
+			writeProgress(t, root, decidedProgress(t, tc.edit, tc.raw))
+			s := readLaunchSnapshot(root, time.Now())
+			if got := snapshotExit(s); got != tc.exit {
+				t.Fatalf("exit %d, want %d: %+v", got, tc.exit, s)
+			}
+			if tc.exit == 2 && (s.UnknownReason != "evidence-invalid" || s.Backlog != 0) {
+				t.Fatalf("incomplete decision trusted or reason missing: %+v", s)
+			}
+			if tc.exit == 0 && (s.Backlog != 1 || s.UnknownReason != "") {
+				t.Fatalf("complete decision not backlog: %+v", s)
+			}
+		})
+	}
+	// One reason for a producer that is not live, too.
+	root := privateTestRoot(t)
+	if s := readLaunchSnapshot(root, time.Now()); s.UnknownReason != "producer-not-live" || snapshotExit(s) != 2 {
+		t.Fatalf("missing producer not unknown with its reason: %+v", s)
+	}
+}
+
+// Every decision the reducer and recovery actually produce validates, so the
+// snapshot check never rejects Orchid's own records.
+func TestEveryReducerDecisionIsValidFrozen(t *testing.T) {
+	ce := func(kind string, shutdown bool, stage string) *attemptContextEnd {
+		return &attemptContextEnd{Kind: kind, Shutdown: shutdown, Stage: stage}
+	}
+	cases := []attemptProgress{
+		{Stage: "goal-confirmation", Facts: attemptFacts{Registered: true, GoalCommitted: true}},
+		{Run: true, Stage: "environment", Facts: attemptFacts{RunStarted: true}},
+		{Stage: "client-selection", Facts: attemptFacts{CodexClientUnmatched: true}},
+		{Stage: "client-selection", Facts: attemptFacts{CodexClientCheckFailed: true}},
+		{Stage: "client-selection", Facts: attemptFacts{AgySettingsUnreadable: true}},
+		{Stage: "registration", Facts: attemptFacts{ContextEnded: ce("cancelled", true, "registration")}},
+		{Stage: "registration", Facts: attemptFacts{ContextEnded: ce("cancelled", false, "registration")}},
+		{Stage: "registration", Facts: attemptFacts{ContextEnded: ce("deadline", false, "registration")}},
+		{Stage: "goal-delivery", Facts: attemptFacts{ContextEnded: ce("deadline", false, "goal-delivery")}},
+		{Stage: "workspace", Facts: attemptFacts{ContextEnded: ce("deadline", false, "workspace")}},
+		{Stage: "registration", Facts: attemptFacts{HerdrStartError: "timeout"}},
+		{Stage: "registration", Facts: attemptFacts{HerdrStartError: "agent_not_ready"}},
+		{Stage: "registration", Facts: attemptFacts{HerdrStartError: "agent_pane_busy"}},
+		{Stage: "registration", Facts: attemptFacts{Registered: true}},
+		{},
+	}
+	for i, c := range cases {
+		base := completeProgress("fedcba9876543210fedcba9876543210", nil)
+		base.Run, base.Stage, base.Facts = c.Run, c.Stage, c.Facts
+		for _, o := range []launchOutcome{decideOutcome(base, errMatrix, stamp(fixedNow())), interruptedOutcome(base, stamp(fixedNow()))} {
+			body, _ := json.Marshal(o)
+			p := base
+			p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
+			if !frozenDecisionValid(p) {
+				t.Fatalf("case %d: Orchid's own decision rejected: %s", i, body)
+			}
+		}
+	}
+	retry := &retryExpectation{OperationID: "op-1", Dispatch: dispatchBinding{RunID: "orchid-" + strings.Repeat("d", 64)}}
+	a, _ := fixtureAttempt(t, false, false, retry)
+	a.p.Instance = "fedcba9876543210fedcba9876543210"
+	body, _ := json.Marshal(decideOutcome(a.p, errMatrix, stamp(fixedNow())))
+	a.p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
+	if !frozenDecisionValid(a.p) {
+		t.Fatal("a retry attempt's own decision rejected")
+	}
+}

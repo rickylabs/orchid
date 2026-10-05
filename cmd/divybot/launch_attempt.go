@@ -767,6 +767,9 @@ type launchSnapshot struct {
 	// Invalid counts unreadable or malformed records. Any invalid evidence makes
 	// the snapshot unknown: an incomplete observation never certifies zero work.
 	Invalid int `json:"invalid"`
+	// UnknownReason is the one closed reason the snapshot cannot certify:
+	// producer-not-live or evidence-invalid. Empty when it can.
+	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
 var instancePattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -794,17 +797,70 @@ func snapshotProgressValid(p attemptProgress) bool {
 	if p.Decision == nil {
 		return true
 	}
+	return frozenDecisionValid(p)
+}
+
+// outcomeTuples are the only outcome/effects/reason/signal combinations the
+// reducer produces.
+var outcomeTuples = map[[4]string]bool{
+	{"started", "present", "started", "orchid-commit"}:                       true,
+	{"started", "present", "started", "orchid-run"}:                          true,
+	{"failed", "none", "codex-client-unmatched", "codex-app-server"}:         true,
+	{"failed", "none", "codex-client-check-failed", "codex-client-check"}:    true,
+	{"failed", "none", "agy-settings-unreadable", "agy-settings"}:            true,
+	{"unconfirmed", "possible", "launch-cancelled", "orchid-shutdown"}:       true,
+	{"unconfirmed", "possible", "launch-cancelled", "orchid-cancel"}:         true,
+	{"unconfirmed", "possible", "startup-timeout", "orchid-deadline"}:        true,
+	{"unconfirmed", "possible", "startup-timeout", "herdr-structured-error"}: true,
+	{"unconfirmed", "possible", "goal-unconfirmed", "orchid-deadline"}:       true,
+	{"unconfirmed", "possible", "deadline-exceeded", "orchid-deadline"}:      true,
+	{"unconfirmed", "possible", "startup-blocked", "herdr-structured-error"}: true,
+	{"unconfirmed", "possible", "startup-busy", "herdr-structured-error"}:    true,
+	{"unconfirmed", "possible", "progress-unconfirmed", "orchid-progress"}:   true,
+	{"unconfirmed", "possible", "launch-interrupted", "orchid-recovery"}:     true,
+}
+
+var outcomeEvidenceNames = map[string]bool{"herdrStartError": true, "contextEnded": true, "codexClientUnmatched": true,
+	"codexClientCheckFailed": true, "agySettingsUnreadable": true, "registered": true, "goalCommitted": true, "runStarted": true}
+
+func sameOptional(a, b *string) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+// frozenDecisionValid accepts a frozen decision only when it is the complete,
+// canonical outcome the reducer writes for this very attempt: every field
+// present (re-encoding reproduces the bytes exactly), schema 1, the progress
+// record's identity envelope, a known stage, sorted known evidence and a
+// reducer-producible outcome tuple. Anything else is incomplete evidence.
+func frozenDecisionValid(p attemptProgress) bool {
 	var o launchOutcome
-	if decodeNativeJSON([]byte(p.Decision.Bytes), &o) != nil || o.AttemptID != p.AttemptID || o.ObservedAt != p.Decision.ObservedAt || o.ReasonCode == "" { // guard:snapshot-decision-complete
+	if decodeNativeJSON([]byte(p.Decision.Bytes), &o) != nil { // guard:snapshot-decision-complete
 		return false
 	}
-	switch o.Outcome {
-	case "started", "failed", "unconfirmed":
-	default:
+	if canonical, err := json.Marshal(o); err != nil || string(canonical) != p.Decision.Bytes { // guard:snapshot-decision-canonical
 		return false
 	}
-	_, err := time.Parse("2006-01-02T15:04:05.000Z", o.ObservedAt)
-	return err == nil
+	if o.SchemaVersion != 1 || o.AttemptID != p.AttemptID || o.ActionDispatchID != p.ActionDispatchID || o.DispatchID != p.DispatchID ||
+		o.Issue != p.Issue || o.ResolvedRoute != p.ResolvedRoute || !sameOptional(o.PredecessorAttemptID, p.PredecessorAttemptID) ||
+		!sameOptional(o.RetryOperationID, p.RetryOperationID) || o.ObservedAt != p.Decision.ObservedAt { // guard:snapshot-decision-envelope
+		return false
+	}
+	if _, err := time.Parse("2006-01-02T15:04:05.000Z", o.ObservedAt); err != nil {
+		return false
+	}
+	phase := false
+	for _, name := range stageNames {
+		phase = phase || o.Phase == name
+	}
+	if !phase || !outcomeTuples[[4]string{o.Outcome, o.Effects, o.ReasonCode, o.Signal}] { // guard:snapshot-decision-vocabulary
+		return false
+	}
+	for i, e := range o.Evidence {
+		if !outcomeEvidenceNames[e] || (i > 0 && o.Evidence[i-1] >= e) { // guard:snapshot-decision-evidence
+			return false
+		}
+	}
+	return true
 }
 
 // snapshotDispatch strictly reads one reservation's dispatch record: no
@@ -893,6 +949,12 @@ func readLaunchSnapshot(root string, now time.Time) launchSnapshot {
 	}
 	sort.Ints(s.Untracked)
 	sort.Slice(s.InFlight, func(i, j int) bool { return s.InFlight[i].Issue < s.InFlight[j].Issue })
+	switch {
+	case s.Producer != "live":
+		s.UnknownReason = "producer-not-live"
+	case s.Invalid > 0:
+		s.UnknownReason = "evidence-invalid"
+	}
 	return s
 }
 
@@ -925,7 +987,7 @@ func launchesCLI(args []string, stdout, stderr io.Writer) int {
 // and nothing in flight.
 func snapshotExit(s launchSnapshot) int {
 	switch {
-	case s.Producer != "live" || s.Invalid > 0: // guard:cli-invalid-unknown
+	case s.Producer != "live" || s.Invalid > 0 || s.UnknownReason != "": // guard:cli-invalid-unknown
 		return 2
 	case len(s.InFlight) > 0 || len(s.Untracked) > 0:
 		return 3
