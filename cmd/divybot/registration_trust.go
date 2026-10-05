@@ -24,6 +24,10 @@ func managedInteractiveAgentArgs(agent string, o Overrides, cwd string) (string,
 	// JSON basic-string escapes are valid TOML escapes for these validated paths.
 	quoted, _ := json.Marshal(cwd)
 	args = append(args, "-c", "projects={"+string(quoted)+`={trust_level="trusted"}}`)
+	// The TUI runs its interactive update prompt before it connects to any
+	// app-server. A client pinned behind the latest release would wait there
+	// forever: no daemon attach, no session, no registration.
+	args = append(args, "-c", "check_for_update_on_startup=false") // guard:skip-update-prompt
 	return kind, args, nil
 }
 

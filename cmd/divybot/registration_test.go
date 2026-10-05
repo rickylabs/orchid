@@ -195,7 +195,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			expected := append([]string{"agent", "start", "fixture-agent", "--kind", kind, "--pane", "w1:p1", "--timeout", "120000", "--"}, configuredArgs...)
 			if kind == "codex" {
 				quoted, _ := json.Marshal(cwd)
-				expected = append(expected, "-c", "projects={"+string(quoted)+`={trust_level="trusted"}}`)
+				expected = append(expected, "-c", "projects={"+string(quoted)+`={trust_level="trusted"}}`, "-c", "check_for_update_on_startup=false")
 			}
 			if kind == "agy" {
 				gemini := filepath.Join(h.Home, ".gemini")
