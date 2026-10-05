@@ -58,8 +58,15 @@ func (c *Coord) superviseRemoteCleanup(ctx context.Context, h Host, j *Job) {
 	}
 	if j.RemoteCleanup == "operator-timeout" {
 		check, cancel := context.WithTimeout(ctx, 20*time.Second)
-		_, err := run(check, "gh", "issue", "close", fmt.Sprint(j.Issue), "--repo", c.cfg.Inbox, "--comment",
-			fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — native work stopped; seat and process absence observed; issue closed. Retry requires a new inbox issue or /swarm request.", j.Overrides.Timeout))
+		var err error
+		if _, binding := c.sourceBinding(j.Issue); binding {
+			if !c.replySource(check, j.Issue, "stopped", "operator-timeout", "", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded; native work stopped; seat and process absence observed. Retry requires a new /swarm comment.", j.Overrides.Timeout)) {
+				err = errMatrix
+			}
+		} else {
+			_, err = run(check, "gh", "issue", "close", fmt.Sprint(j.Issue), "--repo", c.cfg.Inbox, "--comment",
+				fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — native work stopped; seat and process absence observed; issue closed. Retry requires a new inbox issue or /swarm request.", j.Overrides.Timeout))
+		}
 		cancel()
 		if err != nil {
 			return

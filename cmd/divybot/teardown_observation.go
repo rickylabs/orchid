@@ -163,7 +163,7 @@ func (c *Coord) teardownStart(ctx context.Context, n int, j *Job, ws, cause stri
 	var dispatch dispatchBinding
 	if readPrivateActionJSON(filepath.Join(record, "dispatch.json"), &dispatch) != nil ||
 		dispatch.SchemaVersion != 1 || dispatch.State != "dispatched" || dispatch.RunID != runID ||
-		dispatch.Issue.Repo != c.cfg.Inbox || dispatch.Issue.Number != n ||
+		dispatch.Issue != c.issueHome(n) ||
 		dispatch.Host != j.Host || dispatch.Location == nil ||
 		dispatch.Location.PaneID != j.Pane || dispatch.Location.WorkspaceID != ws {
 		return

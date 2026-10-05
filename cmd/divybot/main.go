@@ -305,6 +305,7 @@ type Job struct {
 	NativeGoal            *dispatchGoal     `json:"native_goal,omitempty"`
 	DispatchKey           string            `json:"dispatch_key,omitempty"` // private launch receipt key
 	Issue                 int               `json:"issue"`
+	Home                  *dispatchIssue    `json:"home,omitempty"` // a comment binding's source issue; nil = inbox issue
 	Host                  string            `json:"host"`
 	Label                 string            `json:"label"`     // display name (claude-<n>)
 	Pane                  string            `json:"pane"`      // herdr send/read target (pane id)
@@ -360,9 +361,11 @@ type State struct {
 	// cap, the slew anchor across ticks/restarts.
 	QuotaSamples map[string][]QuotaSample `json:"quota_samples"`
 	PrevCap      map[string]int           `json:"prev_cap"`
-	// SeenSwarm dedups /swarm trigger comments ("owner/repo#c<commentID>").
-	SeenSwarm map[string]bool `json:"seen_swarm,omitempty"`
-	path      string
+	// SourceBindings are /swarm comment launches keyed by comment ID; SourceCursors
+	// is each target repository's comment read position. Both are persisted.
+	SourceBindings map[int]*sourceBinding `json:"source_bindings,omitempty"`
+	SourceCursors  map[string]time.Time   `json:"source_cursors,omitempty"`
+	path           string
 }
 
 func loadState(path string) *State {
@@ -377,8 +380,12 @@ func loadState(path string) *State {
 			Continued     map[string]int           `json:"continued"`
 			QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
 			PrevCap       map[string]int           `json:"prev_cap"`
+			Bindings      map[int]*sourceBinding   `json:"source_bindings,omitempty"`
+			Cursors       map[string]time.Time     `json:"source_cursors,omitempty"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
+			s.SourceBindings = raw.Bindings
+			s.SourceCursors = raw.Cursors
 			s.CompletedRuns = raw.CompletedRuns
 			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
@@ -417,7 +424,9 @@ func (s *State) saveLocked() error {
 		PrevCap       map[string]int           `json:"prev_cap"`
 		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
 		RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
-	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights}, "", "  ")
+		Bindings      map[int]*sourceBinding   `json:"source_bindings,omitempty"`
+		Cursors       map[string]time.Time     `json:"source_cursors,omitempty"`
+	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights, s.SourceBindings, s.SourceCursors}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1358,6 +1367,9 @@ type Issue struct {
 	Title  string   `json:"title"`
 	Body   string   `json:"body"`
 	Labels []string `json:"-"`
+	// Source is set for a /swarm comment binding: Number is then its key, and
+	// Source names the issue it belongs to.
+	Source *issueSource `json:"-"`
 }
 
 func ghJSON(ctx context.Context, out any, args ...string) error {
@@ -2122,6 +2134,7 @@ type Coord struct {
 	auth        *AuthStore
 	hosts       map[string]Host
 	actions     actionCalls           // injected only by action-delivery tests
+	source      sourceGitHub          // injected only by source-binding tests; nil uses gh
 	shadow      *nativeEvidenceShadow // private observation-only; never consulted
 	dry         bool                  // dry-run: log spawn/adopt decisions, take no spawning action
 	gov         struct {
@@ -2159,6 +2172,7 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 		Pane: ref.Pane, Workspace: ref.Workspace,
 		Target: tgt.Label, Repo: tgt.Repo, Branch: fmt.Sprintf("%s%d", c.cfg.BranchPrefix, n),
 		Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
+		Home: is.home(),
 	}
 	c.st.mu.Lock()
 	c.st.Jobs[n] = j
@@ -2419,8 +2433,9 @@ func (c *Coord) tick(ctx context.Context) {
 	// inbox so they're visible to pollIssues on this same cycle.
 	c.assignmentTick(ctx)
 
-	// /swarm comment trigger: mirror comment-triggered runs the same way.
-	c.commentTick(ctx)
+	// /swarm comment trigger: an owner comment on a target issue binds a launch on
+	// that issue directly, with no inbox copy.
+	c.sourceTick(ctx)
 
 	// Branch-agnostic merge sweep: merge ANY green/ready bot PR on an automerge
 	// target, even one no job tracks. Per-job merge only sees PRs on the job's
@@ -2446,9 +2461,7 @@ func (c *Coord) tick(ctx context.Context) {
 			if _, ok := allOpen[n]; !ok {
 				jc := j
 				c.st.mu.Unlock()
-				if !teardownEligible(ctx, n, allOpen, pollOK, func(ctx context.Context, n int) string {
-					return ghIssueStateByNum(ctx, c.cfg.Inbox, n)
-				}) {
+				if !teardownEligible(ctx, n, allOpen, pollOK, c.issueState) {
 					c.st.mu.Lock()
 					continue
 				}
@@ -2475,7 +2488,8 @@ func (c *Coord) tick(ctx context.Context) {
 
 	status, up := c.fleetStatus(ctx)
 	c.completionPass(ctx, status)
-	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return ghIssueStateByNum(ctx, c.cfg.Inbox, n) })
+	c.finishSource(ctx, open, pollOK)
+	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return c.issueState(ctx, n) })
 
 	// A persistently absent agent is an abandoned launch, not permission to retry.
 	// Fence it durably before removing tracking so a restart cannot respawn it.
@@ -2618,6 +2632,7 @@ func (c *Coord) tick(ctx context.Context) {
 		if launched {
 			budget[acct]--
 			c.reportMatrixLaunchAfterRefusal(ctx, n, postMatrixComment)
+			c.replySourceStarted(ctx, n)
 		}
 	}
 	c.st.save()
@@ -2654,6 +2669,9 @@ func (c *Coord) pollIssues(ctx context.Context) (open map[int]Issue, all map[int
 			open[is.Number] = is
 			all[is.Number] = true
 		}
+	}
+	if !c.pollSourceBindings(ctx, open, all) {
+		ok = false
 	}
 	return open, all, ok
 }
@@ -2794,6 +2812,19 @@ func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
 	o := parseOverrides(is.Body)
 	if o.RepoInvalid {
 		return Target{}, "source-repo-invalid", true
+	}
+	if is.Source != nil {
+		// A comment binding works in the repository the comment is in. A repo key
+		// may only confirm it.
+		if o.Repo != "" && !strings.EqualFold(o.Repo, is.Source.Repo) { // guard:source-binding-repo
+			return Target{}, "source-repo-mismatch", true
+		}
+		for _, tgt := range c.cfg.Targets {
+			if strings.EqualFold(tgt.Repo, is.Source.Repo) {
+				return tgt, "", true
+			}
+		}
+		return Target{}, "source-repo-unavailable", true
 	}
 	if o.Repo != "" { // guard:source-repo-authoritative
 		for _, tgt := range c.cfg.Targets {
@@ -3089,7 +3120,8 @@ func renderGoal(inbox, targetRepo, label, title, body, workdir, branch, hint str
 // workerGoal assembles the launched worker's goal: operator directives with the pinned
 // Harness profile, the rendered task, and the final-report contract.
 func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, runMode bool, commentKey string, ovr Overrides, receipt *durableMatrixReceipt) string {
-	goal := renderGoal(c.cfg.Inbox, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, n)
+	home := c.issueHome(n)
+	goal := renderGoal(home.Repo, tgt.Repo, tgt.Label, is.Title, is.Body, workdir, branch, tgt.PromptHint, home.Number)
 	if runMode {
 		goal += finalCommentBodyInstruction(commentKey)
 	} else {
@@ -3108,8 +3140,10 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	var intent goalIntent
 	if agent == "codex" {
 		var e error
-		is.Number = n
-		intent, e = nativeGoalIntent(c.cfg.Inbox, is, ovr)
+		home := c.issueHome(n)
+		assignment := is
+		assignment.Number = home.Number
+		intent, e = nativeGoalIntent(home.Repo, assignment, ovr)
 		if e != nil {
 			return matrixReason(closedGoalReason(e))
 		}
@@ -3192,8 +3226,8 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	}
 	// Prepare the pane environment, then let herdr start the configured agent
 	// in that same shell and register it before goal delivery.
-	// /swarm block in the inbox issue body (written directly, or carried over
-	// by commentTick's mirror) parameterizes the run.
+	// /swarm block in the inbox issue body, or in the trigger comment of a
+	// source binding, parameterizes the run.
 	runMode := strings.HasSuffix(agent, "-run")
 	opencodeClass := runMode || agent == "codex" || agent == "opencode"
 	commentKey := strings.TrimPrefix(receipt.dispatch.RunID, "orchid-")
@@ -3268,6 +3302,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 		FinalReportManaged: !runMode,
+		Home:               is.home(),
 	}
 	if !runMode {
 		j.GoalDelivery = "pending"
@@ -3500,8 +3535,14 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		c.transitionGoal(ctx, j, "paused")
 		log.Printf("issue #%d: operator timeout (%s) exceeded — tearing down", n, j.Overrides.Timeout)
 		cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
-		_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
-			"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
+		if _, binding := c.sourceBinding(n); binding {
+			// Never close the owner's source issue; end the binding instead.
+			c.replySource(cctx, n, "stopped", "operator-timeout", "", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded; agent torn down. To retry, post a new /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
+			c.closeSource(n, "stopped")
+		} else {
+			_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
+				"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
+		}
 		ccancel()
 		cleaned := c.teardown(ctx, n, j, "operator-timeout")
 		c.st.mu.Lock()
@@ -3586,6 +3627,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	if j.PR == 0 {
 		if pr := ghPRByBranch(ctx, j.Repo, j.Branch, c.cfg.BotLogin); pr != 0 {
 			j.PR = pr
+			c.replySourcePR(ctx, n, j)
 		}
 	}
 	if j.PR == 0 {
@@ -3988,6 +4030,9 @@ const fanoutGraceWindow = 4 * time.Minute
 // merge, the worker is unreachable, the grace has expired, or a sibling already
 // exists (the worker fanned out — teardown is safe and the fallback will no-op).
 func (c *Coord) fanoutGrace(ctx context.Context, n int, j *Job) bool {
+	if j.Home != nil {
+		return false // a comment binding never files inbox issues
+	}
 	ref, _, pr, ok := c.partialMerge(ctx, j)
 	if !ok {
 		return false // not a partial merge — normal teardown
@@ -4037,6 +4082,9 @@ func (c *Coord) fanoutGrace(ctx context.Context, n int, j *Job) bool {
 // No cap: every re-file requires a NEW merged PR, and the chain self-terminates
 // when the upstream closes. The per-ref counter is kept for the attempt label.
 func (c *Coord) maybeContinue(ctx context.Context, j *Job) {
+	if j.Home != nil {
+		return // a comment binding never files inbox issues; the owner posts a new comment
+	}
 	ref, refNum, pr, ok := c.partialMerge(ctx, j)
 	if !ok {
 		return

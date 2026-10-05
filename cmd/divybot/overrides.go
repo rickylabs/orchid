@@ -17,14 +17,11 @@ package main
 //
 //	Focus on the parser only, skip the docs.
 //
-// Comment-triggered runs are mirrored into the inbox (like assignmentTick)
-// with the comment appended to the mirrored body, so the whole existing
-// spawn/supervise pipeline applies unchanged.
+// A comment trigger is bound directly on its source issue, with no inbox copy;
+// see source_binding.go.
 
 import (
-	"context"
 	"fmt"
-	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -277,98 +274,3 @@ func (o Overrides) goalPreamble(p *workerProfile) string {
 }
 
 // ============================ comment trigger ============================
-
-// commentTick scans recent issue comments on every target repo for "/swarm"
-// trigger comments and mirrors each into the inbox (once), carrying the
-// comment text so parseOverrides sees it at spawn. Only comments authored by
-// the bot login are honored — anyone else commenting /swarm on a public repo
-// must not be able to spend the swarm's quota.
-func (c *Coord) commentTick(ctx context.Context) {
-	bot := c.cfg.BotLogin
-	if bot == "" {
-		return
-	}
-	c.st.mu.Lock()
-	if c.st.SeenSwarm == nil {
-		c.st.SeenSwarm = map[string]bool{}
-	}
-	c.st.mu.Unlock()
-	have, err := inboxMirrored(ctx, c.cfg.Inbox)
-	if err != nil {
-		log.Printf("swarm-comments: inbox list failed, skipping: %v", err)
-		return
-	}
-	since := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
-	for _, t := range c.cfg.Targets {
-		if t.Repo == "" || t.Repo == c.cfg.Inbox || t.Label == "" {
-			continue
-		}
-		var comments []struct {
-			ID       int64                  `json:"id"`
-			Body     string                 `json:"body"`
-			IssueURL string                 `json:"issue_url"`
-			HTMLURL  string                 `json:"html_url"`
-			Author   struct{ Login string } `json:"user"`
-		}
-		if err := ghJSON(ctx, &comments, "api",
-			fmt.Sprintf("repos/%s/issues/comments?since=%s&per_page=100", t.Repo, since)); err != nil {
-			log.Printf("swarm-comments: list %s failed: %v", t.Repo, err)
-			continue
-		}
-		for _, cm := range comments {
-			if !strings.HasPrefix(strings.TrimSpace(cm.Body), "/swarm") {
-				continue
-			}
-			key := fmt.Sprintf("%s#c%d", t.Repo, cm.ID)
-			c.st.mu.Lock()
-			seen := c.st.SeenSwarm[key]
-			if !seen {
-				c.st.SeenSwarm[key] = true
-			}
-			c.st.mu.Unlock()
-			if seen {
-				continue
-			}
-			if cm.Author.Login != bot {
-				log.Printf("swarm-comments: ignoring /swarm from non-bot @%s on %s", cm.Author.Login, cm.HTMLURL)
-				continue
-			}
-			// PR conversation comments share the issues/comments feed — a
-			// /swarm on a PR is out of scope for spawning.
-			if strings.Contains(cm.HTMLURL, "/pull/") {
-				continue
-			}
-			num := 0
-			if i := strings.LastIndex(cm.IssueURL, "/"); i >= 0 {
-				fmt.Sscanf(cm.IssueURL[i+1:], "%d", &num)
-			}
-			if num == 0 {
-				continue
-			}
-			ref := fmt.Sprintf("%s#%d", t.Repo, num)
-			if have[ref] {
-				continue // already mirrored (assignment or an earlier /swarm)
-			}
-			var is struct {
-				Title string `json:"title"`
-				Body  string `json:"body"`
-				State string `json:"state"`
-			}
-			if err := ghJSON(ctx, &is, "api", fmt.Sprintf("repos/%s/issues/%d", t.Repo, num)); err != nil || is.State != "open" {
-				continue
-			}
-			title := fmt.Sprintf("[%s] %s", ref, is.Title)
-			body := fmt.Sprintf(
-				"Triggered by a /swarm comment on [%s](%s).\n\n---\n\n%s\n\n---\n\n%s",
-				ref, cm.HTMLURL, truncate(is.Body, 2000), truncate(cm.Body, 1500))
-			out, err := run(ctx, "gh", "issue", "create",
-				"--repo", c.cfg.Inbox, "--label", t.Label, "--title", title, "--body", body)
-			if err != nil {
-				log.Printf("swarm-comments: gh issue create failed for %s: %v: %s", ref, err, strings.TrimSpace(out))
-				continue
-			}
-			have[ref] = true
-			log.Printf("swarm-comments: opened inbox issue for %s → %s", ref, strings.TrimSpace(out))
-		}
-	}
-}
