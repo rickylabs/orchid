@@ -59,11 +59,15 @@ func (h Host) observedClaudeName(ctx context.Context, run *remoteControlRun) *st
 	return &name
 }
 
+// remoteProofBudget is the proof's share of the five-second observation check.
+const remoteProofBudget = 3 * time.Second
+
 func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 	if j == nil || j.RemoteControl == nil || (j.Agent != "codex" && j.Agent != "claude") {
 		return
 	}
 	h.ShadowScope = c.shadow.scope(j)
+	h.ClaudeLinks = c.claudeLinks
 	// Observe-only native evidence, read off the decision path (asynchronous,
 	// own context): it cannot change today's decision or consume its deadline.
 	h.observeClaudeBridge(j) // guard:claude-bridge-off-path
@@ -79,7 +83,12 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 		c.clearRemoteControl(j)
 		return
 	}
-	proofErr := h.remoteProof(check, j.Agent, j.Label, j.RemoteControl, r.dispatch.Location)
+	// The proof has its own share of the check: a proof that waits out its
+	// whole budget (for example a footer that never appears) still leaves time
+	// to record the row as unconfirmed, with its native session link.
+	proofCtx, proofCancel := context.WithTimeout(check, remoteProofBudget) // guard:proof-sub-budget
+	proofErr := h.remoteProof(proofCtx, j.Agent, j.Label, j.RemoteControl, r.dispatch.Location)
+	proofCancel()
 	current, currentID, err := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
 	if err != nil || currentID != id || !reflect.DeepEqual(current.dispatch, r.dispatch) || check.Err() != nil {
 		c.clearRemoteControl(j)
@@ -100,7 +109,14 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 		c.clearRemoteControl(j)
 		return
 	}
-	if check.Err() != nil || writeRemoteObservation(check, r, j.Agent, j.RemoteControl, state, reason, name) != nil || check.Err() != nil {
+	// The Claude session link comes only from Claude's own session record bound
+	// to this exact process (read off this path, still fresh); never from the
+	// pane. It is identity, carried on connected and unconfirmed rows alike.
+	var link *string
+	if j.Agent == "claude" {
+		link = c.claudeLinks.fresh(j.DispatchKey, j.RemoteControl.NativeSessionID, time.Now()) // guard:claude-link-native-only
+	}
+	if check.Err() != nil || writeRemoteObservation(check, r, j.Agent, j.RemoteControl, state, reason, name, link) != nil || check.Err() != nil {
 		c.clearRemoteControl(j)
 	}
 }

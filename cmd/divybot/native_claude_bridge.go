@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -58,12 +60,13 @@ for pid in pids:
  if d['pid']!=pid or d['procStart']!=start or d['sessionId']!=sid:
   continue
  if 'bridgeSessionId' not in d:
-  m.append(False)
+  m.append('')
  elif type(d['bridgeSessionId']) is str and d['bridgeSessionId']:
-  m.append(True)
+  m.append(d['bridgeSessionId'])
  else:
   bad+=1
-print(json.dumps({'matches':len(m),'present':len(m)==1 and m[0],'malformed':bad>0}))
+one=m[0] if len(m)==1 else ''
+print(json.dumps({'matches':len(m),'present':one!='','bridge':one,'malformed':bad>0}))
 `
 
 // runBounded runs a host script whose whole process group, and the wait for
@@ -87,18 +90,30 @@ func (h Host) runBounded(ctx context.Context, script string) (string, error) {
 // record for the exact process in the pane records a bridge identity.
 // ok=false is unknown: no single match, or any malformed record.
 func (h Host) claudeBridgeIdentity(ctx context.Context, pane, sessionID string) (present, ok bool) {
+	_, present, ok = h.claudeBridgeSession(ctx, pane, sessionID)
+	return present, ok
+}
+
+// claudeBridgeSessionID is the documented Claude Code session id form: the
+// part of the claude.ai/code session URL between /code/ and any '?'.
+var claudeBridgeSessionID = regexp.MustCompile(`^session_[A-Za-z0-9]{1,128}$`)
+
+// claudeBridgeSession is claudeBridgeIdentity plus the recorded bridge session
+// id itself, strictly in the documented session id form; a present value of
+// any other form is malformed (unknown).
+func (h Host) claudeBridgeSession(ctx context.Context, pane, sessionID string) (bridge string, present, ok bool) {
 	if !privateNativeID(sessionID) {
-		return false, false
+		return "", false, false
 	}
 	herdr := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s %s %s %s`,
 		shq(h.agentHome()), shq("pane"), shq("process-info"), shq("--pane"), shq(pane))
 	out, err := h.runBounded(ctx, herdr)
 	if err != nil {
-		return false, false
+		return "", false, false
 	}
 	pids, ok := paneProcessPIDs(out)
 	if !ok {
-		return false, false
+		return "", false, false
 	}
 	args := make([]string, 0, len(pids))
 	for _, pid := range pids {
@@ -107,14 +122,18 @@ func (h Host) claudeBridgeIdentity(ctx context.Context, pane, sessionID string) 
 	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s", shq(h.agentHome()), shq(claudeBridgePython), shq(sessionID), strings.Join(args, " "))
 	raw, err := h.runBounded(ctx, script)
 	var v struct {
-		Matches   int  `json:"matches"`
-		Present   bool `json:"present"`
-		Malformed bool `json:"malformed"`
+		Matches   int    `json:"matches"`
+		Present   bool   `json:"present"`
+		Bridge    string `json:"bridge"`
+		Malformed bool   `json:"malformed"`
 	}
-	if err != nil || len(raw) > 256 || decodeNativeJSON([]byte(strings.TrimSpace(raw)), &v) != nil || v.Malformed || v.Matches != 1 { // guard:claude-bridge-single-match
-		return false, false
+	if err != nil || len(raw) > 512 || decodeNativeJSON([]byte(strings.TrimSpace(raw)), &v) != nil || v.Malformed || v.Matches != 1 { // guard:claude-bridge-single-match
+		return "", false, false
 	}
-	return v.Present, true
+	if v.Present != (v.Bridge != "") || (v.Present && !claudeBridgeSessionID.MatchString(v.Bridge)) { // guard:claude-bridge-session-form
+		return "", false, false
+	}
+	return v.Bridge, v.Present, true
 }
 
 // paneProcessPIDs lists the pane's foreground pids from Herdr's structured
@@ -151,13 +170,74 @@ func (h Host) readClaudeBridge(j *Job) {
 	if p == nil {
 		return
 	}
-	present, ok := h.claudeBridgeIdentity(ctx, j.Pane, j.RemoteControl.NativeSessionID)
+	bridge, present, ok := h.claudeBridgeSession(ctx, j.Pane, j.RemoteControl.NativeSessionID)
 	if !ok {
+		h.ClaudeLinks.clear(j.DispatchKey) // guard:claude-link-unknown-clears
 		p.close(errClaudeBridgeUnknown)
 		return
 	}
+	if present {
+		h.ClaudeLinks.set(j.DispatchKey, j.RemoteControl.NativeSessionID, "https://claude.ai/code/"+bridge, time.Now())
+	} else {
+		h.ClaudeLinks.clear(j.DispatchKey)
+	}
 	p.bridgeIdentity(present) // guard:claude-bridge-publish
 	p.close(nil)
+}
+
+// claudeLinkFreshness bounds how long a bound bridge read may supply the
+// session link: longer than one poll interval, so the next tick's
+// observation can use the previous tick's off-path read.
+const claudeLinkFreshness = 3 * remoteControlFreshness
+
+// claudeLinkStore keeps, per job, the Claude Remote Control session link last
+// read from Claude's own bound session record. It is identity only, never a
+// connection verdict, and is never derived from terminal text.
+type claudeLinkStore struct {
+	mu   sync.Mutex
+	rows map[string]claudeLink
+}
+
+type claudeLink struct {
+	native, url string
+	at          time.Time
+}
+
+func (s *claudeLinkStore) set(key, native, url string, at time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rows == nil {
+		s.rows = map[string]claudeLink{}
+	}
+	s.rows[key] = claudeLink{native: native, url: url, at: at}
+}
+
+func (s *claudeLinkStore) clear(key string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.rows, key)
+}
+
+// fresh returns the job's link when it was read for exactly this native
+// session within the freshness bound; otherwise nil.
+func (s *claudeLinkStore) fresh(key, native string, now time.Time) *string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.rows[key]
+	if !ok || row.native != native || now.Before(row.at) || now.Sub(row.at) > claudeLinkFreshness { // guard:claude-link-fresh
+		return nil
+	}
+	url := row.url
+	return &url
 }
 
 // observeClaudeBridge starts the read off the decision path: asynchronous,

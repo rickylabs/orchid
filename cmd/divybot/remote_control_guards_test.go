@@ -582,7 +582,7 @@ func TestRemoteControlObservationEnvelopeAndRevocation(t *testing.T) {
 		t.Fatal("fixture dispatch unavailable")
 	}
 	path := filepath.Join(filepath.Dir(r.file), "remote-control.json")
-	if writeRemoteObservation(context.Background(), r, "codex", run, "connected", "", &run.Name) != nil {
+	if writeRemoteObservation(context.Background(), r, "codex", run, "connected", "", &run.Name, nil) != nil {
 		t.Fatal("native observation refused")
 	}
 	var row remoteControlObservation
@@ -596,7 +596,7 @@ func TestRemoteControlObservationEnvelopeAndRevocation(t *testing.T) {
 	if e != nil || e2 != nil || until.Sub(at) != 30*time.Second || info.Mode().Perm() != 0600 {
 		t.Fatal("private observation privacy/freshness changed")
 	}
-	if writeRemoteObservation(context.Background(), r, "codex", run, "unconfirmed", "remote-control-unconfirmed", nil) != nil {
+	if writeRemoteObservation(context.Background(), r, "codex", run, "unconfirmed", "remote-control-unconfirmed", nil, nil) != nil {
 		t.Fatal("refusal unavailable")
 	}
 	b, _ = os.ReadFile(path)
@@ -606,15 +606,15 @@ func TestRemoteControlObservationEnvelopeAndRevocation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if writeRemoteObservation(ctx, r, "codex", run, "connected", "", &run.Name) == nil {
+	if writeRemoteObservation(ctx, r, "codex", run, "connected", "", &run.Name, nil) == nil {
 		t.Fatal("cancelled observation published")
 	}
 	for _, state := range []string{"enabled", "ready", "failed"} {
-		if writeRemoteObservation(context.Background(), r, "codex", run, state, "", nil) == nil {
+		if writeRemoteObservation(context.Background(), r, "codex", run, state, "", nil, nil) == nil {
 			t.Fatal("unknown connection state published")
 		}
 	}
-	if writeRemoteObservation(context.Background(), r, "claude", run, "connected", "", nil) == nil {
+	if writeRemoteObservation(context.Background(), r, "claude", run, "connected", "", nil, nil) == nil {
 		t.Fatal("wrong dispatch vendor published")
 	}
 }

@@ -52,7 +52,7 @@ func TestRemoteControlPrivateConsumerFixtures(t *testing.T) {
 			if fixture.Reason != nil {
 				reason = *fixture.Reason
 			}
-			if writeRemoteObservation(context.Background(), r, kind, run, fixture.State, reason, fixture.SessionName) != nil {
+			if writeRemoteObservation(context.Background(), r, kind, run, fixture.State, reason, fixture.SessionName, nil) != nil {
 				t.Fatal("producer refused reader fixture semantics")
 			}
 			out, _ := os.ReadFile(filepath.Join(filepath.Dir(r.file), "remote-control.json"))

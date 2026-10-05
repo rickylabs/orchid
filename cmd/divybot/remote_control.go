@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -279,7 +280,14 @@ func (h Host) forJob(j *Job) Host {
 	return h
 }
 
-func writeRemoteObservation(ctx context.Context, r *durableMatrixReceipt, kind string, run *remoteControlRun, state, reason string, observedName *string) error {
+// claudeSessionLink is the documented Claude Code Remote Control session URL
+// form, https://claude.ai/code/<session id>.
+var claudeSessionLink = regexp.MustCompile(`^https://claude\.ai/code/session_[A-Za-z0-9]{1,128}$`)
+
+func writeRemoteObservation(ctx context.Context, r *durableMatrixReceipt, kind string, run *remoteControlRun, state, reason string, observedName, link *string) error {
+	if link != nil && (kind != "claude" || !claudeSessionLink.MatchString(*link)) { // guard:observation-link-form
+		return goalError("remote-control-binding-invalid")
+	}
 	if ctx.Err() != nil || r == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != kind || r.dispatch.ParentRunID != nil || r.dispatch.Location == nil || run == nil || !privateNativeID(run.NativeSessionID) || (kind != "claude" && kind != "codex") ||
 		(state != "connected" && state != "unconfirmed") || (state == "connected" && reason != "") || (state == "unconfirmed" && (reason != "remote-control-unconfirmed" || observedName != nil)) || (observedName != nil && *observedName != run.Name) {
 		return goalError("remote-control-binding-invalid")
@@ -295,7 +303,7 @@ func writeRemoteObservation(ctx context.Context, r *durableMatrixReceipt, kind s
 	}
 	row := remoteControlObservation{SchemaVersion: 1, RunID: r.dispatch.RunID, NativeSessionID: run.NativeSessionID,
 		Host: r.dispatch.Host, PaneID: r.dispatch.Location.PaneID, WorkspaceID: r.dispatch.Location.WorkspaceID,
-		Vendor: vendor, State: state, Reason: refusal, SessionName: observedName,
+		Vendor: vendor, State: state, Reason: refusal, SessionName: observedName, Link: link,
 		ObservedAt: now.Format(time.RFC3339Nano), ValidUntil: now.Add(remoteControlFreshness).Format(time.RFC3339Nano)}
 	path := filepath.Join(filepath.Dir(r.file), "remote-control.json")
 	if err := writePrivateJSON(path, ".remote-control-", r.owner, row); err != nil {
