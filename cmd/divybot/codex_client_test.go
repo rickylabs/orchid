@@ -36,6 +36,8 @@ func TestCodexServerVersionFromUserAgent(t *testing.T) {
 // unless check_for_update_on_startup=false is passed (codex tui lib.rs).
 func fakeCodexScript(reports string) string {
 	return "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli " + reports + "' && exit 0\n" +
+		// Native: a remote resume refuses permission overrides before attaching.
+		"case \"$*\" in *--dangerously-bypass-approvals-and-sandbox*--remote*) echo permission-override-refused; exit 1;; esac\n" +
 		"case \"$*\" in *check_for_update_on_startup=false*) echo attached;; *) echo update-prompt;; esac\n"
 }
 

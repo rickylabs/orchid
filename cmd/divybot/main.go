@@ -2185,7 +2185,12 @@ func (c *Coord) run(ctx context.Context) {
 		}
 	}
 	go c.authSyncLoop(ctx)
-	go c.governorLoop(ctx)
+	primed := false
+	if c.cfg.Governor.Enabled {
+		c.governorSample(ctx) // guard:quota-primed
+		primed = true
+	}
+	go c.governorLoop(ctx, primed)
 	go c.memoryLoop(ctx)
 	go func() {
 		t := time.NewTicker(shadowReadoutEvery)
@@ -2287,67 +2292,76 @@ func (c *Coord) memoryLoop(ctx context.Context) {
 	}
 }
 
-func (c *Coord) governorLoop(ctx context.Context) {
+func (c *Coord) governorLoop(ctx context.Context, primed bool) {
 	if !c.cfg.Governor.Enabled {
 		return
 	}
 	t := time.NewTicker(c.cfg.Governor.sampleIntervalDur())
 	defer t.Stop()
 	for {
-		qs := c.sampleQuota(ctx)
-		now := time.Now()
-		if len(qs) > 0 {
-			c.gov.mu.Lock()
-			c.gov.q = qs
-			c.gov.mu.Unlock()
-			// Append fresh readings to each account's burn-rate ring + trim.
-			c.st.mu.Lock()
-			if c.st.QuotaSamples == nil {
-				c.st.QuotaSamples = map[string][]QuotaSample{}
-			}
-			for a, q := range qs {
-				if !q.ok {
-					continue
-				}
-				ring := append(c.st.QuotaSamples[a], QuotaSample{
-					Account: a, Ts: now.Unix(),
-					FivePct: q.five.UsedPct, FiveReset: q.five.ResetsAt,
-					SevenPct: q.seven.UsedPct, SevenReset: q.seven.ResetsAt,
-				})
-				cutoff := now.Add(-govSampleRetain).Unix()
-				trimmed := ring[:0]
-				for _, s := range ring {
-					if s.Ts >= cutoff {
-						trimmed = append(trimmed, s)
-					}
-				}
-				c.st.QuotaSamples[a] = trimmed
-			}
-			samples := c.st.QuotaSamples
-			active := map[string]int{}
-			for _, j := range c.st.Jobs {
-				active[accountKey(j.Agent)]++
-			}
-			prev := map[string]int{}
-			for a, v := range c.st.PrevCap {
-				prev[a] = v
-			}
-			c.st.mu.Unlock()
-			for a, q := range qs {
-				if !q.ok {
-					continue
-				}
-				d := c.cfg.Governor.decide(now, q, samples[a], active[a], prev[a])
-				log.Printf("governor[%s]: weekly %.0f%% (burn %.2f/h, target %.2f/h) / 5h %.0f%% → cap %d active %d (binding %q, projEnd %.0f%%)",
-					a, q.seven.UsedPct, d.burnWeekly, d.targetWeekly, q.five.UsedPct, d.cap, active[a], d.binding, d.projectedEnd)
-			}
-			c.st.save()
+		if !primed {
+			c.governorSample(ctx)
 		}
+		primed = false
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// governorSample reads every meter once and records it. run calls it before the
+// first tick, so a restart never admits against a missing ("absent") sample.
+func (c *Coord) governorSample(ctx context.Context) {
+	qs := c.sampleQuota(ctx)
+	now := time.Now()
+	if len(qs) > 0 {
+		c.gov.mu.Lock()
+		c.gov.q = qs
+		c.gov.mu.Unlock()
+		// Append fresh readings to each account's burn-rate ring + trim.
+		c.st.mu.Lock()
+		if c.st.QuotaSamples == nil {
+			c.st.QuotaSamples = map[string][]QuotaSample{}
+		}
+		for a, q := range qs {
+			if !q.ok {
+				continue
+			}
+			ring := append(c.st.QuotaSamples[a], QuotaSample{
+				Account: a, Ts: now.Unix(),
+				FivePct: q.five.UsedPct, FiveReset: q.five.ResetsAt,
+				SevenPct: q.seven.UsedPct, SevenReset: q.seven.ResetsAt,
+			})
+			cutoff := now.Add(-govSampleRetain).Unix()
+			trimmed := ring[:0]
+			for _, s := range ring {
+				if s.Ts >= cutoff {
+					trimmed = append(trimmed, s)
+				}
+			}
+			c.st.QuotaSamples[a] = trimmed
+		}
+		samples := c.st.QuotaSamples
+		active := map[string]int{}
+		for _, j := range c.st.Jobs {
+			active[accountKey(j.Agent)]++
+		}
+		prev := map[string]int{}
+		for a, v := range c.st.PrevCap {
+			prev[a] = v
+		}
+		c.st.mu.Unlock()
+		for a, q := range qs {
+			if !q.ok {
+				continue
+			}
+			d := c.cfg.Governor.decide(now, q, samples[a], active[a], prev[a])
+			log.Printf("governor[%s]: weekly %.0f%% (burn %.2f/h, target %.2f/h) / 5h %.0f%% → cap %d active %d (binding %q, projEnd %.0f%%)",
+				a, q.seven.UsedPct, d.burnWeekly, d.targetWeekly, q.five.UsedPct, d.cap, active[a], d.binding, d.projectedEnd)
+		}
+		c.st.save()
 	}
 }
 

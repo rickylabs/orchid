@@ -182,7 +182,10 @@ func TestOwnerNativeAdmissionAndSharedGuards(t *testing.T) {
 				},
 			}
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
-			wantSuccess := containsString([]string{"claude", "codex", "agy", "opencode", "opencode-price-alias", "custom-opencode-variant", "ordinary-matrix", "owner-evaluator", "valid-token-budget"}, name)
+			// The owner is refused only on native proof of a vendor limit: an absent or
+			// stale meter, or the autonomous governor cap, no longer blocks the owner.
+			wantSuccess := containsString([]string{"claude", "codex", "agy", "opencode", "opencode-price-alias", "custom-opencode-variant", "ordinary-matrix", "owner-evaluator", "valid-token-budget",
+				"no-quota", "stale-quota", "no-capacity"}, name)
 			if ok != wantSuccess || launched != boolInt(wantSuccess) {
 				t.Fatalf("admission=%v launch=%d refusal=%s", ok, launched, refusal.ReasonCode)
 			}
