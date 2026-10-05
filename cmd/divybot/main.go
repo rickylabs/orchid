@@ -2501,7 +2501,7 @@ func (c *Coord) tick(ctx context.Context) {
 
 	status, up := c.fleetStatus(ctx)
 	c.completionPass(ctx, status)
-	c.finishSource(ctx, open, pollOK)
+	c.finishSource(ctx, allOpen, pollOK)
 	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return c.issueState(ctx, n) })
 
 	// A persistently absent agent is an abandoned launch, not permission to retry.

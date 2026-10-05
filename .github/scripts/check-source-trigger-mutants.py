@@ -26,6 +26,8 @@ mutants = [
     ('reply-budget', 'source_binding.go', 'left-- // guard:source-reply-budget', '_ = left // guard:source-reply-budget'),
     ('admission-no-read', 'owner_native_grant_store.go', '\tif subject.comment {\n\t\t// The source feed admits', '\tif false {\n\t\t// The source feed admits'),
     ('admit-confirmed', 'source_binding.go', 'if known || job { // guard:source-admit-confirmed', 'if true || known || job { // guard:source-admit-confirmed'),
+    ('finish-confirmed-only', 'source_binding.go', 'if done || (!all[key] && c.st.Jobs[key] == nil && !completing) { // guard:source-finish-confirmed', 'if done || (len(all) >= 0 && c.st.Jobs[key] == nil && !completing) { // guard:source-finish-confirmed'),
+    ('reply-turns', 'source_binding.go', 'mem.replyTurn = turn + attempts // guard:source-reply-turns', 'mem.replyTurn = turn + 0*attempts // guard:source-reply-turns'),
     ('refusal-log', 'source_binding.go', 'log.Printf("source triggers: %s#%d comment %d refused (%s): %s", repo, n, cm.ID, refusal, matrixReasons[refusal].hint) // guard:source-refusal-log', '_ = fmt.Sprintf("source triggers: %s#%d comment %d refused (%s): %s", repo, n, cm.ID, refusal, matrixReasons[refusal].hint) // guard:source-refusal-log'),
     ('scan-not-persisted', 'source_binding.go', '\t\tc.st.SourceScans[repo] = scan\n', '\t\tdelete(c.st.SourceScans, repo)\n'),
     ('repo-turns', 'source_binding.go', 'mem.repoTurn = turn + scanned // guard:source-repo-turns', 'mem.repoTurn = turn + 1 + 0*scanned // guard:source-repo-turns'),

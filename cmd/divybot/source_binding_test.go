@@ -20,17 +20,19 @@ import (
 // repository, issues, deletions, every posted reply, ETags that answer 304 when
 // nothing changed, and call counts.
 type fakeSource struct {
-	mu          sync.Mutex
-	feed        map[string][]sourceComment
-	issues      map[string]sourceIssueView
-	deleted     map[int64]bool
-	replies     []fakeReply
-	failIssue   bool
-	failList    bool
-	failReplies int // the next N replies fail
-	remaining   int // X-RateLimit-Remaining; -1 = absent
-	reads       int // every GET, 304 included
-	notModified int
+	mu           sync.Mutex
+	feed         map[string][]sourceComment
+	issues       map[string]sourceIssueView
+	deleted      map[int64]bool
+	replies      []fakeReply
+	failIssue    bool
+	failList     bool
+	failReplies  int          // the next N replies fail
+	rejectIssues map[int]bool // replies to these issue numbers always fail
+	rejected     map[int]int
+	remaining    int // X-RateLimit-Remaining; -1 = absent
+	reads        int // every GET, 304 included
+	notModified  int
 }
 
 type fakeReply struct {
@@ -122,6 +124,10 @@ func (f *fakeSource) reply(_ context.Context, repo string, n int, body string) e
 	if f.failReplies > 0 {
 		f.failReplies--
 		return errors.New("reply down")
+	}
+	if f.rejectIssues[n] {
+		f.rejected[n]++
+		return errors.New("issue rejects comments")
 	}
 	f.replies = append(f.replies, fakeReply{repo, n, body})
 	return nil
@@ -712,19 +718,19 @@ func TestSourceRepliesAreMarkedOnceAndEndTheBinding(t *testing.T) {
 		t.Fatal("a non-terminal reply closed the binding")
 	}
 	delete(c.st.Jobs, key)
-	c.finishSource(context.Background(), map[int]Issue{}, true)
-	c.finishSource(context.Background(), map[int]Issue{}, true)
+	c.finishSource(context.Background(), map[int]bool{}, true)
+	c.finishSource(context.Background(), map[int]bool{}, true)
 	c.deliverSourceReplies(context.Background())
 	if got := f.markers(); len(got) != 4 || got[3] != sourceRepo+"#2063 "+sourceMarker(3100000040, "done", "source-closed", "") || c.st.SourceBindings[key].Closed != "done" {
 		t.Fatalf("finish replies %v", got)
 	}
 	f.post(sourceRepo, 2063, 3100000041, ownerGitHubID, sourceTrigger, at)
 	c.sourceTick(context.Background())
-	c.finishSource(context.Background(), map[int]Issue{}, false)
+	c.finishSource(context.Background(), map[int]bool{}, false)
 	if c.st.SourceBindings[3100000041].Closed != "" {
 		t.Fatal("finished on an unreliable poll")
 	}
-	c.finishSource(context.Background(), map[int]Issue{}, true)
+	c.finishSource(context.Background(), map[int]bool{}, true)
 	if c.st.SourceBindings[3100000041].Closed != "stopped" {
 		t.Fatal("an unlaunched binding whose trigger is gone was not stopped")
 	}
@@ -758,9 +764,8 @@ func TestSourceCompletionRepliesDone(t *testing.T) {
 	f.post(sourceRepo, 2063, 3100000050, ownerGitHubID, sourceTrigger, at)
 	c.sourceTick(context.Background())
 	key := 3100000050
-	is := c.st.SourceBindings[key].issue(c)
 	c.st.CompletedRuns = map[int]completedRun{key: {Phase: "observed"}}
-	c.finishSource(context.Background(), map[int]Issue{key: is}, true)
+	c.finishSource(context.Background(), map[int]bool{key: true}, true)
 	c.deliverSourceReplies(context.Background())
 	if got := f.markers(); len(got) != 1 || got[0] != sourceRepo+"#2063 "+sourceMarker(3100000050, "done", "", "") {
 		t.Fatalf("completion reply %v", got)
@@ -1065,11 +1070,79 @@ func TestSourceUnconfirmedBindingIsHeldNotDropped(t *testing.T) {
 	if _, admitted := open[3100000800]; admitted || !all[3100000800] {
 		t.Fatal("an unconfirmed binding was admitted, or dropped")
 	}
+	// The finish pass, with this reliable poll, must not end a held binding.
+	restarted.finishSource(context.Background(), all, true)
+	restarted.deliverSourceReplies(context.Background())
+	if b := restarted.st.SourceBindings[3100000800]; b.Closed != "" || len(f.replies) != 0 {
+		t.Fatalf("the finish pass ended a binding held during a rate pause: %+v %v", b, f.markers())
+	}
 	restarted.sourceMem().pauseTill = time.Time{}
 	open, all = map[int]Issue{}, map[int]bool{}
 	restarted.pollSourceBindings(context.Background(), open, all)
 	if _, admitted := open[3100000800]; !admitted {
 		t.Fatal("a confirmed binding was not admitted")
+	}
+	// Held for the check budget: 8 granted bindings, 6 checks per tick.
+	for i := 1; i < 8; i++ {
+		f.post(sourceRepo, 2063, int64(3100000800+i), ownerGitHubID, sourceTrigger, at)
+	}
+	restarted.sourceTick(context.Background())
+	again := &Coord{cfg: c.cfg, st: loadState(path), source: f, sourceGrant: c.sourceGrant}
+	open, all = map[int]Issue{}, map[int]bool{}
+	again.pollSourceBindings(context.Background(), open, all)
+	if len(open) != 6 || len(all) != 8 {
+		t.Fatalf("checked %d of 8, held %d", len(open), len(all))
+	}
+	again.finishSource(context.Background(), all, true)
+	for key, b := range again.st.SourceBindings {
+		if b.Closed != "" {
+			t.Fatalf("the finish pass ended binding %d held for the check budget", key)
+		}
+	}
+	// The next tick confirms the held pair, and they are admitted.
+	open, all = map[int]Issue{}, map[int]bool{}
+	again.pollSourceBindings(context.Background(), open, all)
+	if len(open) != 8 {
+		t.Fatalf("%d of 8 admitted after the next check", len(open))
+	}
+	// A confirmed closure still finishes.
+	f.mu.Lock()
+	f.deleted[3100000800] = true
+	f.mu.Unlock()
+	for tick := 0; tick < 3; tick++ {
+		all = map[int]bool{}
+		again.pollSourceBindings(context.Background(), map[int]Issue{}, all)
+		again.finishSource(context.Background(), all, true)
+	}
+	if again.st.SourceBindings[3100000800].Closed != "stopped" {
+		t.Fatal("a confirmed deleted trigger was not stopped")
+	}
+}
+
+// B8: replies that keep failing never starve another binding's reply.
+func TestSourceFailingRepliesDoNotStarveOthers(t *testing.T) {
+	c, f, _ := sourceFixture(t)
+	f.rejectIssues, f.rejected = map[int]bool{}, map[int]int{}
+	c.st.SourceBindings = map[int]*sourceBinding{}
+	for i := 0; i < 7; i++ {
+		key := 3100000900 + i
+		b := &sourceBinding{Repo: sourceRepo, Issue: 5000 + i, Comment: int64(key), CreatedAt: time.Now()}
+		b.Outbox = []sourceReply{sourceReplyFor(b, "refused", "source-grant-missing", "", "divybot: refused.")}
+		c.st.SourceBindings[key] = b
+		if i < 6 {
+			f.rejectIssues[5000+i] = true
+		}
+	}
+	for tick := 0; tick < 3; tick++ {
+		c.deliverSourceReplies(context.Background())
+	}
+	if len(c.st.SourceBindings[3100000906].Outbox) != 0 || len(f.replies) != 1 {
+		t.Fatalf("the healthy reply was starved: %v", f.markers())
+	}
+	for i := 0; i < 6; i++ {
+		if len(c.st.SourceBindings[3100000900+i].Outbox) != 1 {
+			t.Fatal("a failing reply was dropped")
+		}
 	}
 }
 

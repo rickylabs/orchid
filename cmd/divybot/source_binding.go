@@ -274,6 +274,7 @@ type sourceMemory struct {
 	open      map[int]bool
 	repoTurn  int
 	checkTurn int
+	replyTurn int
 	pauseTill time.Time
 }
 
@@ -699,14 +700,25 @@ func sourceQueued(b *sourceBinding, id string) bool {
 
 // deliverSourceReplies posts queued replies, at most sourceRepliesPerTick POSTs
 // per tick across every binding: one reply per binding per round, oldest first
-// within a binding, so a long outbox never starves the others. A failed POST
-// keeps its reply queued.
+// within a binding, starting each tick where the last one stopped. A failed POST
+// keeps its reply queued and gives the turn to the next binding.
 func (c *Coord) deliverSourceReplies(ctx context.Context) {
 	if c.dry || c.st == nil {
 		return
 	}
-	left := sourceRepliesPerTick
+	mem := c.sourceMem()
+	mem.mu.Lock()
+	turn := mem.replyTurn
+	mem.mu.Unlock()
+	left, attempts := sourceRepliesPerTick, 0
 	failed := map[int]bool{}
+	defer func() {
+		// The next tick starts after the last binding tried, so replies that keep
+		// failing never hold the budget against the others.
+		mem.mu.Lock()
+		mem.replyTurn = turn + attempts // guard:source-reply-turns
+		mem.mu.Unlock()
+	}()
 	for left > 0 {
 		c.st.mu.Lock()
 		var keys []int
@@ -720,11 +732,14 @@ func (c *Coord) deliverSourceReplies(ctx context.Context) {
 			return
 		}
 		sort.Ints(keys)
+		start := (turn + attempts) % len(keys)
+		keys = append(keys[start:], keys[:start]...)
 		for _, key := range keys {
 			if left <= 0 {
 				return
 			}
 			left-- // guard:source-reply-budget
+			attempts++
 			if !c.postSourceHead(ctx, key) {
 				failed[key] = true
 			}
@@ -996,9 +1011,12 @@ func (c *Coord) issueState(ctx context.Context, n int) string {
 	return "CLOSED"
 }
 
-// finishSource closes every open binding that is no longer admitted and has no
-// job left, deciding its one plain reply.
-func (c *Coord) finishSource(ctx context.Context, open map[int]Issue, pollOK bool) {
+// finishSource closes every open binding whose closure was confirmed (absent from
+// all: a check found the trigger deleted or the issue closed or replaced) and
+// that has no job left, or whose completion was observed, deciding its one plain
+// reply. A binding held unchecked (budget, rate pause, restart) stays in all and
+// is never finished.
+func (c *Coord) finishSource(ctx context.Context, all map[int]bool, pollOK bool) {
 	if !pollOK {
 		return
 	}
@@ -1010,7 +1028,7 @@ func (c *Coord) finishSource(ctx context.Context, open map[int]Issue, pollOK boo
 		}
 		f, completing := c.st.CompletedRuns[key]
 		done := completing && f.Phase == "observed" && c.st.Jobs[key] == nil
-		if done || (open[key].Source == nil && c.st.Jobs[key] == nil && !completing) {
+		if done || (!all[key] && c.st.Jobs[key] == nil && !completing) { // guard:source-finish-confirmed
 			keys = append(keys, key)
 		}
 	}
