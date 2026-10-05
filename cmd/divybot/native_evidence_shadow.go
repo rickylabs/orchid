@@ -331,6 +331,8 @@ type nativeEvidenceShadow struct {
 	ticks       uint64
 	version     uint64 // bumped on every recorded change; drives the private readout
 	scopes      map[string]*shadowScopeState
+	parity      map[shadowParityKey]int64 // durable outcome counts (native_evidence_shadow_parity.go)
+	paritySince time.Time
 }
 
 func newNativeEvidenceShadow(now func() time.Time) *nativeEvidenceShadow {
@@ -563,6 +565,7 @@ func (s *nativeEvidenceShadow) record(j *Job, site, today string, inputs []strin
 		scope.ledger = scope.ledger[1:]
 	}
 	scope.ledger = append(scope.ledger, c)
+	s.countParityLocked(site, scope.reducer.binding.Vendor, c) // guard:parity-counted
 	s.version++
 }
 
