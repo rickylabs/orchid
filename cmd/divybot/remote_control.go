@@ -52,8 +52,11 @@ type remoteControlRun struct {
 	IdentitySource  string            `json:"identitySource"`
 	HookConfirmed   bool              `json:"hookConfirmed"`
 	TUIProcess      *remoteTUIProcess `json:"tuiProcess"`
-	// The daemon version this run's TUI client was pinned to, and that client's directory.
-	ClientVersion string `json:"-"`
+	// The Codex resume proof verified once before the goal (private run state).
+	Resume *codexResumeProof `json:"resume,omitempty"`
+	// The daemon version this run's TUI client was pinned to (kept so reloaded
+	// state stays pinned), and that client's directory.
+	ClientVersion string `json:"clientVersion,omitempty"`
 	ClientBinary  string `json:"-"`
 	ClientDir     string `json:"-"`
 }

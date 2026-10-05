@@ -247,72 +247,191 @@ func TestRemoteControlBoundedProof(t *testing.T) {
 func nativeStatusFixture(run *remoteControlRun) string {
 	return "/status\n│ Model: " + run.Model + " (reasoning " + run.Effort + ") │\n│ Directory: " + run.Cwd + " │\n│ Thread name: " + run.Name + " │\n│ Session: " + run.NativeSessionID + " │\n› Ask Codex to do anything\n"
 }
-func TestRemoteControlNativeStatusAttachment(t *testing.T) {
-	for _, mode := range []string{"valid", "wrong-thread", "wrong-cwd", "wrong-route", "wrong-effort", "wrong-name", "duplicate", "nonempty", "wrong-occupant", "late", "absent", "preexisting"} {
-		t.Run(mode, func(t *testing.T) {
-			run := syntheticRemoteRun(t)
-			run.IdentitySource = ""
-			a := AgentInfo{Agent: "codex", Name: "fixture-agent", Cwd: run.Cwd, PaneID: "w1:p1", WorkspaceID: "w1", InteractiveReady: true, AgentStatus: "idle"}
-			initial := "› Ask Codex to do anything"
-			after := nativeStatusFixture(run)
-			switch mode {
-			case "wrong-thread":
-				after = strings.ReplaceAll(after, run.NativeSessionID, privateTestID(t))
-			case "wrong-cwd":
-				after = strings.ReplaceAll(after, run.Cwd, t.TempDir())
-			case "wrong-route":
-				after = strings.ReplaceAll(after, run.Model, "other-model")
-			case "wrong-effort":
-				after = strings.ReplaceAll(after, "reasoning low", "reasoning high")
-			case "wrong-name":
-				after = strings.ReplaceAll(after, run.Name, "other task")
-			case "duplicate":
-				after = "Session: " + run.NativeSessionID + "\n" + after
-			case "nonempty":
-				after = strings.ReplaceAll(after, "› Ask Codex to do anything", "› queued text")
-			case "absent":
-				after = initial
-			case "preexisting":
-				initial = after
+
+// traceRow is one synthetic native log row in the daemon's real shapes.
+type traceRow struct {
+	Producer string `json:"producer"`
+	Thread   string `json:"thread"`
+	Target   string `json:"target"`
+	Body     string `json:"body"`
+}
+
+func requestSpan(method, conn, client, version string) string {
+	return `app_server.request{otel.kind="server" otel.name="` + method + `" rpc.system="jsonrpc" rpc.method="` + method + `" rpc.transport="unix_socket" rpc.request_id=5 app_server.connection_id=` +
+		conn + ` app_server.api_version="v2" app_server.client_name="` + client + `" app_server.client_version="` + version + `"}:`
+}
+
+// Rows for one producer: Orchid creates the thread, a codex-tui connection
+// resumes it (spawning its session), then proceeds past the resume response.
+func createdRow(producer, thread string) traceRow {
+	return traceRow{producer, thread, "codex_core::shell_snapshot", requestSpan("thread/start", "251", codexGoalClientName, "1") + "app_server.thread_start.create_thread{}: Shell snapshot successfully created"}
+}
+func resumedRow(producer, thread, conn, version string) traceRow {
+	return traceRow{producer, thread, "codex_core::shell_snapshot", requestSpan("thread/resume", conn, "codex-tui", version) + "resume_thread_with_history:thread_spawn{}: Shell snapshot successfully created"}
+}
+func teardownRow(producer, thread, conn, version string) traceRow {
+	return traceRow{producer, thread, "codex_app_server::thread_state", requestSpan("thread/resume", conn, "codex-tui", version) + "resume_running_thread: clearing thread listener during thread-state teardown"}
+}
+func proceededRow(producer, conn string) traceRow {
+	return traceRow{producer, "", "codex_app_server::message_processor", "app-server request: thread/turns/list connection_id=ConnectionId(" + conn + ") request_id=Integer(6)"}
+}
+
+// writeTrace writes rows, in order, into a synthetic logs_2.sqlite under home.
+func writeTrace(t *testing.T, home string, rows ...traceRow) {
+	t.Helper()
+	raw, _ := json.Marshal(rows)
+	script := "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nc.execute('create table if not exists logs (id integer primary key, ts integer, ts_nanos integer, level text, target text, feedback_log_body text, thread_id text, process_uuid text)')\n" +
+		"for r in json.loads(sys.argv[2]):c.execute('insert into logs (ts,ts_nanos,level,target,feedback_log_body,thread_id,process_uuid) values (1,0,?,?,?,?,?)',('TRACE',r['target'],r['body'],r['thread'] or None,r['producer']))\nc.commit()\n"
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("python3", "-c", script, filepath.Join(home, ".codex", "logs_2.sqlite"), string(raw)).CombinedOutput(); err != nil {
+		t.Fatalf("trace fixture: %v %s", err, out)
+	}
+}
+
+// provenRun returns a run carrying a verified resume proof and its pin.
+func provenRun(t *testing.T) *remoteControlRun {
+	run := syntheticRemoteRun(t)
+	run.IdentitySource, run.HookConfirmed, run.ClientVersion = "codex-native-status", false, "9.1.0"
+	run.Resume = &codexResumeProof{Producer: strings.Repeat("ab", 32), Connection: "252"}
+	run.TUIProcess = &remoteTUIProcess{PID: 4242, Fingerprint: strings.Repeat("cd", 32)}
+	return run
+}
+
+// The resume proof is the daemon's structured native record, read once: the
+// producer that created the thread for Orchid spawned the resumed session for
+// exactly one pinned codex-tui connection, which then proceeded past a
+// successful resume. Rows are synthetic, in the daemon's real shapes.
+func TestRemoteCodexResumeIdentityFromNativeRecord(t *testing.T) {
+	const p, q = "pid:7:canonical", "pid:9:embedded"
+	run := syntheticRemoteRun(t)
+	run.ClientVersion = "9.1.0"
+	th, other := run.NativeSessionID, privateTestID(t)
+	ok := []traceRow{createdRow(p, th), teardownRow(p, th, "252", "9.1.0"), resumedRow(p, th, "252", "9.1.0"), proceededRow(p, "252")}
+	for _, tc := range []struct {
+		name string
+		rows []traceRow
+		ok   bool
+	}{
+		{"proven", ok, true},
+		{"no-resume-yet", []traceRow{createdRow(p, th)}, false},
+		{"failed-resume-no-outcome", []traceRow{createdRow(p, th), teardownRow(p, th, "252", "9.1.0"), resumedRow(p, th, "252", "9.1.0")}, false},
+		{"teardown-only", []traceRow{createdRow(p, th), teardownRow(p, th, "252", "9.1.0"), proceededRow(p, "252")}, false},
+		{"outcome-before-resume", []traceRow{createdRow(p, th), proceededRow(p, "252"), resumedRow(p, th, "252", "9.1.0")}, false},
+		{"outcome-other-connection", []traceRow{createdRow(p, th), resumedRow(p, th, "252", "9.1.0"), proceededRow(p, "253")}, false},
+		{"outcome-other-producer", []traceRow{createdRow(p, th), resumedRow(p, th, "252", "9.1.0"), proceededRow(q, "252")}, false},
+		{"foreign-producer", []traceRow{createdRow(p, th), resumedRow(q, th, "252", "9.1.0"), proceededRow(q, "252"), proceededRow(p, "252")}, false},
+		{"connection-id-reuse", append(append([]traceRow{}, ok...), resumedRow(q, th, "252", "9.1.0"), proceededRow(q, "252")), false},
+		{"two-tui-connections", append(append([]traceRow{}, ok...), resumedRow(p, th, "253", "9.1.0"), proceededRow(p, "253")), false},
+		{"second-tui-teardown-only", append(append([]traceRow{}, ok...), teardownRow(p, th, "253", "9.1.0")), false},
+		{"not-orchid-created", []traceRow{{p, th, "codex_core::shell_snapshot", requestSpan("thread/start", "251", "other-client", "1") + "app_server.thread_start.create_thread{}: Shell snapshot successfully created"}, resumedRow(p, th, "252", "9.1.0"), proceededRow(p, "252")}, false},
+		{"two-creators", append([]traceRow{createdRow(q, th)}, ok...), false},
+		{"not-the-tui", []traceRow{createdRow(p, th), {p, th, "codex_core::shell_snapshot", requestSpan("thread/resume", "252", "orchid_dispatch_goals", "9.1.0") + "resume_thread_with_history:thread_spawn{}: x"}, proceededRow(p, "252")}, false},
+		{"other-client-version", []traceRow{createdRow(p, th), resumedRow(p, th, "252", "9.2.0"), proceededRow(p, "252")}, false},
+		{"other-thread", []traceRow{createdRow(p, other), resumedRow(p, other, "252", "9.1.0"), proceededRow(p, "252")}, false},
+		{"other-target", []traceRow{createdRow(p, th), {p, th, "foreign::logger", resumedRow(p, th, "252", "9.1.0").Body}, proceededRow(p, "252")}, false},
+		{"quoted-in-message", []traceRow{createdRow(p, th), {p, th, "codex_core::shell_snapshot", "unrelated message " + resumedRow(p, th, "252", "9.1.0").Body}, proceededRow(p, "252")}, false},
+		{"no-trace", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("CODEX_HOME", "")
+			if tc.rows != nil {
+				writeTrace(t, home, tc.rows...)
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			r := *run
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 			defer cancel()
-			submissions, reads := 0, 0
-			err := establishCodexStatusIdentity(ctx, a, t.TempDir(), run, promptCalls{
-				observe: func(context.Context) (promptSnapshot, error) {
-					reads++
-					screen := initial
-					current := a
-					if submissions > 0 {
-						screen = after
-						if mode == "wrong-occupant" {
-							current.PaneID = "w2:p1"
-						}
-						if mode == "late" {
-							cancel()
-						}
-					}
-					return promptSnapshot{Agent: current, Screen: screen, Stable: true}, nil
-				},
-				submit: func(_ context.Context, text string) error {
-					if text != "/status" {
-						t.Fatal("identity proof submitted a model turn")
-					}
-					submissions++
-					return nil
-				},
-				wait: func(context.Context) bool { return reads < 4 },
-			})
-			if (err == nil) != (mode == "valid") || submissions > 1 {
-				t.Fatal("native attachment guard or single status-send failed")
+			err := Host{Name: "fixture-host", Home: home}.awaitCodexResumeIdentity(ctx, &r)
+			if (err == nil) != tc.ok {
+				t.Fatalf("resume identity verdict wrong: err=%v", err)
 			}
-			if mode == "valid" && run.IdentitySource != "codex-native-status" {
-				t.Fatal("private identity provenance absent")
+			if tc.ok && (r.Resume == nil || r.Resume.Connection != "252" || !digestPattern.MatchString(r.Resume.Producer)) {
+				t.Fatal("verified resume proof not stored in run state")
 			}
-			if mode != "valid" && run.IdentitySource != "" {
-				t.Fatal("failed status certified a private identity")
+			if !tc.ok && r.Resume != nil {
+				t.Fatal("refused resume stored a proof")
 			}
 		})
+	}
+}
+
+// The pre-goal proof requires the pinned client version: with none known, a
+// resume by any codex-tui build does not prove this launch's attachment.
+func TestRemoteCodexResumeIdentityUnpinnedRefuses(t *testing.T) {
+	run := syntheticRemoteRun(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
+	writeTrace(t, home, createdRow("pid:7:canonical", run.NativeSessionID), resumedRow("pid:7:canonical", run.NativeSessionID, "252", "9.1.0"), proceededRow("pid:7:canonical", "252"))
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := (Host{Name: "fixture-host", Home: home}).awaitCodexResumeIdentity(ctx, run); err == nil || run.Resume != nil {
+		t.Fatal("unpinned client proved the attachment")
+	}
+}
+
+// B2: the pin and proof survive the private run-state round trip, and a run
+// without either never certifies attachment or delivery.
+func TestRemoteCodexProofPersistsWithPin(t *testing.T) {
+	run := provenRun(t)
+	raw, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back remoteControlRun
+	if json.Unmarshal(raw, &back) != nil || back.ClientVersion != "9.1.0" || back.Resume == nil || *back.Resume != *run.Resume || !codexResumeProven(&back) {
+		t.Fatal("reloaded run lost its pin or resume proof")
+	}
+	unpinned, unproven := back, back
+	unpinned.ClientVersion = ""
+	unproven.Resume = nil
+	for name, r := range map[string]*remoteControlRun{"unpinned": &unpinned, "unproven": &unproven} {
+		if codexResumeProven(r) {
+			t.Fatalf("%s run certified", name)
+		}
+		agent := promptFixture().Agent
+		agent.Cwd = r.Cwd
+		err := verifyCodexAttachment(context.Background(), agent.Name, r, &dispatchLocation{PaneID: agent.PaneID, WorkspaceID: agent.WorkspaceID}, func() (AgentInfo, error) { return agent, nil })
+		if err == nil {
+			t.Fatalf("%s run supervised as attached", name)
+		}
+	}
+}
+
+// B3: supervision never re-reads the native log; Codex prunes per-thread rows.
+// A proven run stays supervised with the log entirely gone.
+func TestRemoteCodexSupervisionSurvivesLogPruning(t *testing.T) {
+	run := provenRun(t)
+	t.Setenv("CODEX_HOME", t.TempDir()) // no logs database at all
+	agent := promptFixture().Agent
+	agent.Cwd = run.Cwd
+	reads := 0
+	err := verifyCodexAttachment(context.Background(), agent.Name, run, &dispatchLocation{PaneID: agent.PaneID, WorkspaceID: agent.WorkspaceID}, func() (AgentInfo, error) {
+		reads++
+		return agent, nil
+	})
+	if err != nil || reads != 2 {
+		t.Fatalf("supervision depended on the pruned log: err=%v reads=%d", err, reads)
+	}
+	src := productionSources(t)["remote_control_identity.go"]
+	body := src[strings.Index(src, "func verifyCodexAttachment("):]
+	body = body[:strings.Index(body, "\n}\n")]
+	if strings.Contains(body, "codexResumeRecord") || strings.Contains(body, "runRemote") {
+		t.Fatal("continuous supervision re-reads the native log")
+	}
+}
+
+// The pre-goal Codex identity no longer types into the agent or reads a screen.
+func TestRemoteCodexIdentityHasNoScreenPath(t *testing.T) {
+	src := productionSources(t)["remote_control_identity.go"]
+	for _, banned := range []string{`"/status"`, "promptSnapshot(", "agent\", \"prompt", "nativeCodexStatusMatches", "establishCodexStatusIdentity", "nativeCodexFooterIdentity", "verifyCodexFooterAttachment", "codexResumeConnections"} {
+		if strings.Contains(src, banned) {
+			t.Fatalf("screen-based identity path present: %s", banned)
+		}
+	}
+	if !strings.Contains(src, "h.awaitCodexResumeIdentity(ctx, run) // guard:codex-resume-identity") {
+		t.Fatal("pre-goal identity does not use the daemon trace")
 	}
 }
 

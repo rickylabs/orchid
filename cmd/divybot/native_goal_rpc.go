@@ -339,7 +339,7 @@ func (p *goalRPC) set(params map[string]any, intent goalIntent, status string) (
 	return nil, goalError("goal-notification-limit")
 }
 func (p *goalRPC) initialize() error {
-	raw, e := p.request("initialize", map[string]any{"clientInfo": map[string]string{"name": "orchid_dispatch_goals", "version": "1"}, "capabilities": map[string]bool{"experimentalApi": true}})
+	raw, e := p.request("initialize", map[string]any{"clientInfo": map[string]string{"name": codexGoalClientName, "version": "1"}, "capabilities": map[string]bool{"experimentalApi": true}})
 	if e != nil {
 		return e
 	}
@@ -376,3 +376,6 @@ func goalMethodAllowed(method string, serial int) bool {
 	}
 	return false
 }
+
+// codexGoalClientName is the clientInfo name Orchid uses on the canonical daemon.
+const codexGoalClientName = "orchid_dispatch_goals"
