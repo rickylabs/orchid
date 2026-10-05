@@ -18,11 +18,11 @@ against quota, and fix the failure classes below before they cascade.
 ## Mental model — how divybot thinks
 
 divybot runs one loop on `poll_interval` (default 30s). Each tick: feed (mirror
-bot-assigned upstream issues into the inbox) → sweep-merge green bot PRs →
-poll issues → teardown jobs whose issue closed → fleet-status every host →
-respawn vanished agents → admit new work in priority order against per-account
-governor budget. Internalize these invariants — they explain almost every
-behaviour you'll see:
+bot-assigned upstream issues of `mirror_assignments` targets into the inbox) →
+sweep-merge green bot PRs → poll issues → teardown jobs whose issue closed →
+fleet-status every host → respawn vanished agents → admit new work in priority
+order against per-account governor budget. Internalize these invariants — they
+explain almost every behaviour you'll see:
 
 - **One issue = one worker.** divybot does NOT auto-fan-out. To get N parallel
   workers on a big effort, file N issues (one per subsystem/slice). A single fat
@@ -138,6 +138,11 @@ All live in the config `targets[]`, restart to apply:
 - `automerge: true` — let divybot merge green bot PRs (only where it has rights and
   unreviewed bot merges are acceptable).
 - `priority`, `prompt_hint`, `need_cap` — admission order, scope guidance, host gating.
+- `mirror_assignments: true` — feed this target from assignments: every open issue
+  in its repo assigned to `bot_login` is mirrored into a labelled inbox issue, which
+  then launches a worker. Default `false`, so assigning an issue launches nothing.
+  Leave it off when `bot_login` is a person's own account, or every self-assignment
+  becomes a launch.
 
 ## Add / remove a host
 

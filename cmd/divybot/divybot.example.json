@@ -50,11 +50,11 @@
   ],
 
   "targets": [
-    { "label": "deno", "repo": "denoland/deno", "agent": "claude", "need_cap": "build-deno" },
-    { "label": "dactyl", "repo": "denoland/dactyl", "agent": "claude" },
-    { "label": "fastwebsockets", "repo": "denoland/fastwebsockets", "agent": "claude" },
-    { "label": "clawpatrol", "repo": "denoland/clawpatrol", "agent": "claude" },
-    { "label": "v8x", "repo": "littledivy/v8x", "agents": ["claude", "codex"], "automerge": true }
+    { "label": "deno", "repo": "denoland/deno", "agent": "claude", "need_cap": "build-deno", "mirror_assignments": true },
+    { "label": "dactyl", "repo": "denoland/dactyl", "agent": "claude", "mirror_assignments": true },
+    { "label": "fastwebsockets", "repo": "denoland/fastwebsockets", "agent": "claude", "mirror_assignments": true },
+    { "label": "clawpatrol", "repo": "denoland/clawpatrol", "agent": "claude", "mirror_assignments": true },
+    { "label": "v8x", "repo": "littledivy/v8x", "agents": ["claude", "codex"], "automerge": true, "mirror_assignments": true }
   ],
 
   "governor": {

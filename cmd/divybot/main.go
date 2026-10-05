@@ -150,6 +150,11 @@ type Target struct {
 	// live jobs keep running + being supervised, and the issues are still polled
 	// so they aren't torn down. Use to halt a target without losing in-flight work.
 	Disabled bool `json:"disabled"`
+	// MirrorAssignments opts this target into the assignment feeder: issues in
+	// Repo assigned to bot_login are mirrored into a labelled inbox issue, which
+	// then launches. Off by default, because bot_login may be the owner's own
+	// account, and assigning yourself an issue must not launch an agent.
+	MirrorAssignments bool `json:"mirror_assignments"`
 }
 
 // Gov holds the quota-pacing knobs (the governor — paces against the Max
@@ -1489,16 +1494,16 @@ func inboxMirrored(ctx context.Context, inbox string) (map[string]bool, error) {
 	return have, nil
 }
 
-// assignmentTick scans every target repo for issues assigned to the bot
-// and opens a matching inbox issue (labeled with the target's label) so
-// the swarm picks them up on the same cycle. This is the feeder that
-// turns "assign an upstream issue to @divybot" into work; without it the
-// inbox only fills by hand. Dedupe is against the existing inbox titles
+// assignmentTick scans every target repo that sets mirror_assignments for
+// issues assigned to the bot and opens a matching inbox issue (labeled with
+// the target's label) so the swarm picks them up on the same cycle. This is
+// the feeder that turns "assign an upstream issue to @divybot" into work;
+// without it the inbox only fills by hand. Dedupe is against the existing inbox titles
 // (inboxMirrored) — if listing those fails we abort the tick rather than
 // risk a duplicate storm.
 func (c *Coord) assignmentTick(ctx context.Context) {
 	bot := c.cfg.BotLogin
-	if bot == "" {
+	if bot == "" || !c.cfg.mirrorsAssignments() {
 		return
 	}
 	have, err := inboxMirrored(ctx, c.cfg.Inbox)
@@ -1507,7 +1512,7 @@ func (c *Coord) assignmentTick(ctx context.Context) {
 		return
 	}
 	for _, t := range c.cfg.Targets {
-		if t.Repo == "" || t.Repo == c.cfg.Inbox || t.Label == "" {
+		if !t.MirrorAssignments || t.Repo == "" || t.Repo == c.cfg.Inbox || t.Label == "" {
 			continue
 		}
 		issues, err := searchAssignments(ctx, t.Repo, bot)
@@ -1536,6 +1541,16 @@ func (c *Coord) assignmentTick(ctx context.Context) {
 				ref, bot, strings.TrimSpace(out))
 		}
 	}
+}
+
+// mirrorsAssignments reports whether any target opted into the feeder.
+func (c *Config) mirrorsAssignments() bool {
+	for _, t := range c.Targets {
+		if t.MirrorAssignments {
+			return true
+		}
+	}
+	return false
 }
 
 type PRView struct {
