@@ -777,6 +777,55 @@ type snapshotEntry struct {
 	AgeSeconds int64  `json:"ageSeconds"`
 }
 
+var actionDispatchPattern = regexp.MustCompile(`^assignment_[a-f0-9]{64}$`)
+
+// snapshotProgressValid is the operator snapshot's strict check of a progress
+// record: a producer instance, its identity fields and, when decided, a
+// complete frozen decision for this very attempt. It only shapes the operator
+// readout; recovery and admission never use it.
+func snapshotProgressValid(p attemptProgress) bool {
+	if !instancePattern.MatchString(p.Instance) || !actionDispatchPattern.MatchString(p.ActionDispatchID) || p.Issue.Number < 1 ||
+		!repositoryName.MatchString(p.Issue.Repo) {
+		return false
+	}
+	if _, err := time.Parse("2006-01-02T15:04:05.000Z", p.StartedAt); err != nil {
+		return false
+	}
+	if p.Decision == nil {
+		return true
+	}
+	var o launchOutcome
+	if decodeNativeJSON([]byte(p.Decision.Bytes), &o) != nil || o.AttemptID != p.AttemptID || o.ObservedAt != p.Decision.ObservedAt || o.ReasonCode == "" { // guard:snapshot-decision-complete
+		return false
+	}
+	switch o.Outcome {
+	case "started", "failed", "unconfirmed":
+	default:
+		return false
+	}
+	_, err := time.Parse("2006-01-02T15:04:05.000Z", o.ObservedAt)
+	return err == nil
+}
+
+// snapshotDispatch strictly reads one reservation's dispatch record: no
+// duplicate keys, the reservation's own run identity, a valid issue and a known
+// state, before its state is trusted.
+func snapshotDispatch(root, key string) (dispatchBinding, bool) {
+	var d dispatchBinding
+	raw, err := os.ReadFile(filepath.Join(root, key, "record", "dispatch.json"))
+	if err != nil || len(raw) > 64*1024 || decodeNativeJSON(raw, &d) != nil { // guard:snapshot-dispatch-strict
+		return d, false
+	}
+	if d.SchemaVersion != 1 || d.RunID != "orchid-"+key || !repositoryName.MatchString(d.Issue.Repo) || d.Issue.Number < 1 { // guard:snapshot-dispatch-identity
+		return d, false
+	}
+	switch d.State {
+	case "reserved", "launching", "dispatched", "uncertain":
+		return d, true
+	}
+	return d, false
+}
+
 // readLaunchSnapshot is a read-only snapshot, not a lock: a zero cannot stop the
 // next launch. A stale or stopping producer is unknown, never zero.
 func readLaunchSnapshot(root string, now time.Time) launchSnapshot {
@@ -789,43 +838,53 @@ func readLaunchSnapshot(root string, now time.Time) launchSnapshot {
 			s.Producer = "live"
 		}
 	}
+	// One traversal that keeps read errors: an unreadable store or reservation
+	// is unknown evidence, never an empty one.
+	entries, err := os.ReadDir(root)
+	if err != nil { // guard:snapshot-traversal
+		s.Invalid++
+	}
 	tracked := map[string]bool{}
-	paths, _ := filepath.Glob(filepath.Join(root, "attempt-*.json"))
-	for _, path := range paths {
-		p, ok := readAttemptProgress(path)
-		if !ok {
-			s.Invalid++ // guard:snapshot-invalid-attempt
-			continue
-		}
-		tracked[p.ActionDispatchID] = true
+	var reservations []string
+	for _, e := range entries {
+		name := e.Name()
 		switch {
-		case p.Decision != nil:
-			s.Backlog++
-		case live && p.Instance == hb.Instance:
-			age := int64(0)
-			if at, err := time.Parse("2006-01-02T15:04:05.000Z", p.StartedAt); err == nil {
-				age = int64(now.Sub(at) / time.Second)
+		case strings.HasPrefix(name, "attempt-") && strings.HasSuffix(name, ".json"):
+			p, ok := readAttemptProgress(filepath.Join(root, name))
+			if !ok || !snapshotProgressValid(p) { // guard:snapshot-invalid-attempt
+				s.Invalid++
+				continue
 			}
-			s.InFlight = append(s.InFlight, snapshotEntry{Issue: p.Issue.Number, Stage: p.Stage, AgeSeconds: age})
-		default:
-			s.Unresolved++
+			tracked[p.ActionDispatchID] = true
+			switch {
+			case p.Decision != nil:
+				s.Backlog++
+			case live && p.Instance == hb.Instance:
+				age := int64(0)
+				if at, err := time.Parse("2006-01-02T15:04:05.000Z", p.StartedAt); err == nil {
+					age = int64(now.Sub(at) / time.Second)
+				}
+				s.InFlight = append(s.InFlight, snapshotEntry{Issue: p.Issue.Number, Stage: p.Stage, AgeSeconds: age})
+			default:
+				s.Unresolved++
+			}
+		case digestPattern.MatchString(name):
+			reservations = append(reservations, name)
+		case e.IsDir():
+			// Not a reservation name: it must not hold a reservation record.
+			if _, err := os.Lstat(filepath.Join(root, name, "record")); !errors.Is(err, fs.ErrNotExist) { // guard:snapshot-foreign-record
+				s.Invalid++
+			}
 		}
 	}
 	// Reserved/launching receipts without a progress record are untracked attempts.
-	dirs, _ := filepath.Glob(filepath.Join(root, "*", "record", "dispatch.json"))
-	for _, path := range dirs {
-		raw, err := os.ReadFile(path)
-		var d dispatchBinding
-		if err != nil || json.Unmarshal(raw, &d) != nil {
-			s.Invalid++ // guard:snapshot-invalid-dispatch
+	for _, key := range reservations {
+		d, ok := snapshotDispatch(root, key)
+		if !ok { // guard:snapshot-invalid-dispatch
+			s.Invalid++
 			continue
 		}
-		switch d.State {
-		case "reserved", "launching":
-		case "dispatched", "uncertain":
-			continue
-		default:
-			s.Invalid++
+		if d.State != "reserved" && d.State != "launching" {
 			continue
 		}
 		if !tracked[actionOpaque("assignment", d.RunID)] {

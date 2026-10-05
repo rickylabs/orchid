@@ -364,10 +364,12 @@ func TestLaunchSnapshot(t *testing.T) {
 		Issue: dispatchIssue{Repo: "fixture/inbox", Number: 594}, Stage: "registration", Instance: liveInstance, StartedAt: stamp(now.Add(-90 * time.Second))}
 	writeProgress(t, root, live)
 	dead := live
-	dead.AttemptID, dead.Instance = attemptIDFor(strings.Repeat("7", 64)), "instance-dead"
+	dead.AttemptID, dead.Instance = attemptIDFor(strings.Repeat("7", 64)), "fedcba9876543210fedcba9876543210"
 	writeProgress(t, root, dead)
 	backlog := live
-	backlog.AttemptID, backlog.Decision = attemptIDFor(strings.Repeat("8", 64)), &attemptDecision{Bytes: "{}", ObservedAt: stamp(now)}
+	backlog.AttemptID = attemptIDFor(strings.Repeat("8", 64))
+	decided, _ := json.Marshal(decideOutcome(backlog, errMatrix, stamp(now)))
+	backlog.Decision = &attemptDecision{Bytes: string(decided), ObservedAt: stamp(now)}
 	writeProgress(t, root, backlog)
 	r := registrationReceipt(t, "codex", Overrides{}) // an untracked reserved dispatch, in its own root
 	untrackedRoot := filepath.Dir(filepath.Dir(filepath.Dir(r.file)))
@@ -750,37 +752,106 @@ func TestSnapshotInvalidEvidenceIsUnknown(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name  string
-		setup func(root string)
+		setup func(t *testing.T, root string)
 		exit  int
 	}{
-		{"clean-live", func(root string) { beat(root, liveInstance) }, 0},
-		{"truncated-attempt", func(root string) {
+		{"clean-live", func(t *testing.T, root string) { beat(root, liveInstance) }, 0},
+		{"truncated-attempt", func(t *testing.T, root string) {
 			beat(root, liveInstance)
 			_ = os.WriteFile(attemptFile(root, "attempt", attemptIDFor(strings.Repeat("7", 64))), []byte(`{"schemaVersion":1,"attem`), 0600)
 		}, 2},
-		{"truncated-dispatch", func(root string) {
+		{"truncated-dispatch", func(t *testing.T, root string) {
 			beat(root, liveInstance)
 			_ = os.MkdirAll(filepath.Join(root, "x", "record"), 0700)
 			_ = os.WriteFile(filepath.Join(root, "x", "record", "dispatch.json"), []byte(`{"state":"reser`), 0600)
 		}, 2},
-		{"unknown-dispatch-state", func(root string) {
+		{"unknown-dispatch-state", func(t *testing.T, root string) {
 			beat(root, liveInstance)
 			_ = os.MkdirAll(filepath.Join(root, "x", "record"), 0700)
 			_ = os.WriteFile(filepath.Join(root, "x", "record", "dispatch.json"), []byte(`{"state":"other"}`), 0600)
 		}, 2},
-		{"empty-instance", func(root string) { beat(root, "") }, 2},
-		{"valid-dead-instance-record", func(root string) {
+		{"empty-instance", func(t *testing.T, root string) { beat(root, "") }, 2},
+		{"valid-dead-instance-record", func(t *testing.T, root string) {
 			beat(root, liveInstance)
-			p := attemptProgress{SchemaVersion: 1, AttemptID: attemptIDFor(strings.Repeat("8", 64)), Stage: "registration", Instance: "fedcba9876543210fedcba9876543210", StartedAt: stamp(time.Now())}
+			writeProgress(t, root, completeProgress("fedcba9876543210fedcba9876543210", nil))
+		}, 0},
+		{"empty-attempt-instance", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			writeProgress(t, root, completeProgress("", nil))
+		}, 2},
+		{"invalid-attempt-instance", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			writeProgress(t, root, completeProgress("instance-x", nil))
+		}, 2},
+		{"empty-decision", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			writeProgress(t, root, completeProgress("fedcba9876543210fedcba9876543210", &attemptDecision{}))
+		}, 2},
+		{"decision-for-another-attempt", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			other := completeProgress("fedcba9876543210fedcba9876543210", nil)
+			other.AttemptID = attemptIDFor(strings.Repeat("9", 64))
+			body, _ := json.Marshal(decideOutcome(other, errMatrix, stamp(fixedNow())))
+			writeProgress(t, root, completeProgress("fedcba9876543210fedcba9876543210", &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}))
+		}, 2},
+		{"complete-decision-backlog", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			p := completeProgress("fedcba9876543210fedcba9876543210", nil)
+			body, _ := json.Marshal(decideOutcome(p, errMatrix, stamp(fixedNow())))
+			p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
 			writeProgress(t, root, p)
 		}, 0},
+		{"unreadable-record-directory", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			key := strings.Repeat("c", 64)
+			writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"reserved"}`)
+			rec := filepath.Join(root, key, "record")
+			_ = os.Chmod(rec, 0)
+			t.Cleanup(func() { _ = os.Chmod(rec, 0700) })
+		}, 2},
+		{"duplicate-dispatch-state", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			key := strings.Repeat("c", 64)
+			writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"reserved","state":"dispatched"}`)
+		}, 2},
+		{"unlistable-store", func(t *testing.T, root string) {
+			beat(root, liveInstance) // the heartbeat stays readable by name; listing fails
+			_ = os.Chmod(root, 0300)
+			t.Cleanup(func() { _ = os.Chmod(root, 0700) })
+		}, 2},
+		{"dispatch-without-schema", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			key := strings.Repeat("c", 64)
+			writeDispatchFixture(t, root, key, `{"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"dispatched"}`)
+		}, 2},
+		{"incomplete-dispatched-record", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			writeDispatchFixture(t, root, strings.Repeat("c", 64), `{"state":"dispatched"}`)
+		}, 2},
+		{"dispatch-for-another-reservation", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			writeDispatchFixture(t, root, strings.Repeat("c", 64), `{"schemaVersion":1,"runId":"orchid-`+strings.Repeat("e", 64)+`","issue":{"repo":"fixture/inbox","number":7},"state":"dispatched"}`)
+		}, 2},
+		{"complete-dispatched-record", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			key := strings.Repeat("c", 64)
+			writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"dispatched"}`)
+		}, 0},
+		{"complete-reserved-untracked", func(t *testing.T, root string) {
+			beat(root, liveInstance)
+			key := strings.Repeat("c", 64)
+			writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"reserved"}`)
+		}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := privateTestRoot(t)
-			tc.setup(root)
+			tc.setup(t, root)
 			s := readLaunchSnapshot(root, time.Now())
 			if got := snapshotExit(s); got != tc.exit {
 				t.Fatalf("exit %d, want %d: %+v", got, tc.exit, s)
+			}
+			if tc.exit != 2 && s.Invalid != 0 {
+				t.Fatalf("complete evidence counted invalid: %+v", s)
 			}
 			if tc.name == "valid-dead-instance-record" && (s.Unresolved != 1 || s.Invalid != 0) {
 				t.Fatalf("a valid dead-instance record was miscounted: %+v", s)
@@ -875,5 +946,21 @@ func TestGoalCommitFactIsNativeOnly(t *testing.T) {
 		recordGoalCommit(attempt, remoteCodex) // guard:fact-goal-committed`)
 	if i < 0 || strings.Count(src, "recordGoalCommit(") != 2 {
 		t.Fatal("spawn does not record the goal commit right after a non-refused confirmation")
+	}
+}
+
+// completeProgress is a fully identified progress record for snapshot controls.
+func completeProgress(instance string, decision *attemptDecision) attemptProgress {
+	key := strings.Repeat("8", 64)
+	return attemptProgress{SchemaVersion: 1, AttemptID: attemptIDFor(key), ActionDispatchID: actionOpaque("assignment", "orchid-"+key),
+		DispatchID: "assignment_" + strings.Repeat("e", 64), Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Stage: "registration",
+		Instance: instance, StartedAt: stamp(time.Now()), Decision: decision}
+}
+
+func writeDispatchFixture(t *testing.T, root, key, body string) {
+	t.Helper()
+	dir := filepath.Join(root, key, "record")
+	if os.MkdirAll(dir, 0700) != nil || os.WriteFile(filepath.Join(dir, "dispatch.json"), []byte(body), 0600) != nil {
+		t.Fatal("dispatch fixture")
 	}
 }
