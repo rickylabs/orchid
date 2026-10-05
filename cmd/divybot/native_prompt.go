@@ -243,6 +243,11 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 		if h.Acceptance == nil {
 			return errPromptUnconfirmed
 		}
+		// The attached TUI is proven natively once before delivery; the native
+		// acceptance then binds the goal to exactly this thread.
+		if n, err := h.codexResumeConnections(ctx, h.RemoteRun); err != nil || n != 1 { // guard:delivery-resume-trace
+			return errPromptUnconfirmed
+		}
 		native = func(ctx context.Context, sent string, submit func(context.Context) error) error {
 			return h.acceptCodexPrompt(ctx, h.Acceptance, sent, submit)
 		}
@@ -252,7 +257,7 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 		noConsent: h.CanonicalCodex,
 		observe: func(ctx context.Context) (promptSnapshot, error) {
 			s, err := h.promptSnapshot(ctx, target)
-			if h.RemoteRun != nil && (nativeCodexFooterIdentity(s.Screen) != h.RemoteRun.NativeSessionID || ctx.Err() != nil) {
+			if h.RemoteRun != nil && ctx.Err() != nil {
 				return promptSnapshot{}, errPromptUnconfirmed
 			}
 			return s, err

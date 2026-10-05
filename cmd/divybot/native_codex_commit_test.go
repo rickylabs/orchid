@@ -144,10 +144,10 @@ func jsonNumber(n int) string {
 	return string(b)
 }
 
-// R10: the production branch transports the nonce-wrapped staged pointer
-// through injectGoal; the digest is of that exact argument.
-func TestAcceptanceStagedPointerThroughInjectGoal(t *testing.T) {
-	h := newAccHarness(t)
+// stageHerdrPromptHost installs a fake Herdr for injectGoal on h's host and
+// returns its state dir; a submitted prompt lands in <state>/prompt.
+func stageHerdrPromptHost(t *testing.T, h *accHarness) string {
+	t.Helper()
 	state := t.TempDir()
 	h.f.sentFile = filepath.Join(state, "prompt")
 	bin := filepath.Join(h.f.home, ".local", "bin")
@@ -175,6 +175,30 @@ else: print(json.dumps({'result':{}}))
 	}
 	t.Setenv("ACC_HERDR", state)
 	h.host.Acceptance = h.acc
+	return state
+}
+
+// The delivery path proves the attached TUI natively before typing anything:
+// an ambiguous daemon trace (two codex-tui resumes) delivers nothing.
+func TestAcceptanceRefusesAmbiguousResumeTrace(t *testing.T) {
+	h := newAccHarness(t)
+	state := stageHerdrPromptHost(t, h)
+	writeResumeTrace(t, h.f.home, h.acc.run.NativeSessionID, "9.1.0", "253")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := h.host.injectGoal(ctx, "w1:p1", runPointer, true); err == nil {
+		t.Fatal("goal delivered with an ambiguous attachment")
+	}
+	if _, err := os.Stat(filepath.Join(state, "prompt")); err == nil {
+		t.Fatal("goal typed into an unproven attachment")
+	}
+}
+
+// R10: the production branch transports the nonce-wrapped staged pointer
+// through injectGoal; the digest is of that exact argument.
+func TestAcceptanceStagedPointerThroughInjectGoal(t *testing.T) {
+	h := newAccHarness(t)
+	state := stageHerdrPromptHost(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	if err := h.host.injectGoal(ctx, "w1:p1", runPointer, true); err != nil {
@@ -400,6 +424,7 @@ func newConsumerFixture(t *testing.T, marker, prompt bool) *consumerFixture {
 	host := c.hosts[j.Host]
 	host.Home = t.TempDir()
 	c.hosts[j.Host] = host
+	writeResumeTrace(t, host.Home, run.NativeSessionID, "9.1.0", "252") // the attached TUI's native resume
 	c.cfg.Hosts = []Host{host}
 	state := t.TempDir()
 	bin := filepath.Join(host.Home, ".local", "bin")

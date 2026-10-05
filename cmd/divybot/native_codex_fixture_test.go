@@ -276,6 +276,7 @@ func newAccHarness(t *testing.T) *accHarness {
 	}
 	h := &accHarness{t: t, f: f, dir: dir}
 	h.host = Host{Home: f.home, Name: "fixture-host", CanonicalCodex: true, RemoteRun: run}
+	writeResumeTrace(t, f.home, run.NativeSessionID, "9.1.0", "252") // the attached TUI's native resume
 	h.acc = &codexAcceptance{root: root, key: key, run: run, pane: "w1:p1", ws: "w1", host: "fixture-host",
 		deadline: time.Now().Add(20 * time.Second), every: 5 * time.Millisecond,
 		binding: func(ctx context.Context) error {

@@ -247,72 +247,109 @@ func TestRemoteControlBoundedProof(t *testing.T) {
 func nativeStatusFixture(run *remoteControlRun) string {
 	return "/status\n│ Model: " + run.Model + " (reasoning " + run.Effort + ") │\n│ Directory: " + run.Cwd + " │\n│ Thread name: " + run.Name + " │\n│ Session: " + run.NativeSessionID + " │\n› Ask Codex to do anything\n"
 }
-func TestRemoteControlNativeStatusAttachment(t *testing.T) {
-	for _, mode := range []string{"valid", "wrong-thread", "wrong-cwd", "wrong-route", "wrong-effort", "wrong-name", "duplicate", "nonempty", "wrong-occupant", "late", "absent", "preexisting"} {
-		t.Run(mode, func(t *testing.T) {
-			run := syntheticRemoteRun(t)
-			run.IdentitySource = ""
-			a := AgentInfo{Agent: "codex", Name: "fixture-agent", Cwd: run.Cwd, PaneID: "w1:p1", WorkspaceID: "w1", InteractiveReady: true, AgentStatus: "idle"}
-			initial := "› Ask Codex to do anything"
-			after := nativeStatusFixture(run)
-			switch mode {
-			case "wrong-thread":
-				after = strings.ReplaceAll(after, run.NativeSessionID, privateTestID(t))
-			case "wrong-cwd":
-				after = strings.ReplaceAll(after, run.Cwd, t.TempDir())
-			case "wrong-route":
-				after = strings.ReplaceAll(after, run.Model, "other-model")
-			case "wrong-effort":
-				after = strings.ReplaceAll(after, "reasoning low", "reasoning high")
-			case "wrong-name":
-				after = strings.ReplaceAll(after, run.Name, "other task")
-			case "duplicate":
-				after = "Session: " + run.NativeSessionID + "\n" + after
-			case "nonempty":
-				after = strings.ReplaceAll(after, "› Ask Codex to do anything", "› queued text")
-			case "absent":
-				after = initial
-			case "preexisting":
-				initial = after
+
+// writeResumeTrace writes a synthetic canonical-daemon trace with one codex-tui
+// thread/resume per connection on thread, in the daemon's real span shape.
+func writeResumeTrace(t *testing.T, home, thread, version string, connections ...string) {
+	t.Helper()
+	type row struct {
+		Thread string `json:"thread"`
+		Body   string `json:"body"`
+	}
+	rows := []row{}
+	for _, conn := range connections {
+		rows = append(rows, row{thread, `app_server.request{otel.kind="server" otel.name="thread/resume" rpc.system="jsonrpc" rpc.method="thread/resume" rpc.transport="unix_socket" rpc.request_id=5 app_server.connection_id=` +
+			conn + ` app_server.api_version="v2" app_server.client_name="codex-tui" app_server.client_version="` + version + `"}:resume_running_thread: clearing thread listener`})
+	}
+	raw, _ := json.Marshal(rows)
+	script := "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nc.execute('create table if not exists logs (id integer primary key, ts integer, thread_id text, feedback_log_body text)')\n" +
+		"for r in json.loads(sys.argv[2]):c.execute('insert into logs (ts,thread_id,feedback_log_body) values (1,?,?)',(r['thread'],r['body']))\nc.commit()\n"
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("python3", "-c", script, filepath.Join(home, ".codex", "logs_2.sqlite"), string(raw)).CombinedOutput(); err != nil {
+		t.Fatalf("trace fixture: %v %s", err, out)
+	}
+}
+
+// The daemon's own trace proves attachment: exactly one codex-tui connection at
+// the pinned version ran thread/resume on the prepared thread. Synthetic rows use
+// the daemon's real span shape; nothing reads a screen or types into the agent.
+func TestRemoteCodexResumeIdentityFromDaemonTrace(t *testing.T) {
+	span := func(conn, client, version string) string {
+		return `app_server.request{otel.kind="server" otel.name="thread/resume" rpc.system="jsonrpc" rpc.method="thread/resume" rpc.transport="unix_socket" rpc.request_id=5 app_server.connection_id=` +
+			conn + ` app_server.api_version="v2" app_server.client_name="` + client + `" app_server.client_version="` + version + `"}:resume_running_thread: clearing thread listener`
+	}
+	run := syntheticRemoteRun(t)
+	run.ClientVersion = "9.1.0"
+	other := privateTestID(t)
+	type row struct {
+		Thread string `json:"thread"`
+		Body   string `json:"body"`
+	}
+	for _, tc := range []struct {
+		name string
+		rows []row
+		db   bool
+		ok   bool
+	}{
+		{"exactly-one-tui-resume", []row{{run.NativeSessionID, span("252", "codex-tui", "9.1.0")}, {run.NativeSessionID, span("252", "codex-tui", "9.1.0")}}, true, true},
+		{"no-resume-yet", []row{{run.NativeSessionID, "thread/start by orchid"}}, true, false},
+		{"two-tui-connections", []row{{run.NativeSessionID, span("252", "codex-tui", "9.1.0")}, {run.NativeSessionID, span("253", "codex-tui", "9.1.0")}}, true, false},
+		{"not-the-tui", []row{{run.NativeSessionID, span("251", "orchid_dispatch_goals", "9.1.0")}}, true, false},
+		{"other-client-version", []row{{run.NativeSessionID, span("252", "codex-tui", "9.2.0")}}, true, false},
+		{"other-thread", []row{{other, span("252", "codex-tui", "9.1.0")}}, true, false},
+		{"no-trace", nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("CODEX_HOME", "")
+			if tc.db {
+				rows, _ := json.Marshal(tc.rows)
+				script := "import json,sqlite3,sys\nc=sqlite3.connect(sys.argv[1])\nc.execute('create table logs (id integer primary key, ts integer, thread_id text, feedback_log_body text)')\n" +
+					"for r in json.loads(sys.argv[2]):c.execute('insert into logs (ts,thread_id,feedback_log_body) values (1,?,?)',(r['thread'],r['body']))\nc.commit()\n"
+				if err := os.MkdirAll(filepath.Join(home, ".codex"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if out, err := exec.Command("python3", "-c", script, filepath.Join(home, ".codex", "logs_2.sqlite"), string(rows)).CombinedOutput(); err != nil {
+					t.Fatalf("trace fixture: %v %s", err, out)
+				}
 			}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 			defer cancel()
-			submissions, reads := 0, 0
-			err := establishCodexStatusIdentity(ctx, a, t.TempDir(), run, promptCalls{
-				observe: func(context.Context) (promptSnapshot, error) {
-					reads++
-					screen := initial
-					current := a
-					if submissions > 0 {
-						screen = after
-						if mode == "wrong-occupant" {
-							current.PaneID = "w2:p1"
-						}
-						if mode == "late" {
-							cancel()
-						}
-					}
-					return promptSnapshot{Agent: current, Screen: screen, Stable: true}, nil
-				},
-				submit: func(_ context.Context, text string) error {
-					if text != "/status" {
-						t.Fatal("identity proof submitted a model turn")
-					}
-					submissions++
-					return nil
-				},
-				wait: func(context.Context) bool { return reads < 4 },
-			})
-			if (err == nil) != (mode == "valid") || submissions > 1 {
-				t.Fatal("native attachment guard or single status-send failed")
-			}
-			if mode == "valid" && run.IdentitySource != "codex-native-status" {
-				t.Fatal("private identity provenance absent")
-			}
-			if mode != "valid" && run.IdentitySource != "" {
-				t.Fatal("failed status certified a private identity")
+			err := Host{Name: "fixture-host", Home: home}.awaitCodexResumeIdentity(ctx, run)
+			if (err == nil) != tc.ok {
+				t.Fatalf("resume identity verdict wrong: err=%v", err)
 			}
 		})
+	}
+}
+
+// The pre-goal proof requires the pinned client version: with none known, a
+// resume by any codex-tui build does not prove this launch's attachment.
+func TestRemoteCodexResumeIdentityUnpinnedRefuses(t *testing.T) {
+	run := syntheticRemoteRun(t)
+	run.ClientVersion = ""
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
+	writeResumeTrace(t, home, run.NativeSessionID, "9.1.0", "252")
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := (Host{Name: "fixture-host", Home: home}).awaitCodexResumeIdentity(ctx, run); err == nil {
+		t.Fatal("unpinned client proved the attachment")
+	}
+}
+
+// The pre-goal Codex identity no longer types into the agent or reads a screen.
+func TestRemoteCodexIdentityHasNoScreenPath(t *testing.T) {
+	src := productionSources(t)["remote_control_identity.go"]
+	for _, banned := range []string{`"/status"`, "promptSnapshot(", "agent\", \"prompt", "nativeCodexStatusMatches", "establishCodexStatusIdentity", "nativeCodexFooterIdentity", "verifyCodexFooterAttachment"} {
+		if strings.Contains(src, banned) {
+			t.Fatalf("screen-based identity path present: %s", banned)
+		}
+	}
+	if !strings.Contains(src, "h.awaitCodexResumeIdentity(ctx, run) // guard:codex-resume-identity") {
+		t.Fatal("pre-goal identity does not use the daemon trace")
 	}
 }
 

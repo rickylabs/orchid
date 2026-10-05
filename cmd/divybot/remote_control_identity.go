@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
+	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf8"
+	"time"
 )
 
 type remoteTUIProcess struct {
@@ -65,89 +65,6 @@ func (h Host) remoteTUIProcess(ctx context.Context, pane string) (*remoteTUIProc
 	return &remoteTUIProcess{PID: pid, Fingerprint: result.Fingerprint}, nil
 }
 
-// 0.159.3 thread/loaded/list lists memory-resident threads, including one just
-// prepared by Orchid. It exposes no client/pane association. Use the native TUI
-// status card once, before any model turn, instead of treating loaded as attached.
-func nativeCodexStatusMatches(screen, home string, run *remoteControlRun) bool {
-	if run == nil || !privateNativeID(run.NativeSessionID) || len(screen) > 64*1024 || !utf8.ValidString(screen) {
-		return false
-	}
-	if !emptyCodexComposer(screen) || !strings.Contains(screen, "/status") {
-		return false
-	}
-	values := map[string]string{}
-	for _, line := range strings.Split(screen, "\n") {
-		line = strings.TrimSpace(strings.Trim(line, "│ "))
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		switch key {
-		case "Session", "Directory", "Model", "Thread name":
-			if _, duplicate := values[key]; duplicate {
-				return false
-			}
-			values[key] = strings.TrimSpace(value)
-		}
-	}
-	cwd := values["Directory"]
-	if strings.HasPrefix(cwd, "~/") {
-		cwd = filepath.Join(home, cwd[2:])
-	}
-	model := values["Model"]
-	if model != run.Model && !strings.HasPrefix(model, run.Model+" (") {
-		return false
-	}
-	if run.Effort != "" && !strings.Contains(model, "reasoning "+run.Effort) {
-		return false
-	}
-	return values["Session"] == run.NativeSessionID && cwd == run.Cwd && values["Thread name"] == run.Name
-}
-
-func establishCodexStatusIdentity(ctx context.Context, expected AgentInfo, home string, run *remoteControlRun, d promptCalls) error {
-	var before, previous promptSnapshot
-	stable := false
-	for ctx.Err() == nil {
-		s, err := d.observe(ctx)
-		if err != nil || !samePromptOccupant(expected, s.Agent) || !codexReady(s) || strings.Contains(s.Screen, "/status") {
-			return goalError("remote-control-identity-unconfirmed")
-		}
-		if stable && previous.Agent.StateChangeSeq == s.Agent.StateChangeSeq && previous.Screen == s.Screen {
-			before = s
-			break
-		}
-		previous, stable = s, true
-		if !d.wait(ctx) {
-			return goalError("remote-control-identity-unconfirmed")
-		}
-	}
-	if ctx.Err() != nil || !stable {
-		return goalError("remote-control-identity-unconfirmed")
-	}
-	// One native status command, no Enter repair, model turn or consent command.
-	if d.submit(ctx, "/status") != nil {
-		return goalError("remote-control-identity-unconfirmed")
-	}
-	for ctx.Err() == nil {
-		s, err := d.observe(ctx)
-		if err != nil || !samePromptOccupant(before.Agent, s.Agent) || !codexReady(s) {
-			return goalError("remote-control-identity-unconfirmed")
-		}
-		if nativeCodexStatusMatches(s.Screen, home, run) {
-			if ctx.Err() != nil {
-				break
-			}
-			run.IdentitySource = "codex-native-status"
-			return nil
-		}
-		if !d.wait(ctx) {
-			break
-		}
-	}
-	return goalError("remote-control-identity-unconfirmed")
-}
-
 func (h Host) preGoalRemoteIdentity(ctx context.Context, kind, label string, run *remoteControlRun, location *dispatchLocation) error {
 	if kind != "codex" {
 		id, err := h.awaitRemoteIdentity(ctx, kind, label, run.Cwd, run.NativeSessionID, location)
@@ -183,14 +100,13 @@ func (h Host) preGoalRemoteIdentity(ctx context.Context, kind, label string, run
 	if err != nil {
 		return err
 	}
-	err = establishCodexStatusIdentity(ctx, before.Agent, h.agentHome(), run, promptCalls{
-		observe: func(ctx context.Context) (promptSnapshot, error) { return h.promptSnapshot(ctx, location.PaneID) },
-		submit: func(ctx context.Context, text string) error {
-			_, err := h.herdr(ctx, "agent", "prompt", location.PaneID, text)
-			return err
-		},
-		wait: goalWait,
-	})
+	// The daemon's own trace proves attachment: exactly one codex-tui connection
+	// at the pinned client version ran thread/resume on this freshly prepared
+	// thread. No screen is read and nothing is typed into the agent.
+	err = h.awaitCodexResumeIdentity(ctx, run) // guard:codex-resume-identity
+	if err == nil {
+		run.IdentitySource = "codex-native-status"
+	}
 	current, currentErr := h.remoteTUIProcess(ctx, location.PaneID)
 	if err != nil || currentErr != nil || *process != *current || ctx.Err() != nil {
 		run.IdentitySource = ""
@@ -198,27 +114,6 @@ func (h Host) preGoalRemoteIdentity(ctx context.Context, kind, label string, run
 	}
 	run.TUIProcess = process
 	return nil
-}
-
-// The invocation-only native footer is the currently attached TUI identity.
-// Require its entire ID at the bottom, after the composer, never an ID quoted
-// in transcript prose. It grants no native work/completion proof.
-func nativeCodexFooterIdentity(screen string) string {
-	if len(screen) > 64*1024 || !utf8.ValidString(screen) || codexTrustDialog(screen) {
-		return ""
-	}
-	lines := strings.Split(strings.TrimRight(screen, "\n\r \t"), "\n")
-	if len(lines) < 2 {
-		return ""
-	}
-	last := strings.Fields(lines[len(lines)-1])
-	if len(last) == 0 || !actionIDPattern.MatchString(last[0]) {
-		return ""
-	}
-	if !strings.Contains(strings.Join(lines[:len(lines)-1], "\n"), "›") {
-		return ""
-	}
-	return last[0]
 }
 
 func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remoteControlRun, location *dispatchLocation) error {
@@ -231,7 +126,8 @@ func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remot
 			return goalError("remote-control-identity-unconfirmed")
 		}
 	}
-	err := verifyCodexFooterAttachment(ctx, label, run, location, func() (promptSnapshot, error) { return h.promptSnapshot(ctx, location.PaneID) })
+	err := verifyCodexAttachment(ctx, label, run, location, func() (AgentInfo, error) { return h.agentInfoOf(ctx, location.PaneID) },
+		func() (int, error) { return h.codexResumeConnections(ctx, run) })
 	if err != nil {
 		return err
 	}
@@ -247,32 +143,90 @@ func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remot
 	return nil
 }
 
-func verifyCodexFooterAttachment(ctx context.Context, label string, run *remoteControlRun, location *dispatchLocation, observe func() (promptSnapshot, error)) error {
+// verifyCodexAttachment proves the attached Codex TUI from native facts only:
+// Herdr's structured occupant before and after (no change, no conflicting hook),
+// and the daemon trace of exactly one pinned codex-tui resume of this thread.
+func verifyCodexAttachment(ctx context.Context, label string, run *remoteControlRun, location *dispatchLocation,
+	observe func() (AgentInfo, error), resumes func() (int, error)) error {
 	if ctx.Err() != nil || run == nil || location == nil {
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	before, err := observe()
-	if err != nil || !before.Stable {
+	if err != nil {
 		return goalError("remote-control-identity-unconfirmed")
 	}
-	raw, _ := json.Marshal(map[string]any{"type": "agent_info", "agent": before.Agent})
+	raw, _ := json.Marshal(map[string]any{"type": "agent_info", "agent": before})
 	if !remoteStatusOccupant(raw, "codex", label, run.Cwd, run.NativeSessionID, location) {
 		return goalError("remote-control-identity-unconfirmed")
 	}
-	id := nativeCodexFooterIdentity(before.Screen)
-	if id == "" {
+	if n, err := resumes(); err != nil || n != 1 { // guard:attachment-resume-trace
 		return goalError("remote-control-identity-unconfirmed")
-	}
-	if id != run.NativeSessionID {
-		return goalError("remote-control-hook-mismatch")
 	}
 	after, err := observe()
-	if err != nil || !after.Stable || !samePromptOccupant(before.Agent, after.Agent) || before.Agent.StateChangeSeq != after.Agent.StateChangeSeq || nativeCodexFooterIdentity(after.Screen) != id || ctx.Err() != nil {
+	if err != nil || !samePromptOccupant(before, after) || before.StateChangeSeq != after.StateChangeSeq || ctx.Err() != nil {
 		return goalError("remote-control-identity-unconfirmed")
 	}
-	raw, _ = json.Marshal(map[string]any{"type": "agent_info", "agent": after.Agent})
+	raw, _ = json.Marshal(map[string]any{"type": "agent_info", "agent": after})
 	if !remoteStatusOccupant(raw, "codex", label, run.Cwd, run.NativeSessionID, location) {
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	return nil
+}
+
+// codexResumeTracePython counts the distinct codex-tui connections that ran
+// thread/resume on one thread, from the canonical daemon's own structured trace
+// (read-only). Only the thread id, connection id and client fields are used.
+const codexResumeTracePython = `import json,os,re,sqlite3,sys
+tid,ver=sys.argv[1],sys.argv[2]
+home=os.environ.get('CODEX_HOME') or os.path.join(os.environ['HOME'],'.codex')
+c=sqlite3.connect('file:'+os.path.join(home,'logs_2.sqlite')+'?mode=ro',uri=True,timeout=5)
+span=re.compile(r'rpc\.method="thread/resume" .*?app_server\.connection_id=(\d+) .*?app_server\.client_name="([^"]+)" app_server\.client_version="([^"]+)"')
+conns=set()
+for (b,) in c.execute("select feedback_log_body from logs where thread_id=?",(tid,)):
+ m=span.search(b or '')
+ if m and m.group(2)=='codex-tui' and (not ver or m.group(3)==ver):conns.add(m.group(1))
+print(json.dumps({'connections':len(conns)}))
+`
+
+// codexResumeConnections reads the daemon trace once. The pinned client version
+// is matched when known (pre-goal); a run reloaded from its private record no
+// longer carries it, and the launch-time pin already enforced it.
+func (h Host) codexResumeConnections(ctx context.Context, run *remoteControlRun) (int, error) {
+	if run == nil || !privateNativeID(run.NativeSessionID) || (run.ClientVersion != "" && !codexVersionPattern.MatchString(run.ClientVersion)) {
+		return 0, goalError("remote-control-identity-unconfirmed")
+	}
+	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s", shq(h.agentHome()), shq(codexResumeTracePython), shq(run.NativeSessionID), shq(run.ClientVersion))
+	out, err := h.runRemote(ctx, script)
+	var v struct {
+		Connections int `json:"connections"`
+	}
+	if err != nil || len(out) > 256 || decodeNativeJSON([]byte(strings.TrimSpace(out)), &v) != nil || v.Connections < 0 {
+		return 0, goalError("remote-control-identity-unconfirmed")
+	}
+	return v.Connections, nil
+}
+
+// awaitCodexResumeIdentity waits, within the launch budget, for the daemon to
+// record exactly one pinned codex-tui thread/resume on the prepared thread. Two
+// or more connections are ambiguous and refuse.
+func (h Host) awaitCodexResumeIdentity(ctx context.Context, run *remoteControlRun) error {
+	if run == nil || !privateNativeID(run.NativeSessionID) || !codexVersionPattern.MatchString(run.ClientVersion) { // guard:identity-version-pinned
+		return goalError("remote-control-identity-unconfirmed")
+	}
+	for ctx.Err() == nil {
+		n, err := h.codexResumeConnections(ctx, run)
+		if err == nil {
+			switch {
+			case n == 1: // guard:resume-exactly-one
+				return nil
+			case n > 1:
+				return goalError("remote-control-identity-unconfirmed")
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}
+	return goalError("remote-control-identity-unconfirmed")
 }

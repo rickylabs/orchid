@@ -10,50 +10,46 @@ import (
 	"time"
 )
 
-func TestRemoteControlContinuousFooterIdentity(t *testing.T) {
-	for _, mode := range []string{"valid", "native-context", "missing", "quoted", "truncated", "foreign", "late", "changed-occupant", "changed-sequence", "conflicting-late-hook"} {
+// Attachment is proven from Herdr's structured occupant and the daemon's resume
+// trace; a conflicting hook, a changed occupant or an ambiguous trace refuses.
+func TestRemoteCodexAttachmentNative(t *testing.T) {
+	for _, mode := range []string{"valid", "no-resume", "two-resumes", "trace-unreadable", "changed-occupant", "changed-sequence", "conflicting-late-hook", "late"} {
 		t.Run(mode, func(t *testing.T) {
 			run := syntheticRemoteRun(t)
-			s := promptFixture()
-			s.Agent.Cwd = run.Cwd
-			s.Screen = "› Ask Codex to do anything\n  " + run.NativeSessionID
-			switch mode {
-			case "native-context":
-				s.Screen += "     Auto (Shift+Tab to cycle)"
-			case "missing":
-				s.Screen = "› Ask Codex to do anything"
-			case "quoted":
-				s.Screen = "• Quoted native identity: " + run.NativeSessionID + "\n› Ask Codex to do anything"
-			case "truncated":
-				s.Screen = "› Ask Codex to do anything\n" + run.NativeSessionID[:30] + "…"
-			case "foreign":
-				s.Screen = "› Ask Codex to do anything\n" + syntheticRemoteRun(t).NativeSessionID
-			}
+			agent := promptFixture().Agent
+			agent.Cwd = run.Cwd
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			reads := 0
-			err := verifyCodexFooterAttachment(ctx, s.Agent.Name, run, &dispatchLocation{PaneID: s.Agent.PaneID, WorkspaceID: s.Agent.WorkspaceID}, func() (promptSnapshot, error) {
+			err := verifyCodexAttachment(ctx, agent.Name, run, &dispatchLocation{PaneID: agent.PaneID, WorkspaceID: agent.WorkspaceID}, func() (AgentInfo, error) {
 				reads++
-				v := s
+				v := agent
 				if reads > 1 {
 					switch mode {
 					case "late":
 						cancel()
 					case "changed-occupant":
-						v.Agent.PaneID = "foreign-pane"
+						v.PaneID = "foreign-pane"
 					case "changed-sequence":
-						v.Agent.StateChangeSeq++
+						v.StateChangeSeq++
 					case "conflicting-late-hook":
-						v.Agent.AgentSession = fixtureJSON(t, map[string]string{"source": "herdr:codex", "agent": "codex", "kind": "id", "value": privateTestID(t)})
+						v.AgentSession = fixtureJSON(t, map[string]string{"source": "herdr:codex", "agent": "codex", "kind": "id", "value": privateTestID(t)})
 					}
 				}
 				return v, nil
+			}, func() (int, error) {
+				switch mode {
+				case "no-resume":
+					return 0, nil
+				case "two-resumes":
+					return 2, nil
+				case "trace-unreadable":
+					return 0, goalError("remote-control-identity-unconfirmed")
+				}
+				return 1, nil
 			})
-			if (err == nil) != (mode == "valid" || mode == "native-context") {
-				t.Fatal("continuous footer binding guard failed")
-			}
-			if mode == "foreign" && err != goalError("remote-control-hook-mismatch") {
-				t.Fatal("foreign attached native identity was not blocked")
+			if (err == nil) != (mode == "valid") {
+				t.Fatalf("native attachment guard failed: %v", err)
 			}
 		})
 	}
