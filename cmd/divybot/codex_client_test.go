@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,17 +76,18 @@ func TestResolveCodexClientMatchesDaemonVersion(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, version, pathVersion, wantDir string
+		check                               bool // a check failure rather than "no client matches" (incl. no valid daemon version)
 	}{
-		{"release-dir", "9.1.0", "9.2.0", ".codex/packages/standalone/releases/9.1.0-x86_64-fixture/bin"},
-		{"path-client", "9.2.0", "9.2.0", ".local/bin"},
-		{"release-preferred-over-path", "9.5.0", "9.5.0", ".codex/packages/standalone/releases/9.5.0-x86_64-fixture/bin"},
-		{"release-reports-other-version", "9.3.0", "9.2.0", ""},
-		{"no-client", "9.4.0", "9.2.0", ""},
-		{"malformed-version-never-resolves", "bogus", "9.2.0", ""},
-		{"path-splitting-dir-refused", "9.6.0", "9.2.0", ""},
-		{"invalid-version", "9.1", "9.2.0", ""},
-		{"empty-version", "", "9.2.0", ""},
-		{"injection", "9.1.0'; touch pwned; '", "9.2.0", ""},
+		{"release-dir", "9.1.0", "9.2.0", ".codex/packages/standalone/releases/9.1.0-x86_64-fixture/bin", false},
+		{"path-client", "9.2.0", "9.2.0", ".local/bin", false},
+		{"release-preferred-over-path", "9.5.0", "9.5.0", ".codex/packages/standalone/releases/9.5.0-x86_64-fixture/bin", false},
+		{"release-reports-other-version", "9.3.0", "9.2.0", "", false},
+		{"no-client", "9.4.0", "9.2.0", "", false},
+		{"malformed-version-never-resolves", "bogus", "9.2.0", "", true},
+		{"path-splitting-dir-refused", "9.6.0", "9.2.0", "", true},
+		{"invalid-version", "9.1", "9.2.0", "", true},
+		{"empty-version", "", "9.2.0", "", true},
+		{"injection", "9.1.0'; touch pwned; '", "9.2.0", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := codexClientHome(t, releases, tc.pathVersion)
@@ -94,8 +96,11 @@ func TestResolveCodexClientMatchesDaemonVersion(t *testing.T) {
 			defer cancel()
 			binary, err := h.resolveCodexClient(ctx, tc.version)
 			if tc.wantDir == "" {
-				if err != codexClientUnavailable || binary != "" {
+				if !errors.Is(err, codexClientUnavailable) || binary != "" {
 					t.Fatalf("no exact client must refuse: binary=%q err=%v", binary, err)
+				}
+				if errors.Is(err, errCodexClientUnmatched) == tc.check {
+					t.Fatalf("native client verdict misclassified: check=%v err=%#v", tc.check, err)
 				}
 			} else if want, _ := filepath.EvalSymlinks(filepath.Join(home, tc.wantDir, "codex")); err != nil || binary != want {
 				t.Fatalf("resolved %q (%v), want the real binary %q", binary, err, want)
@@ -135,7 +140,7 @@ func TestResolveCodexClientPinsRealBinary(t *testing.T) {
 			defer cancel()
 			binary, err := Host{Name: "fixture-host", Home: home}.resolveCodexClient(ctx, "9.7.0")
 			if tc.want == "" {
-				if err != codexClientUnavailable {
+				if !errors.Is(err, errCodexClientUnmatched) {
 					t.Fatalf("a client not named codex was pinned: %q", binary)
 				}
 				return
