@@ -940,7 +940,7 @@ func confirmCallerValid(fn *ast.FuncDecl) bool {
 				continue
 			}
 			next, ok := block.List[i+1].(*ast.IfStmt)
-			if !ok || next.Init != nil || next.Else != nil || types.ExprString(next.Cond) != "confirmErr != nil" || len(next.Body.List) != 3 {
+			if !ok || next.Init != nil || next.Else != nil || types.ExprString(next.Cond) != "confirmErr != nil" || len(next.Body.List) != 4 {
 				continue
 			}
 			body := []string{}
@@ -954,7 +954,8 @@ func confirmCallerValid(fn *ast.FuncDecl) bool {
 					}
 				}
 			}
-			if strings.Join(body, "; ") == `gcancel(); c.blockGoalDelivery(n, j); return matrixReason("goal-prompt-unconfirmed")` {
+			// The native context end is captured first, before the cancel (launch outcome).
+			if strings.Join(body, "; ") == `attempt.contextEnded(gctx); gcancel(); c.blockGoalDelivery(n, j); return matrixReason("goal-prompt-unconfirmed")` {
 				found = true
 			}
 		}
@@ -1124,7 +1125,7 @@ func TestDeliveryAuthorityInventory(t *testing.T) {
 		{"confirm-unconditional-revert", "goal_delivery.go", "if err != nil && !(errors.As(err, &saved) && saved.afterRename) { // guard:confirm-before-rename", "if err != nil { // guard:confirm-before-rename", nil},
 		{"confirm-caller-background-context", "main.go", "confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller", "confirmErr = c.confirmGoalDelivery(context.Background(), j) // guard:confirm-caller", nil},
 		{"confirm-caller-parent-context", "main.go", "confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller", "confirmErr = c.confirmGoalDelivery(ctx, j) // guard:confirm-caller", nil},
-		{"confirm-caller-refusal-not-blocked", "main.go", "\t\tif confirmErr != nil {\n\t\t\tgcancel()\n\t\t\tc.blockGoalDelivery(n, j)\n", "\t\tif confirmErr != nil {\n\t\t\tgcancel()\n\t\t\t_ = j\n", nil},
+		{"confirm-caller-refusal-not-blocked", "main.go", "\t\tif confirmErr != nil {\n\t\t\tattempt.contextEnded(gctx)\n\t\t\tgcancel()\n\t\t\tc.blockGoalDelivery(n, j)\n", "\t\tif confirmErr != nil {\n\t\t\tattempt.contextEnded(gctx)\n\t\t\tgcancel()\n\t\t\t_ = j\n", nil},
 		{"confirm-wrapper-reintroduced", "goal_delivery.go", "func (c *Coord) confirmGoalDelivery(", "func confirmGoalDeliveryBeforeDeadline(ctx context.Context, confirm func() error) error {\n\treturn confirm()\n}\n\nfunc (c *Coord) confirmGoalDelivery(", nil},
 		{"commit-snapshot-after-write", "native_codex_commit.go", "\tpriorPrompt := j.NativeGoal.PromptConfirmed\n\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true", "\tj.GoalDelivery, j.GoalDeliveryCommit = \"confirmed\", deliveryCommitMark\n\tj.NativeGoal.PromptConfirmed = true\n\tpriorPrompt := j.NativeGoal.PromptConfirmed", nil},
 	}

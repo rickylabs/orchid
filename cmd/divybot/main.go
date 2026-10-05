@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -646,6 +647,8 @@ func (h Host) agentStatusOf(ctx context.Context, target string) string {
 // spawnAgent creates an isolated workspace, prepares its shell environment, then
 // registers an interactive agent in that exact pane before accepting goal delivery.
 func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]string, agent string, ovr Overrides, receipt *durableMatrixReceipt, titles ...string) (pane, ws string, err error) {
+	attempt := receipt.launchAttempt()
+	attempt.enter(stageClientSelection)
 	if h.remoteEnabled(agent) && strings.HasSuffix(agent, "-run") {
 		return "", "", matrixSite("spawn.remote-control-mode", errAgentRegistration)
 	}
@@ -710,7 +713,13 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			trustArgs, trustErr = h.prepareAGYTrustAt(ctx, cwd, root, true)
 		}
 		if trustErr != nil {
-			return "", "", matrixSite("spawn.agy-trust", trustErr)
+			blocked := matrixSite("spawn.agy-trust", trustErr)
+			if ctx.Err() != nil {
+				attempt.contextEnded(ctx) // a cut-short check is the context's fact, not a settings verdict
+			} else if agySettingsBlocked(blocked) {
+				attempt.agySettingsUnreadable()
+			}
+			return "", "", blocked
 		}
 		nativeArgs = append(nativeArgs, trustArgs...)
 		agyStore = &nativeStore{Source: "agy", Directory: root}
@@ -718,9 +727,18 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if remote != nil && agent == "codex" {
 		// Before any workspace, thread or agent: the TUI must match the daemon.
 		if e := h.selectCodexClient(ctx, remote); e != nil { // guard:client-before-spawn
+			switch {
+			case ctx.Err() != nil: // guard:client-check-context-first
+				attempt.contextEnded(ctx) // a cut-short check is no client verdict
+			case errors.Is(e, errCodexClientUnmatched):
+				attempt.codexClientUnmatched()
+			default:
+				attempt.codexClientCheckFailed()
+			}
 			return "", "", matrixSite("spawn.codex-client", e)
 		}
 	}
+	attempt.enter(stageWorkspace)
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", matrixSite("spawn.workspace-create", errMatrix)
@@ -784,13 +802,19 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		// Existing non-interactive jobs use PR/deadline supervision, not agent registration.
 		b.WriteString("exec " + command)
 	}
+	attempt.enter(stageEnvironment)
 	if out, e := h.herdr(ctx, "pane", "run", pane, b.String()); e != nil {
 		_ = out // never expose environment-bearing command output
+		attempt.contextEnded(ctx)
 		return pane, ws, matrixSite("spawn.environment", errAgentRegistration)
+	}
+	if strings.HasSuffix(agent, "-run") {
+		attempt.runStarted() // the pane run executed the non-interactive job
 	}
 	var identity *string
 	identityReason := nativeUnsupported
 	if remote != nil {
+		attempt.enter(stageThreadPreparation)
 		if agent == "codex" {
 			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
 				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
@@ -814,13 +838,22 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		}
 	}
 	if !strings.HasSuffix(agent, "-run") {
+		attempt.enter(stageRegistration)
 		args := []string{"agent", "start", label, "--kind", kind, "--pane", pane, "--timeout", strconv.FormatInt(startBudget.Milliseconds(), 10), "--"}
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)
 		if e != nil {
+			// Native facts first, before any screen-based refinement or cleanup.
+			attempt.herdrStartError(out)
+			attempt.contextEnded(ctx)
 			return pane, ws, matrixSite("spawn.agent-start", h.registrationStartFailure(ctx, out, agent, label, cwd, pane, ws))
 		}
 		raw, e := herdrUnwrap(out)
+		if e == nil {
+			attempt.registered() // guard:fact-registered
+		} else {
+			attempt.herdrStartError(out) // a structured error in a zero-exit response
+		}
 		if e != nil {
 			return pane, ws, matrixSite("spawn.agent-envelope", registrationFailure(out, ctx.Err()))
 		}
@@ -2123,7 +2156,14 @@ type Coord struct {
 	hosts       map[string]Host
 	actions     actionCalls           // injected only by action-delivery tests
 	shadow      *nativeEvidenceShadow // private observation-only; never consulted
-	dry         bool                  // dry-run: log spawn/adopt decisions, take no spawning action
+	instance    string                // this process; matches launch progress and heartbeat
+	attemptsMu  sync.Mutex
+	attempts    map[string]*launchAttempt // live launch attempts by reservation key
+	unsettled   map[*launchAttempt]bool   // finished attempts whose publication is pending
+	beatMu      sync.Mutex
+	beatStarted string
+	stopping    bool
+	dry         bool // dry-run: log spawn/adopt decisions, take no spawning action
 	gov         struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
@@ -2172,7 +2212,7 @@ func newCoord(cfg *Config) *Coord {
 	for _, h := range cfg.Hosts {
 		hosts[h.Name] = h
 	}
-	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now)}
+	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID()}
 }
 
 func (c *Coord) run(ctx context.Context) {
@@ -2192,6 +2232,11 @@ func (c *Coord) run(ctx context.Context) {
 	}
 	go c.governorLoop(ctx, primed)
 	go c.memoryLoop(ctx)
+	go func() {
+		t := time.NewTicker(heartbeatEvery)
+		defer t.Stop()
+		c.heartbeatLoop(ctx, t.C)
+	}()
 	go func() {
 		t := time.NewTicker(shadowReadoutEvery)
 		defer t.Stop()
@@ -2344,10 +2389,7 @@ func (c *Coord) governorSample(ctx context.Context) {
 			c.st.QuotaSamples[a] = trimmed
 		}
 		samples := c.st.QuotaSamples
-		active := map[string]int{}
-		for _, j := range c.st.Jobs {
-			active[accountKey(j.Agent)]++
-		}
+		active := c.activeByAccount()
 		prev := map[string]int{}
 		for a, v := range c.st.PrevCap {
 			prev[a] = v
@@ -2378,10 +2420,7 @@ func (c *Coord) curCaps() map[string]int {
 	if c.st.PrevCap == nil {
 		c.st.PrevCap = map[string]int{}
 	}
-	active := map[string]int{}
-	for _, j := range c.st.Jobs {
-		active[accountKey(j.Agent)]++
-	}
+	active := c.activeByAccount()
 	for _, a := range c.cfg.accounts() {
 		if a == "agy" {
 			caps[a] = c.cfg.UnmeteredTransports.cap(a)
@@ -3056,6 +3095,8 @@ func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, 
 }
 
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
+	attempt := receipt.launchAttempt()
+	attempt.enter(stagePreparation)
 	if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
 		return matrixReason(reason)
 	}
@@ -3077,6 +3118,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	// 1. Push fresh creds before the agent starts.
 	actx, acancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := c.auth.syncToHost(actx, host); err != nil {
+		attempt.contextEnded(actx)
 		acancel()
 		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.auth-sync", errMatrix)
@@ -3100,6 +3142,7 @@ git fetch --depth=1 origin %s >/dev/null 2>&1
 git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		shq(workdir), shq(workdir), tgt.Repo, shq(c.cfg.Matrix.TargetRevisions[tgt.Repo]), shq(branch))
 	if _, err := host.runRemote(pctx, prep); err != nil {
+		attempt.contextEnded(pctx)
 		pcancel()
 		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.worktree", errMatrix)
@@ -3184,6 +3227,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		return matrixSite("launch.fence", errMatrix)
 	}
 	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt, is.Title)
+	attempt.enter(stageRegistration) // post-spawn bookkeeping; a *-run job stays in environment
 	if err != nil {
 		log.Printf("issue #%d: agent registration failed; reason=%s; automatic launch abandoned", n, registrationFailureKind(err))
 		c.st.blockLaunch(n, launchBlockReason(err))
@@ -3271,9 +3315,11 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if target == "" {
 			target = label
 		}
+		attempt.enter(stageGoalDelivery)
 		gctx, gcancel := context.WithTimeout(ctx, 120*time.Second)
 		if j.RemoteControl != nil {
 			if e := host.remoteProof(gctx, agent, j.Label, j.RemoteControl, &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace}); e != nil {
+				attempt.contextEnded(gctx)
 				c.blockGoalDelivery(n, j)
 				gcancel()
 				return matrixReason("goal-prompt-unconfirmed")
@@ -3300,6 +3346,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
 		if deliveryErr != nil {
+			attempt.contextEnded(gctx)
 			c.blockGoalDelivery(n, j)
 			if agent == "opencode" {
 				c.blockOpenCode(n, j, deliveryErr)
@@ -3308,6 +3355,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			gcancel()
 			return matrixReason("goal-prompt-unconfirmed")
 		}
+		attempt.enter(stageGoalConfirmation)
 		var confirmErr error
 		if remoteCodex {
 			deadline, _ := gctx.Deadline()
@@ -3316,10 +3364,12 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller
 		}
 		if confirmErr != nil {
+			attempt.contextEnded(gctx)
 			gcancel()
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")
 		}
+		attempt.goalCommitted() // guard:fact-goal-committed
 		log.Printf("issue #%d: goal delivery confirmed", n)
 		gcancel()
 		if agent == "agy" {
@@ -4176,6 +4226,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "matrix" {
 		os.Exit(matrixConfigCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "launches" {
+		os.Exit(launchesCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	cfgPath := flag.String("config", "divybot.json", "path to config json")
 	once := flag.Bool("once", false, "run a single tick and exit (for testing)")
 	dry := flag.Bool("dryrun", false, "log spawn/adopt decisions, take no spawning/poking action")
@@ -4196,8 +4249,21 @@ func main() {
 		log.Printf("WARNING: no gh token resolved (GH_TOKEN / gh auth token) — agents won't be able to push")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// The shutdown is the root cancellation cause, so a cancelled launch can tell
+	// an Orchid shutdown from any other cancellation.
+	ctx, cancelRoot := context.WithCancelCause(context.Background())
+	defer cancelRoot(nil)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	go func() {
+		select {
+		case <-signals:
+			c.markStopping() // guard:stopping-before-cancel
+			cancelRoot(errOrchidShutdown)
+		case <-ctx.Done():
+		}
+	}()
 
 	// In the container divybot is pid 1, so every orphan in the namespace lands on it and nobody
 	// waits on them. See reaper.go.

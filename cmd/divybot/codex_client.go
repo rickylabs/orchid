@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,6 +18,20 @@ import (
 // whole start budget. The client must be the daemon's exact version, read from
 // the daemon's own initialize userAgent as Codex's daemon client reads it.
 const codexClientUnavailable matrixReason = "codex-client-unavailable"
+
+// codexClientError keeps the native reason a client was not selected, while
+// still being codex-client-unavailable for every existing caller.
+type codexClientError struct{ unmatched bool }
+
+func (e codexClientError) Error() string        { return string(codexClientUnavailable) }
+func (e codexClientError) Is(target error) bool { return target == codexClientUnavailable }
+
+var (
+	// No host client reports the daemon's version (or the version is invalid).
+	errCodexClientUnmatched = codexClientError{unmatched: true}
+	// The handshake, transport or resolver output failed: no verdict on clients.
+	errCodexClientCheck = codexClientError{}
+)
 
 var codexVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]{0,63})?$`)
 
@@ -58,7 +73,7 @@ func (h Host) selectCodexClient(ctx context.Context, run *remoteControlRun) erro
 		version = p.serverVersion
 		return nil
 	}); err != nil {
-		return err
+		return errCodexClientCheck
 	}
 	binary, err := h.resolveCodexClient(ctx, version)
 	if err != nil {
@@ -78,7 +93,7 @@ const codexClientCheck = `check() { r=$(readlink -f -- "$1" 2>/dev/null) || retu
 // the codex on the launch PATH. Nothing is installed, updated or restarted.
 func (h Host) resolveCodexClient(ctx context.Context, version string) (string, error) {
 	if !codexVersionPattern.MatchString(version) { // guard:client-version-valid
-		return "", codexClientUnavailable
+		return "", errCodexClientUnmatched
 	}
 	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH"; v=%s; want="codex-cli $v"
 %s
@@ -88,12 +103,16 @@ done
 c=$(command -v codex 2>/dev/null) && check "$c" && exit 0
 exit 3`, shq(h.agentHome()), shq(version), codexClientCheck)
 	out, err := h.runRemote(ctx, script)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 3 { // guard:client-unmatched-exit
+		return "", errCodexClientUnmatched
+	}
 	if err != nil {
-		return "", codexClientUnavailable
+		return "", errCodexClientCheck
 	}
 	binary := strings.TrimSuffix(out, "\n")
 	if filepath.Base(binary) != "codex" || !validClientDir(filepath.Dir(binary)) || filepath.Clean(binary) != binary { // guard:client-binary-valid
-		return "", codexClientUnavailable
+		return "", errCodexClientCheck
 	}
 	return binary, nil
 }

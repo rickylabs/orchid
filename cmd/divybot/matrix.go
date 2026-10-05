@@ -36,6 +36,9 @@ type MatrixConfig struct {
 	Pins            map[string]MatrixPin        `json:"pins"`
 	Grants          []MatrixGrant               `json:"grants"`
 	BudgetDefaults  map[string]map[string]int64 `json:"budget_defaults,omitempty"`
+	// Publish consumer-visible launch admission/outcome records. Default off until
+	// the Harness reader and the Cockpit consume them (reader-first).
+	LaunchOutcomes bool `json:"launch_outcomes,omitempty"`
 }
 
 // profileRevision pins the Harness profiles, as the cockpit's profile pin does. Unset,
@@ -557,12 +560,20 @@ type durableMatrixReceipt struct {
 	owner    *receiptOwner
 	dispatch *dispatchBinding
 	profile  *workerProfile
+	attempt  *launchAttempt // nil outside a matrix launch
 }
 
 // workerProfile is the Harness profile the dispatcher read and pinned for this launch.
 // The worker receives this exact text; it never reads a profile from the target checkout.
 type workerProfile struct {
 	Name, Revision, Text string
+}
+
+func (r *durableMatrixReceipt) launchAttempt() *launchAttempt {
+	if r == nil {
+		return nil
+	}
+	return r.attempt
 }
 
 func (r *durableMatrixReceipt) claim(command string) bool {
@@ -945,7 +956,14 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if openCodeProvider != "" {
 		budget["opencode:"+openCodeProvider]-- // no refund after an ambiguous launch effect
 	}
-	if e := d.launch(ctx, n, is, host, agent, o, handle); e != nil {
+	attempt := c.newMatrixAttempt(cfg, owner, key, is, n, route, agent, d.retry)
+	handle.attempt = attempt
+	attempt.begin() // guard:attempt-before-launch
+	c.trackAttempt(attempt, accountKey(agent))
+	launchErr := d.launch(ctx, n, is, host, agent, o, handle)
+	attempt.finish(ctx, launchErr)
+	c.untrackAttempt(attempt)
+	if e := launchErr; e != nil {
 		if agySettingsBlocked(e) || codexClientBlocked(e) {
 			// spawn already persisted and reported this specific no-seat block.
 			// Keep the one-attempt fence without overwriting it with uncertainty.

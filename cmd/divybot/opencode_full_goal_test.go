@@ -207,7 +207,12 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 			}
 		}
 	}
+	r.attempt, _ = fixtureAttempt(t, false, false, nil)
+	r.attempt.begin()
 	err := c.spawn(ctx, 7, is, h, "opencode", o, r)
+	if confirmFault == "" && err == nil && (!r.attempt.p.Facts.Registered || !r.attempt.p.Facts.GoalCommitted || r.attempt.p.Stage != "goal-confirmation") {
+		t.Fatalf("production spawn did not record registration and goal commit: %+v", r.attempt.p)
+	}
 	if confirmFault != "" {
 		reloaded := loadState(statePath)
 		saved := reloaded.Jobs[7]
