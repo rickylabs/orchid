@@ -124,7 +124,9 @@ func (c *Coord) checkRemoteHookToday(ctx context.Context, h Host, j *Job) (bool,
 		return true, []string{shadowInputUnchecked}
 	}
 	herdrOnly := []string{shadowInputHerdrAgent}
-	attached := []string{shadowInputHerdrAgent, shadowInputScreenFooter}
+	// The attachment check reads no pane: the structured occupant (twice), the
+	// stored resume proof and, for a native-status identity, the TUI process.
+	attached := []string{shadowInputHerdrAgent, shadowInputResumeProof} // guard:shadow-hook-inputs-native
 	if j.RemoteControl.IdentitySource == "codex-native-status" {
 		attached = append(attached, shadowInputTUIProcess)
 	}
@@ -172,7 +174,9 @@ func remoteProofInputs(j *Job) []string {
 	if j.Agent != "codex" {
 		return []string{shadowInputHerdrAgent} // guard:claude-proof-inputs-native
 	}
-	inputs := []string{shadowInputHerdrAgent, shadowInputScreenFooter, shadowInputCodexStatus}
+	// The Codex proof reads no pane either: the occupant, the stored resume proof
+	// and the canonical daemon's connection and thread state.
+	inputs := []string{shadowInputHerdrAgent, shadowInputResumeProof, shadowInputCodexStatus} // guard:shadow-proof-inputs-native
 	if j.RemoteControl.IdentitySource == "codex-native-status" {
 		inputs = append(inputs, shadowInputTUIProcess)
 	}
