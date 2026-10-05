@@ -279,3 +279,23 @@ func TestWriterRecordsPassWireSchema(t *testing.T) {
 		})
 	}
 }
+
+// The schema table enforces every member's JSON kind by itself, independent
+// of the typed decoder that runs before it.
+func TestWireTableEnforcesKinds(t *testing.T) {
+	kind := map[string]wireField{"s": {kind: '"'}, "n": {kind: '0'}, "b": {kind: 'b'}, "o": {kind: '{', object: map[string]wireField{"x": {kind: '"'}}}}
+	if !wireValid(json.RawMessage(`{"s":"a","n":1,"b":true,"o":{"x":"y"}}`), kind) {
+		t.Fatal("a well-typed object rejected")
+	}
+	for _, bad := range []string{
+		`{"s":1,"n":1,"b":true,"o":{"x":"y"}}`,
+		`{"s":"a","n":"1","b":true,"o":{"x":"y"}}`,
+		`{"s":"a","n":1,"b":"true","o":{"x":"y"}}`,
+		`{"s":"a","n":1,"b":true,"o":[]}`,
+		`{"s":"a","n":1,"b":true,"o":{"x":2}}`,
+	} {
+		if wireValid(json.RawMessage(bad), kind) {
+			t.Fatalf("wrong JSON kind accepted: %s", bad)
+		}
+	}
+}
