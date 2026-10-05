@@ -76,18 +76,18 @@ func TestResolveCodexClientMatchesDaemonVersion(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, version, pathVersion, wantDir string
-		check                               bool // a check failure rather than "no client matches"
+		check                               bool // a check failure rather than "no client matches" (incl. no valid daemon version)
 	}{
 		{"release-dir", "9.1.0", "9.2.0", ".codex/packages/standalone/releases/9.1.0-x86_64-fixture/bin", false},
 		{"path-client", "9.2.0", "9.2.0", ".local/bin", false},
 		{"release-preferred-over-path", "9.5.0", "9.5.0", ".codex/packages/standalone/releases/9.5.0-x86_64-fixture/bin", false},
 		{"release-reports-other-version", "9.3.0", "9.2.0", "", false},
 		{"no-client", "9.4.0", "9.2.0", "", false},
-		{"malformed-version-never-resolves", "bogus", "9.2.0", "", false},
+		{"malformed-version-never-resolves", "bogus", "9.2.0", "", true},
 		{"path-splitting-dir-refused", "9.6.0", "9.2.0", "", true},
-		{"invalid-version", "9.1", "9.2.0", "", false},
-		{"empty-version", "", "9.2.0", "", false},
-		{"injection", "9.1.0'; touch pwned; '", "9.2.0", "", false},
+		{"invalid-version", "9.1", "9.2.0", "", true},
+		{"empty-version", "", "9.2.0", "", true},
+		{"injection", "9.1.0'; touch pwned; '", "9.2.0", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := codexClientHome(t, releases, tc.pathVersion)

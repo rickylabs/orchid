@@ -657,6 +657,13 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		return "", "", matrixSite("spawn.registration-budget", budgetErr)
 	}
 	defer cancel()
+	// Runs before the deferred cancel: a failing return records this child
+	// context's own end (deadline or cancel) at the stage it was reached.
+	defer func() {
+		if err != nil {
+			attempt.contextEnded(ctx) // guard:spawn-child-context
+		}
+	}()
 	command, renderErr := buildAgentCmd(agent, ovr)
 	if renderErr != nil {
 		return "", "", matrixSite("spawn.command-render", renderErr)
@@ -2793,6 +2800,15 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 	return out, up
 }
 
+// recordGoalCommit records the success fact after a goal confirmation. Only the
+// Remote Control Codex native commit is one; a legacy confirmation (which can
+// rest on screen evidence) leaves the tracker unconfirmed.
+func recordGoalCommit(attempt *launchAttempt, remoteCodex bool) {
+	if remoteCodex { // guard:goal-commit-native-only
+		attempt.goalCommitted()
+	}
+}
+
 func (c *Coord) targetFor(is Issue) (Target, bool) {
 	for _, tgt := range c.cfg.Targets {
 		if contains(is.Labels, tgt.Label) {
@@ -3227,7 +3243,6 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		return matrixSite("launch.fence", errMatrix)
 	}
 	pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt, is.Title)
-	attempt.enter(stageRegistration) // post-spawn bookkeeping; a *-run job stays in environment
 	if err != nil {
 		log.Printf("issue #%d: agent registration failed; reason=%s; automatic launch abandoned", n, registrationFailureKind(err))
 		c.st.blockLaunch(n, launchBlockReason(err))
@@ -3239,6 +3254,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		c.reportBlockedLaunch(ctx, n)
 		return matrixSite("launch.registration", err)
 	}
+	attempt.enter(stageRegistration) // guard:registration-after-spawn post-spawn bookkeeping; a *-run job stays in environment
 
 	// herdr's agent-start result doesn't always carry the pane id; resolve it from
 	// the live fleet by cwd so the goal Enter lands on a real pane (send-keys needs
@@ -3369,7 +3385,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			c.blockGoalDelivery(n, j)
 			return matrixReason("goal-prompt-unconfirmed")
 		}
-		attempt.goalCommitted() // guard:fact-goal-committed
+		recordGoalCommit(attempt, remoteCodex) // guard:fact-goal-committed
 		log.Printf("issue #%d: goal delivery confirmed", n)
 		gcancel()
 		if agent == "agy" {

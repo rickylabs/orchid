@@ -14,12 +14,15 @@ import (
 	"time"
 )
 
+// liveInstance is a valid producer instance id (32 lowercase hex).
+const liveInstance = "0123456789abcdef0123456789abcdef"
+
 var fixedNow = func() time.Time { return time.Date(2026, 10, 5, 1, 2, 3, 0, time.UTC) }
 
 func fixtureAttempt(t *testing.T, publish bool, run bool, retry *retryExpectation) (*launchAttempt, string) {
 	t.Helper()
 	root := privateTestRoot(t)
-	a := newLaunchAttempt(root, nil, publish, "instance-live", strings.Repeat("d", 64), "assignment_"+strings.Repeat("e", 64),
+	a := newLaunchAttempt(root, nil, publish, liveInstance, strings.Repeat("d", 64), "assignment_"+strings.Repeat("e", 64),
 		dispatchIssue{Repo: "fixture/inbox", Number: 7}, outcomeRoute{Harness: "codex", Model: "fixture-model", Effort: "high"}, run, retry, fixedNow)
 	return a, root
 }
@@ -102,7 +105,7 @@ func TestLaunchOutcomeNativeNotScreen(t *testing.T) {
 			h, _ := registrationHost(t, tc.mode)
 			r := registrationReceipt(t, "codex", Overrides{})
 			root := filepath.Dir(filepath.Dir(filepath.Dir(r.file)))
-			r.attempt = newLaunchAttempt(root, nil, true, "instance-live", strings.Repeat("d", 64), "assignment_"+strings.Repeat("e", 64),
+			r.attempt = newLaunchAttempt(root, nil, true, liveInstance, strings.Repeat("d", 64), "assignment_"+strings.Repeat("e", 64),
 				dispatchIssue{Repo: "fixture/inbox", Number: 7}, outcomeRoute{Harness: "codex"}, false, nil, time.Now)
 			r.attempt.begin()
 			_, _, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{}, r)
@@ -285,12 +288,12 @@ func TestRecoverLaunchAttempts(t *testing.T) {
 		root := privateTestRoot(t)
 		p := base(strings.Repeat("1", 64))
 		writeProgress(t, root, p)
-		recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+		recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 		o, raw := readOutcome(t, root, p.AttemptID)
 		if o.ReasonCode != "launch-interrupted" || o.Signal != "orchid-recovery" || o.Phase != "registration" || o.Effects != "possible" || !reflect.DeepEqual(o.Evidence, []string{"registered"}) {
 			t.Fatalf("interrupted attempt misreported: %+v", o)
 		}
-		recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow().Add(time.Hour))
+		recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow().Add(time.Hour))
 		if _, again := readOutcome(t, root, p.AttemptID); !bytes.Equal(again, raw) {
 			t.Fatal("recovery rewrote a published outcome")
 		}
@@ -298,9 +301,9 @@ func TestRecoverLaunchAttempts(t *testing.T) {
 	t.Run("live-instance-untouched", func(t *testing.T) {
 		root := privateTestRoot(t)
 		p := base(strings.Repeat("2", 64))
-		p.Instance = "instance-live"
+		p.Instance = liveInstance
 		writeProgress(t, root, p)
-		recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+		recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 		if _, err := os.Stat(attemptFile(root, "outcome", p.AttemptID)); !os.IsNotExist(err) {
 			t.Fatal("recovery decided live work")
 		}
@@ -308,11 +311,11 @@ func TestRecoverLaunchAttempts(t *testing.T) {
 	t.Run("decided-backlog-publishes-frozen-bytes", func(t *testing.T) {
 		root := privateTestRoot(t)
 		p := base(strings.Repeat("3", 64))
-		p.Instance = "instance-live"
+		p.Instance = liveInstance
 		frozen, _ := json.Marshal(decideOutcome(p, errMatrix, "2026-10-05T00:00:01.000Z"))
 		p.Decision = &attemptDecision{Bytes: string(frozen), ObservedAt: "2026-10-05T00:00:01.000Z"}
 		writeProgress(t, root, p)
-		recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+		recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 		if _, raw := readOutcome(t, root, p.AttemptID); !bytes.Equal(raw, frozen) {
 			t.Fatal("backlog publication changed the decided bytes")
 		}
@@ -327,7 +330,7 @@ func TestRecoverLaunchAttempts(t *testing.T) {
 		p.Decision = &attemptDecision{Bytes: string(frozen), ObservedAt: "2026-10-05T00:00:01.000Z"}
 		writeProgress(t, root, p)
 		_ = writePrivateJSON(attemptFile(root, "outcome", p.AttemptID), ".o-", nil, json.RawMessage(frozen))
-		recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+		recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 		if _, err := os.Stat(attemptFile(root, "attempt", p.AttemptID)); !os.IsNotExist(err) {
 			t.Fatal("identical visible outcome did not complete")
 		}
@@ -340,7 +343,7 @@ func TestRecoverLaunchAttempts(t *testing.T) {
 		writeProgress(t, root, p)
 		other := []byte(`{"conflict":true}`)
 		_ = os.WriteFile(attemptFile(root, "outcome", p.AttemptID), other, 0600)
-		recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+		recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 		if b, _ := os.ReadFile(attemptFile(root, "outcome", p.AttemptID)); !bytes.Equal(b, other) {
 			t.Fatal("conflicting outcome replaced")
 		}
@@ -355,10 +358,10 @@ func TestLaunchSnapshot(t *testing.T) {
 	root := privateTestRoot(t)
 	now := fixedNow()
 	hb := func(at time.Time, stopping bool) {
-		_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: "instance-live", StartedAt: stamp(now), ObservedAt: stamp(at), Stopping: stopping})
+		_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: liveInstance, StartedAt: stamp(now), ObservedAt: stamp(at), Stopping: stopping})
 	}
 	live := attemptProgress{SchemaVersion: 1, AttemptID: attemptIDFor(strings.Repeat("6", 64)), ActionDispatchID: actionOpaque("assignment", "orchid-"+strings.Repeat("6", 64)),
-		Issue: dispatchIssue{Repo: "fixture/inbox", Number: 594}, Stage: "registration", Instance: "instance-live", StartedAt: stamp(now.Add(-90 * time.Second))}
+		Issue: dispatchIssue{Repo: "fixture/inbox", Number: 594}, Stage: "registration", Instance: liveInstance, StartedAt: stamp(now.Add(-90 * time.Second))}
 	writeProgress(t, root, live)
 	dead := live
 	dead.AttemptID, dead.Instance = attemptIDFor(strings.Repeat("7", 64)), "instance-dead"
@@ -443,7 +446,7 @@ func TestMatrixAttemptPublishesOutcome(t *testing.T) {
 			root := privateTestRoot(t)
 			cfg := &Config{Inbox: "example/inbox", Matrix: MatrixConfig{Source: root, ReceiptRoot: root, Revision: strings.Repeat("b", 40), LaunchOutcomes: true,
 				TargetRevisions: map[string]string{"example/project": strings.Repeat("c", 40)}}, Governor: Gov{WeeklyCeiling: 92}}
-			c := &Coord{cfg: cfg, st: loadState(filepath.Join(root, "state.json")), instance: "instance-live"}
+			c := &Coord{cfg: cfg, st: loadState(filepath.Join(root, "state.json")), instance: liveInstance}
 			now := time.Now()
 			c.gov.q = map[string]quota{"claude": {ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: now.Add(time.Hour).Unix()}, seven: RateLimit{UsedPct: 20, ResetsAt: now.Add(2 * time.Hour).Unix()}}}
 			is := Issue{ID: "synthetic-node", Number: 1, Title: "Synthetic", Body: "/swarm\ntier: feature\nrole: implementation\n\nSynthetic task"}
@@ -619,7 +622,7 @@ func TestRecoverRepublishesAdmission(t *testing.T) {
 	restore()
 	a.p.Instance = "instance-dead"
 	writeProgress(t, root, a.p)
-	recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+	recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 	raw, err := os.ReadFile(attemptFile(root, "admitted", a.p.AttemptID))
 	want, _ := admissionBytes(a.p)
 	if err != nil || !bytes.Equal(raw, want) {
@@ -635,7 +638,7 @@ func TestRecoverRepublishesAdmission(t *testing.T) {
 // Stopping is sticky and turns the snapshot unknown.
 func TestHeartbeatFreshDuringLongLaunchAndStoppingSticky(t *testing.T) {
 	root := privateTestRoot(t)
-	c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, instance: "instance-live"}
+	c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, instance: liveInstance}
 	held := time.Now().Add(-3 * time.Minute) // longer than the two-minute start budget
 	a := newLaunchAttempt(root, nil, false, c.instance, strings.Repeat("d", 64), "assignment_"+strings.Repeat("e", 64),
 		dispatchIssue{Repo: "fixture/inbox", Number: 7}, outcomeRoute{Harness: "codex"}, false, nil, func() time.Time { return held })
@@ -726,13 +729,151 @@ func TestRecoverPublishesOnlyDurableDecisions(t *testing.T) {
 	writeProgress(t, root, p)
 	orig := writeProgressRecord
 	writeProgressRecord = func(string, *receiptOwner, attemptProgress) error { return errMatrix }
-	recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow())
+	recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 	writeProgressRecord = orig
 	if _, err := os.Stat(attemptFile(root, "outcome", p.AttemptID)); !os.IsNotExist(err) {
 		t.Fatal("recovery published a decision that was not durable")
 	}
-	recoverLaunchAttempts(root, nil, true, "instance-live", fixedNow().Add(time.Minute))
+	recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow().Add(time.Minute))
 	if o, _ := readOutcome(t, root, p.AttemptID); o.ReasonCode != "launch-interrupted" || o.ObservedAt != stamp(fixedNow().Add(time.Minute)) {
 		t.Fatalf("recovery did not decide on the next pass: %+v", o)
+	}
+}
+
+// ---- REVIEW-o83 B1-B6 ----
+
+// B1: malformed or unreadable evidence, or an invalid producer identity, is
+// unknown (exit 2), never zero; a valid dead-instance record stays unresolved.
+func TestSnapshotInvalidEvidenceIsUnknown(t *testing.T) {
+	beat := func(root, instance string) {
+		_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: instance, StartedAt: stamp(time.Now()), ObservedAt: stamp(time.Now())})
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(root string)
+		exit  int
+	}{
+		{"clean-live", func(root string) { beat(root, liveInstance) }, 0},
+		{"truncated-attempt", func(root string) {
+			beat(root, liveInstance)
+			_ = os.WriteFile(attemptFile(root, "attempt", attemptIDFor(strings.Repeat("7", 64))), []byte(`{"schemaVersion":1,"attem`), 0600)
+		}, 2},
+		{"truncated-dispatch", func(root string) {
+			beat(root, liveInstance)
+			_ = os.MkdirAll(filepath.Join(root, "x", "record"), 0700)
+			_ = os.WriteFile(filepath.Join(root, "x", "record", "dispatch.json"), []byte(`{"state":"reser`), 0600)
+		}, 2},
+		{"unknown-dispatch-state", func(root string) {
+			beat(root, liveInstance)
+			_ = os.MkdirAll(filepath.Join(root, "x", "record"), 0700)
+			_ = os.WriteFile(filepath.Join(root, "x", "record", "dispatch.json"), []byte(`{"state":"other"}`), 0600)
+		}, 2},
+		{"empty-instance", func(root string) { beat(root, "") }, 2},
+		{"valid-dead-instance-record", func(root string) {
+			beat(root, liveInstance)
+			p := attemptProgress{SchemaVersion: 1, AttemptID: attemptIDFor(strings.Repeat("8", 64)), Stage: "registration", Instance: "fedcba9876543210fedcba9876543210", StartedAt: stamp(time.Now())}
+			writeProgress(t, root, p)
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := privateTestRoot(t)
+			tc.setup(root)
+			s := readLaunchSnapshot(root, time.Now())
+			if got := snapshotExit(s); got != tc.exit {
+				t.Fatalf("exit %d, want %d: %+v", got, tc.exit, s)
+			}
+			if tc.name == "valid-dead-instance-record" && (s.Unresolved != 1 || s.Invalid != 0) {
+				t.Fatalf("a valid dead-instance record was miscounted: %+v", s)
+			}
+		})
+	}
+}
+
+// B3: recovery makes a visible decision durable (directory sync) before it
+// publishes anything from it, and keeps the record when that sync fails.
+func TestRecoverSyncsVisibleDecisionBeforePublishing(t *testing.T) {
+	a, root := fixtureAttempt(t, true, false, nil)
+	a.begin()
+	a.finish(context.Background(), errMatrix)
+	frozen := a.p.Decision.Bytes
+	// The decision is visible as if its writer's directory sync had failed.
+	_ = os.Remove(attemptFile(root, "outcome", a.p.AttemptID))
+	a.p.Instance = "fedcba9876543210fedcba9876543210"
+	writeProgress(t, root, a.p)
+	orig := syncAttemptDir
+	syncAttemptDir = func(string) error { return errMatrix }
+	recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
+	syncAttemptDir = orig
+	if _, err := os.Stat(attemptFile(root, "outcome", a.p.AttemptID)); !os.IsNotExist(err) {
+		t.Fatal("published a decision whose durability was not established")
+	}
+	if _, ok := readAttemptProgress(attemptFile(root, "attempt", a.p.AttemptID)); !ok {
+		t.Fatal("record not kept for retry after a failed sync")
+	}
+	recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow().Add(time.Hour))
+	if _, raw := readOutcome(t, root, a.p.AttemptID); string(raw) != frozen {
+		t.Fatal("recovered publication changed the frozen decision")
+	}
+}
+
+// B4: a failing spawn records its own child context's end at the stage it
+// reached, and post-spawn registration is entered only after success.
+func TestSpawnFailureKeepsChildContextAndStage(t *testing.T) {
+	r := registrationReceipt(t, "claude", Overrides{})
+	r.attempt, _ = fixtureAttempt(t, false, false, nil)
+	r.attempt.begin()
+	h := Host{Name: "fixture-host", Home: t.TempDir()}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, _, err := h.spawnAgent(ctx, "fixture-agent", t.TempDir(), nil, "claude", Overrides{}, r); err == nil {
+		t.Fatal("spawn succeeded past an expired deadline")
+	}
+	ce := r.attempt.p.Facts.ContextEnded
+	if ce == nil || ce.Kind != "deadline" || ce.Stage != "workspace" {
+		t.Fatalf("child deadline or its stage lost: %+v stage=%s", ce, r.attempt.p.Stage)
+	}
+	if o := decideOutcome(r.attempt.p, errMatrix, "t"); o.ReasonCode != "deadline-exceeded" || o.Phase != "workspace" || o.Signal != "orchid-deadline" {
+		t.Fatalf("early spawn deadline misreported: %+v", o)
+	}
+	src := productionSources(t)["main.go"]
+	i := strings.Index(src, "pane, ws, err := host.spawnAgent(ctx, label, workdir, env, agent, ovr, receipt, is.Title)")
+	j := strings.Index(src, "attempt.enter(stageRegistration) // guard:registration-after-spawn")
+	k := strings.Index(src[i:], `return matrixSite("launch.registration", err)`)
+	if i < 0 || j < 0 || k < 0 || j < i+k || strings.Contains(src[i:i+k], "attempt.enter(stageRegistration)") {
+		t.Fatal("post-spawn registration is entered before the spawn error is handled")
+	}
+}
+
+// B5: accumulated native success facts decide; a later bookkeeping error never
+// discards a proved start.
+func TestDecideSuccessIgnoresLaterBookkeepingError(t *testing.T) {
+	run := attemptProgress{Run: true, Stage: "environment", Facts: attemptFacts{RunStarted: true}}
+	if o := decideOutcome(run, matrixSite("spawn.dispatched-binding", errMatrix), "t"); o.Outcome != "started" || o.Signal != "orchid-run" || o.Effects != "present" {
+		t.Fatalf("run start discarded: %+v", o)
+	}
+	agent := attemptProgress{Stage: "goal-confirmation", Facts: attemptFacts{Registered: true, GoalCommitted: true}}
+	if o := decideOutcome(agent, errMatrix, "t"); o.Outcome != "started" || o.Signal != "orchid-commit" {
+		t.Fatalf("committed start discarded: %+v", o)
+	}
+}
+
+// B2: the goal-commit success fact comes only from the native Remote Control
+// Codex commit; spawn records it right after a confirmation that did not refuse.
+func TestGoalCommitFactIsNativeOnly(t *testing.T) {
+	native, _ := fixtureAttempt(t, false, false, nil)
+	native.begin()
+	recordGoalCommit(native, true)
+	legacy, _ := fixtureAttempt(t, false, false, nil)
+	legacy.begin()
+	recordGoalCommit(legacy, false)
+	if !native.p.Facts.GoalCommitted || legacy.p.Facts.GoalCommitted {
+		t.Fatalf("goal-commit fact provenance wrong: native=%v legacy=%v", native.p.Facts.GoalCommitted, legacy.p.Facts.GoalCommitted)
+	}
+	src := productionSources(t)["main.go"]
+	i := strings.Index(src, `			return matrixReason("goal-prompt-unconfirmed")
+		}
+		recordGoalCommit(attempt, remoteCodex) // guard:fact-goal-committed`)
+	if i < 0 || strings.Count(src, "recordGoalCommit(") != 2 {
+		t.Fatal("spawn does not record the goal commit right after a non-refused confirmation")
 	}
 }

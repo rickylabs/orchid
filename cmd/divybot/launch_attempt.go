@@ -351,7 +351,9 @@ func (t *launchAttempt) goalCommitted() {
 func (t *launchAttempt) runStarted() { t.mark(func(f *attemptFacts) *bool { return &f.RunStarted }) }
 
 // decideOutcome is the one reduction from native facts and the last stage.
-func decideOutcome(p attemptProgress, launchErr error, observedAt string) launchOutcome {
+// Only accumulated native facts decide; the launch call's own return value does
+// not (later bookkeeping errors never discard a proved start).
+func decideOutcome(p attemptProgress, _ error, observedAt string) launchOutcome {
 	o := launchOutcome{SchemaVersion: 1, AttemptID: p.AttemptID, ActionDispatchID: p.ActionDispatchID, DispatchID: p.DispatchID,
 		PredecessorAttemptID: p.PredecessorAttemptID, RetryOperationID: p.RetryOperationID, Issue: p.Issue,
 		ResolvedRoute: p.ResolvedRoute, Evidence: p.Facts.evidence(), ObservedAt: observedAt,
@@ -362,10 +364,10 @@ func decideOutcome(p attemptProgress, launchErr error, observedAt string) launch
 	set := func(reason, signal string) launchOutcome { o.ReasonCode, o.Signal = reason, signal; return o }
 	f := p.Facts
 	switch {
-	case launchErr == nil && !p.Run && f.Registered && f.GoalCommitted: // guard:decide-success
+	case !p.Run && f.Registered && f.GoalCommitted: // guard:decide-success
 		o.Outcome, o.Effects, o.Phase = "started", "present", stageNames[stageGoalConfirmation]
 		return set("started", "orchid-commit")
-	case launchErr == nil && p.Run && f.RunStarted:
+	case p.Run && f.RunStarted: // guard:decide-run-success
 		o.Outcome, o.Effects, o.Phase = "started", "present", stageNames[stageEnvironment]
 		return set("started", "orchid-run")
 	case f.CodexClientUnmatched: // guard:decide-early-stop
@@ -483,6 +485,10 @@ func (t *launchAttempt) retry() {
 
 var errOutcomeConflict = errors.New("launch-outcome-conflict")
 
+// syncAttemptDir makes the attempt directory's entries durable (a seam for
+// failure tests).
+var syncAttemptDir = syncDirectory
+
 // publishRecord publishes one consumer record (a seam for failure tests).
 var publishRecord = publishOnce
 
@@ -570,6 +576,13 @@ func recoverLaunchAttempts(root string, owner *receiptOwner, publish bool, insta
 		if publish {
 			if body, err := admissionBytes(p); err == nil {
 				_ = publishRecord(root, attemptFile(root, "admitted", p.AttemptID), body, owner) // identical bytes, or the kept record
+			}
+		}
+		if p.Decision != nil {
+			// A visible decision may come from a write whose directory sync failed:
+			// make it durable before anything is published from it.
+			if syncAttemptDir(root) != nil { // guard:recover-sync-before-publish
+				continue
 			}
 		}
 		if p.Decision == nil {
@@ -751,7 +764,12 @@ type launchSnapshot struct {
 	Backlog    int             `json:"backlog"`
 	Unresolved int             `json:"unresolved"`
 	Untracked  []int           `json:"untracked"`
+	// Invalid counts unreadable or malformed records. Any invalid evidence makes
+	// the snapshot unknown: an incomplete observation never certifies zero work.
+	Invalid int `json:"invalid"`
 }
+
+var instancePattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 type snapshotEntry struct {
 	Issue      int    `json:"issue"`
@@ -765,7 +783,7 @@ func readLaunchSnapshot(root string, now time.Time) launchSnapshot {
 	s := launchSnapshot{Producer: "unknown", InFlight: []snapshotEntry{}, Untracked: []int{}}
 	var hb producerHeartbeat
 	live := false
-	if raw, err := os.ReadFile(filepath.Join(root, "producer.json")); err == nil && decodeNativeJSON(raw, &hb) == nil {
+	if raw, err := os.ReadFile(filepath.Join(root, "producer.json")); err == nil && decodeNativeJSON(raw, &hb) == nil && instancePattern.MatchString(hb.Instance) { // guard:snapshot-producer-identity
 		if at, err := time.Parse("2006-01-02T15:04:05.000Z", hb.ObservedAt); err == nil && !hb.Stopping && now.Sub(at) < heartbeatFresh && now.Sub(at) > -heartbeatFresh { // guard:snapshot-fresh
 			live = true
 			s.Producer = "live"
@@ -776,7 +794,7 @@ func readLaunchSnapshot(root string, now time.Time) launchSnapshot {
 	for _, path := range paths {
 		p, ok := readAttemptProgress(path)
 		if !ok {
-			s.Unresolved++
+			s.Invalid++ // guard:snapshot-invalid-attempt
 			continue
 		}
 		tracked[p.ActionDispatchID] = true
@@ -798,7 +816,16 @@ func readLaunchSnapshot(root string, now time.Time) launchSnapshot {
 	for _, path := range dirs {
 		raw, err := os.ReadFile(path)
 		var d dispatchBinding
-		if err != nil || json.Unmarshal(raw, &d) != nil || (d.State != "reserved" && d.State != "launching") {
+		if err != nil || json.Unmarshal(raw, &d) != nil {
+			s.Invalid++ // guard:snapshot-invalid-dispatch
+			continue
+		}
+		switch d.State {
+		case "reserved", "launching":
+		case "dispatched", "uncertain":
+			continue
+		default:
+			s.Invalid++
 			continue
 		}
 		if !tracked[actionOpaque("assignment", d.RunID)] {
@@ -832,8 +859,14 @@ func launchesCLI(args []string, stdout, stderr io.Writer) int {
 	}{s, len(loadState(cfg.StateFile).Jobs)}
 	body, _ := json.Marshal(out)
 	fmt.Fprintln(stdout, string(body))
+	return snapshotExit(s)
+}
+
+// snapshotExit is the CLI's verdict: 0 only for a live producer, valid evidence
+// and nothing in flight.
+func snapshotExit(s launchSnapshot) int {
 	switch {
-	case s.Producer != "live":
+	case s.Producer != "live" || s.Invalid > 0: // guard:cli-invalid-unknown
 		return 2
 	case len(s.InFlight) > 0 || len(s.Untracked) > 0:
 		return 3

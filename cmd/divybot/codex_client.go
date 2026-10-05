@@ -93,7 +93,8 @@ const codexClientCheck = `check() { r=$(readlink -f -- "$1" 2>/dev/null) || retu
 // the codex on the launch PATH. Nothing is installed, updated or restarted.
 func (h Host) resolveCodexClient(ctx context.Context, version string) (string, error) {
 	if !codexVersionPattern.MatchString(version) { // guard:client-version-valid
-		return "", errCodexClientUnmatched
+		// No valid daemon version was observed, so no installed client was compared.
+		return "", errCodexClientCheck
 	}
 	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH"; v=%s; want="codex-cli $v"
 %s
