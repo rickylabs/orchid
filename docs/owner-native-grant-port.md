@@ -52,7 +52,7 @@ The install request has these required, non-null, case-sensitive fields:
 | `operation_id` | Stable UUID; reuse it to reconcile an ambiguous reply. |
 | `approval_ref` | Safe filename stem selecting an operator-issued approval. |
 | `expected_issue_id`, `issue_number` | Exact GitHub node identity and inbox issue number. |
-| `target` | Configured target repository. The issue's target label must select it. |
+| `target` | Configured target repository. The issue must launch there (see below). |
 | `expected_brief_digest` | SHA-256 from the Go builder over its entire Title/Body JSON. |
 | `tier`, `role`, `profile` | Exact approved routing and profile scope. |
 | `ownerNativeOverride` | Existing Eric-authorized rationale and complete native route. |
@@ -121,7 +121,13 @@ Cockpit adapter.
 
 ## Durable publication and admission
 
-Installation requires OPEN, no `harness` trigger, and the expected target label.
+Installation requires OPEN, no `harness` trigger, and that the issue launches in the
+approved target. The target is resolved exactly as the launch resolves it: from the
+issue's labels with the `harness` trigger counted (it is applied only after the
+install, and it may itself be a target's label), the `repo:` key, and the binding
+title's source repository. An issue that would launch elsewhere, or nowhere, is
+refused with that reason in the operator log (for example `source-repo-mismatch` for
+a binding whose title names another repository and that has no `repo:` key).
 The Go builder validates the full policy and re-reads the issue before publishing.
 A private per-issue intent directory and immutable operation index are synced
 before the grant record. Both index and record use exclusive staging, file fsync,

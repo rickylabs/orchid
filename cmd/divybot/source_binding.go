@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -272,6 +273,7 @@ type sourceMemory struct {
 	pages     map[string]sourcePageSummary
 	issues    map[string]sourceIssueView
 	open      map[int]bool
+	ignored   map[int64]bool // /swarm comments already logged as ignored, bounded
 	repoTurn  int
 	checkTurn int
 	replyTurn int
@@ -290,7 +292,7 @@ func (c *Coord) sourceMem() *sourceMemory {
 	sourceMemoryInit.Lock()
 	defer sourceMemoryInit.Unlock()
 	if c.srcMem == nil {
-		c.srcMem = &sourceMemory{etags: map[string]string{}, pages: map[string]sourcePageSummary{}, issues: map[string]sourceIssueView{}, open: map[int]bool{}}
+		c.srcMem = &sourceMemory{etags: map[string]string{}, pages: map[string]sourcePageSummary{}, issues: map[string]sourceIssueView{}, open: map[int]bool{}, ignored: map[int64]bool{}}
 	}
 	return c.srcMem
 }
@@ -335,6 +337,36 @@ func sourceTriggerBody(raw string) (body string, trigger bool, encodingOK bool) 
 		return body, false, false
 	}
 	return body, true, !strings.Contains(body, "\r")
+}
+
+// cockpitLaunchMarker is the launch identity the Cockpit writes as the last
+// line of a launch comment. Only such a comment can trigger on a pull request.
+var cockpitLaunchMarker = regexp.MustCompile(`^<!-- cockpit:launch v1 [0-9a-f]{32} -->$`)
+
+// sourceIgnoredLogLimit bounds the per-process memory of ignored comments.
+const sourceIgnoredLogLimit = 4096
+
+func hasCockpitLaunchMarker(body string) bool {
+	lines := strings.Split(strings.TrimRight(body, " \t\n"), "\n")
+	return cockpitLaunchMarker.MatchString(strings.TrimRight(lines[len(lines)-1], " \t")) // guard:source-pr-marker-last-line
+}
+
+// ignoreSource logs once per comment why a /swarm comment is not a trigger: an
+// owner's /swarm is never ignored silently, and a re-read never logs again.
+func (c *Coord) ignoreSource(repo string, cm sourceComment, reason string) {
+	mem := c.sourceMem()
+	mem.mu.Lock()
+	seen := mem.ignored[cm.ID]
+	if !seen {
+		if len(mem.ignored) >= sourceIgnoredLogLimit {
+			mem.ignored = map[int64]bool{}
+		}
+		mem.ignored[cm.ID] = true
+	}
+	mem.mu.Unlock()
+	if !seen { // guard:source-ignored-once
+		log.Printf("source triggers: %s comment %d ignored: %s", repo, cm.ID, reason)
+	}
 }
 
 func sourceIssueNumber(issueURL string) int {
@@ -535,8 +567,9 @@ func (c *Coord) scanSourceRepo(ctx context.Context, repo string, now time.Time, 
 // trigger created after this repository's first scan. It returns false only
 // when the comment must be read again (a transient failure).
 func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sourceIssueView, error), repo string, cm sourceComment, now, start time.Time) bool {
-	if cm.ID <= 0 || strings.Contains(cm.HTMLURL, "/pull/") {
-		return true // PR conversation comments share the feed; never a trigger
+	if cm.ID <= 0 {
+		log.Printf("source triggers: %s comment without an id ignored", repo)
+		return true
 	}
 	key := int(cm.ID)
 	c.st.mu.Lock()
@@ -545,28 +578,38 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 	if bound { // guard:source-once
 		return true // edits and re-reads never relaunch
 	}
-	if cm.AuthorID != ownerGitHubID { // guard:source-owner
-		return true
-	}
 	body, trigger, encodingOK := sourceTriggerBody(cm.Body)
 	if !trigger {
+		return true // conversation, not a /swarm comment
+	}
+	if cm.AuthorID != ownerGitHubID { // guard:source-owner
+		c.ignoreSource(repo, cm, "not written by the owner")
+		return true
+	}
+	// A pull request's conversation shares the feed. Only a Cockpit launch there
+	// is a trigger: plain PR comments, /swarm or not, never launch.
+	marked := hasCockpitLaunchMarker(body)
+	if strings.Contains(cm.HTMLURL, "/pull/") && !marked { // guard:source-pr-needs-marker
+		c.ignoreSource(repo, cm, "a pull request comment without the Cockpit launch marker")
 		return true
 	}
 	// A trigger is a new comment: never one written before the first scan, never
 	// an edited one, and never one first seen long after it was written.
 	if !cm.UpdatedAt.Equal(cm.CreatedAt) { // guard:source-unedited
-		log.Printf("source triggers: %s comment %d was edited; an edited comment is never a trigger", repo, cm.ID)
+		c.ignoreSource(repo, cm, "it was edited; an edited comment is never a trigger")
 		return true
 	}
 	if cm.CreatedAt.Before(start) { // guard:source-after-start
+		c.ignoreSource(repo, cm, "it was written before this repository's first scan")
 		return true
 	}
 	if now.Sub(cm.CreatedAt) > sourceTriggerFreshness { // guard:source-fresh
-		log.Printf("source triggers: %s comment %d is older than %s; not a trigger", repo, cm.ID, sourceTriggerFreshness)
+		c.ignoreSource(repo, cm, fmt.Sprintf("it is older than %s", sourceTriggerFreshness))
 		return true
 	}
 	n := sourceIssueNumber(cm.IssueURL)
 	if n == 0 {
+		c.ignoreSource(repo, cm, "its issue number could not be read")
 		return true
 	}
 	view, err := lookup(n)
@@ -574,7 +617,8 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 		log.Printf("source triggers: %s#%d unreadable: %v", repo, n, err)
 		return false
 	}
-	if view.PR {
+	if view.PR && !marked { // guard:source-pr-view-needs-marker
+		c.ignoreSource(repo, cm, "a pull request comment without the Cockpit launch marker")
 		return true
 	}
 	b := &sourceBinding{Repo: repo, Issue: n, Comment: cm.ID, IssueID: view.NodeID, Title: view.Title, Body: body, URL: cm.HTMLURL, CreatedAt: cm.CreatedAt}

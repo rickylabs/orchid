@@ -266,7 +266,7 @@ func (s *ownerNativeGrantStore) subjectCurrent(subject ownerNativeSubject, bound
 	if subject.comment {
 		return current.State == "OPEN" && bound.Issue.ID == current.Issue.ID && bound.Issue.Number == current.Issue.Number
 	}
-	return ownerNativeIssueMatches(bound, current, inert) && s.targetMatches(current.Labels, repo)
+	return ownerNativeIssueMatches(bound, current, inert) && s.targetMatches(current.Issue, current.Labels, repo)
 }
 
 func (s *ownerNativeGrantStore) healthy() bool {
@@ -355,13 +355,27 @@ func (s *ownerNativeGrantStore) fetchIssueIn(ctx context.Context, repo string, n
 	return out, nil
 }
 
-func (s *ownerNativeGrantStore) targetMatches(labels []string, repo string) bool {
-	for _, target := range s.cfg.Targets {
-		if containsString(labels, target.Label) {
-			return !target.Disabled && target.Repo == repo
-		}
+// ownerNativeTrigger is the inbox trigger label. An inbox issue launches only
+// once it carries it, and an install requires it absent, so the target a grant
+// approves is resolved with it counted, exactly as the launch will resolve it.
+const ownerNativeTrigger = "harness"
+
+// targetResolution is the target the issue launches in, resolved like the
+// launch itself (labels with the trigger, the repo key, the binding title), or
+// the plain reason it resolves to none.
+func (s *ownerNativeGrantStore) targetResolution(is Issue, labels []string) (Target, string) {
+	is.Labels = append(append([]string{}, labels...), ownerNativeTrigger) // guard:grant-target-trigger-label
+	tgt, reason, ok := resolveTargetIn(s.cfg.Targets, is)
+	if !ok {
+		return Target{}, "no-target-label"
 	}
-	return false
+	return tgt, reason
+}
+
+// targetMatches: the issue resolves, with no refusal, to exactly this enabled target.
+func (s *ownerNativeGrantStore) targetMatches(is Issue, labels []string, repo string) bool {
+	tgt, reason := s.targetResolution(is, labels)
+	return reason == "" && !tgt.Disabled && tgt.Repo == repo // guard:grant-target-resolves
 }
 
 func ownerNativeIssueMatches(bound ownerNativeIssue, current ownerNativeIssue, inert bool) bool {
@@ -388,8 +402,12 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the inbox issue is not the approved issue")
 	case briefDigest(is.Issue) != r.ExpectedBriefDigest:
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the brief changed after it was approved")
-	case !s.targetMatches(is.Labels, r.Target):
-		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue's target label does not name the approved target")
+	case !s.targetMatches(is.Issue, is.Labels, r.Target):
+		tgt, reason := s.targetResolution(is.Issue, is.Labels)
+		if reason == "" {
+			reason = "resolves to " + tgt.Repo
+		}
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue does not launch in the approved target (" + reason + ")")
 	}
 	found := false
 	for _, t := range s.cfg.Targets {
@@ -494,7 +512,7 @@ func (s *ownerNativeGrantStore) recordValid(record ownerNativeGrantRecord) bool 
 	if profile == "" {
 		profile = "leaf"
 	}
-	if !found || profile != record.Request.Profile || !s.targetMatches(record.Issue.Labels, record.Request.Target) {
+	if !found || profile != record.Request.Profile || !s.targetMatches(record.Issue.Issue, record.Issue.Labels, record.Request.Target) {
 		return false
 	}
 	if record.SchemaVersion != 1 || record.Inbox != s.cfg.Inbox || record.MatrixRevision != s.cfg.Matrix.Revision || record.TargetRevision != s.cfg.Matrix.TargetRevisions[record.Request.Target] || !ownerNativeRequestValid(record.Request) ||
@@ -847,7 +865,7 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 		if e != nil || ownerNativeStrictJSON(recordRaw, &history) != nil || shaText(recordRaw) != intent.RecordChecksum || history.Request.OperationID != intent.OperationID || s.requestSubject(history.Request) != subject {
 			return MatrixConfig{}, matrixReason("override-invalid")
 		}
-		if history.Grant.IssueID == is.ID && history.Grant.Repo == repo && history.Grant.BriefDigest == briefDigest(is) && s.targetMatches(is.Labels, repo) {
+		if history.Grant.IssueID == is.ID && history.Grant.Repo == repo && history.Grant.BriefDigest == briefDigest(is) && s.targetMatches(is, is.Labels, repo) {
 			record, _, e := s.readRecordLocked(intent.OperationID)
 			if e != nil || !reflect.DeepEqual(s.active[intent.OperationID], record) {
 				return MatrixConfig{}, matrixReason("override-invalid")
