@@ -84,6 +84,7 @@ func parseOverrides(text string) Overrides {
 		return o
 	}
 	seenRouting := map[string]bool{}
+	repoDeclared := false
 	var prompt []string
 	inKV := true
 	for _, l := range lines[start:] {
@@ -98,6 +99,9 @@ func parseOverrides(text string) Overrides {
 			if emptyGoalBudgetKey.MatchString(t) {
 				o.MaxTokensPresent = true
 			} // Detect invalid explicit emptiness without changing prompt parsing.
+			if emptyRepoKey.MatchString(t) { // guard:repo-empty-declaration
+				o.RepoInvalid = true // an empty repo declaration refuses; the line still falls to the prompt
+			}
 			if m := swarmKV.FindStringSubmatch(t); m != nil {
 				key := strings.ReplaceAll(m[1], "_", "-")
 				val := strings.TrimSpace(strings.SplitN(m[2], "#", 2)[0]) // strip trailing comment
@@ -136,9 +140,12 @@ func parseOverrides(text string) Overrides {
 				case "profile":
 					o.Profile = val
 				case "repo":
-					if o.Repo != "" || !repositoryName.MatchString(val) {
+					// The raw value is validated before comment splitting: a "#n",
+					// comment or any other suffix refuses rather than being stripped.
+					if repoDeclared || !repositoryName.MatchString(strings.TrimSpace(m[2])) { // guard:repo-raw-value
 						o.RepoInvalid = true
 					}
+					repoDeclared = true
 					o.Repo = val
 				case "timeout":
 					if d, err := time.ParseDuration(val); err == nil && d > 0 {
@@ -156,6 +163,9 @@ func parseOverrides(text string) Overrides {
 }
 
 var errCodexEffort = matrixReason("codex-effort-invalid")
+
+// emptyRepoKey is a syntactically present repo declaration with no value.
+var emptyRepoKey = regexp.MustCompile(`^repo\s*:$`)
 
 // The matrix input vocabulary is Harness packages/routing/matrix/contract.ts EFFORTS.
 // This validates input, not model capability: independent observation still
