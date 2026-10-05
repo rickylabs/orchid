@@ -49,6 +49,8 @@ func finalPublicationFixture(t *testing.T) (*Coord, *Job, *string, *int, *finalP
 		}
 		posts++
 		comment.Body = body
+		// GitHub stamps a comment when it is posted, never before the publication began.
+		comment.CreatedAt = time.Now().Truncate(time.Second)
 		return comment.ID, nil
 	}
 	c.finalCalls.comment = func(context.Context, dispatchIssue, int64) (finalPostedComment, error) { return comment, nil }
