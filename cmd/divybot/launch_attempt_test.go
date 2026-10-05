@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1254,6 +1255,81 @@ func TestUnknownPhaseIsNeverFinished(t *testing.T) {
 				}
 				if _, err := os.Stat(attemptFile(root, "outcome", p.AttemptID)); !os.IsNotExist(err) {
 					t.Fatal("recovery published an unknown phase")
+				}
+			})
+		}
+	}
+}
+
+// ---- REVIEW-o83f: a null, missing or other-typed phase source is never finished ----
+
+func TestNullOrMissingPhaseSourceIsNeverFinished(t *testing.T) {
+	type edit func(top map[string]any)
+	facts := func(top map[string]any) map[string]any { return top["facts"].(map[string]any) }
+	ended := func(top map[string]any) map[string]any { return facts(top)["contextEnded"].(map[string]any) }
+	for _, tc := range []struct {
+		name  string
+		stage string
+		ce    *attemptContextEnd
+		herdr string
+		edit  edit
+		exit  int
+	}{
+		{"progress-stage-empty-string", "", nil, "", nil, 0},
+		{"progress-stage-null", "", nil, "", func(top map[string]any) { top["stage"] = nil }, 2},
+		{"progress-stage-missing", "", nil, "", func(top map[string]any) { delete(top, "stage") }, 2},
+		{"progress-stage-number", "", nil, "", func(top map[string]any) { top["stage"] = 7 }, 2},
+		{"context-stage-empty-string", "registration", &attemptContextEnd{Kind: "deadline"}, "", nil, 0},
+		{"context-stage-null", "registration", &attemptContextEnd{Kind: "deadline"}, "", func(top map[string]any) { ended(top)["stage"] = nil }, 2},
+		{"context-stage-missing", "registration", &attemptContextEnd{Kind: "deadline"}, "", func(top map[string]any) { delete(ended(top), "stage") }, 2},
+		{"context-kind-null", "registration", &attemptContextEnd{Kind: "deadline"}, "", func(top map[string]any) { ended(top)["kind"] = nil }, 2},
+		{"context-shutdown-null", "registration", &attemptContextEnd{Kind: "deadline"}, "", func(top map[string]any) { ended(top)["shutdown"] = nil }, 2},
+		{"herdr-error-null", "registration", nil, "timeout", func(top map[string]any) { facts(top)["herdrStartError"] = nil }, 2},
+		{"facts-missing", "registration", nil, "", func(top map[string]any) { delete(top, "facts") }, 2},
+	} {
+		for _, publish := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/publish=%v", tc.name, publish), func(t *testing.T) {
+				root := privateTestRoot(t)
+				_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: liveInstance, StartedAt: stamp(time.Now()), ObservedAt: stamp(time.Now())})
+				key := strings.Repeat("c", 64)
+				writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"dispatched"}`)
+				p := completeProgress("fedcba9876543210fedcba9876543210", nil)
+				p.Stage, p.Facts = tc.stage, attemptFacts{ContextEnded: tc.ce, HerdrStartError: tc.herdr}
+				body, _ := json.Marshal(decideOutcome(p, nil, stamp(fixedNow())))
+				p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
+				raw, _ := json.Marshal(p)
+				if tc.edit != nil {
+					var top map[string]any
+					_ = json.Unmarshal(raw, &top)
+					tc.edit(top)
+					raw, _ = json.Marshal(top)
+				}
+				if os.WriteFile(attemptFile(root, "attempt", p.AttemptID), raw, 0600) != nil {
+					t.Fatal("fixture")
+				}
+				if s := readLaunchSnapshot(root, time.Now()); snapshotExit(s) != tc.exit {
+					t.Fatalf("initial exit %d, want %d: %+v", snapshotExit(s), tc.exit, s)
+				}
+				var logs bytes.Buffer
+				old := log.Writer()
+				log.SetOutput(&logs)
+				recoverLaunchAttempts(root, nil, publish, liveInstance, fixedNow())
+				recoverLaunchAttempts(root, nil, publish, "0123456789abcdef0123456789abcdee", fixedNow())
+				log.SetOutput(old)
+				if tc.exit == 0 {
+					return
+				}
+				if s := readLaunchSnapshot(root, time.Now()); snapshotExit(s) != 2 || s.UnknownReason != "evidence-invalid" {
+					t.Fatalf("recovery certified a typeless phase: %+v", s)
+				}
+				if _, err := os.Stat(attemptFile(root, "attempt", p.AttemptID)); err != nil {
+					t.Fatal("recovery removed the record")
+				}
+				if _, err := os.Stat(attemptFile(root, "outcome", p.AttemptID)); !os.IsNotExist(err) {
+					t.Fatal("recovery published the record")
+				}
+				if !strings.Contains(logs.String(), "launch attempt record invalid; kept for operator inspection") {
+					t.Fatal("kept record not logged")
 				}
 			})
 		}

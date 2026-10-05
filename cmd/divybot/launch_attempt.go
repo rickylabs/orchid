@@ -558,7 +558,51 @@ func readAttemptProgress(path string) (attemptProgress, bool) {
 		filepath.Base(path) != "attempt-"+shaText([]byte(p.AttemptID))+".json" {
 		return p, false
 	}
+	if !phaseSourcesTyped(raw) { // guard:progress-phase-types
+		return p, false
+	}
 	return p, true
+}
+
+// jsonKind reports a raw JSON value's type from its first byte.
+func jsonKind(v json.RawMessage) byte {
+	t := bytes.TrimSpace(v)
+	if len(t) == 0 {
+		return 0
+	}
+	return t[0]
+}
+
+// phaseSourcesTyped checks, before decoding loses the wire types, that every
+// phase source is what the collector writes: stage always present as a JSON
+// string (empty before any stage), and a context end with string kind and
+// stage and a boolean shutdown. A null, missing or other-typed source is not
+// the collector's and is never finished.
+func phaseSourcesTyped(raw []byte) bool {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(raw, &top) != nil {
+		return false
+	}
+	if stage, ok := top["stage"]; !ok || jsonKind(stage) != '"' {
+		return false
+	}
+	var facts map[string]json.RawMessage
+	if json.Unmarshal(top["facts"], &facts) != nil {
+		return false
+	}
+	if e, ok := facts["herdrStartError"]; ok && jsonKind(e) != '"' {
+		return false
+	}
+	ended, ok := facts["contextEnded"]
+	if !ok || jsonKind(ended) == 'n' {
+		return true
+	}
+	var ce map[string]json.RawMessage
+	if json.Unmarshal(ended, &ce) != nil || jsonKind(ce["kind"]) != '"' || jsonKind(ce["stage"]) != '"' {
+		return false
+	}
+	shutdown := jsonKind(ce["shutdown"])
+	return shutdown == 't' || shutdown == 'f'
 }
 
 // recoverLaunchAttempts completes publication for decided attempts and decides
