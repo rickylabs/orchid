@@ -35,9 +35,14 @@ var shadowCapabilities = map[shadowSource]map[shadowFact][]string{
 		shadowActivity:    {"working"},
 		shadowTurnOutcome: {"completed", "failed", "interrupted"},
 	},
+	// Claude's own per-process session record (see native_claude_bridge.go):
+	// bridge identity metadata only, never a connection.
+	shadowClaudeSession: {
+		shadowBridgeIdentity: {"present", "absent"},
+	},
 }
 
-var shadowSourceVendor = map[shadowSource]string{shadowCodexCanonical: "codex"}
+var shadowSourceVendor = map[shadowSource]string{shadowCodexCanonical: "codex", shadowClaudeSession: "claude"}
 
 const (
 	shadowLiveWindow  = remoteControlFreshness
@@ -235,6 +240,9 @@ func (r *shadowReducer) decide(fact shadowFact, now time.Time) shadowVerdict {
 	if fact == shadowAttachment {
 		return unknown(r.binding.Vendor + "-tui-attachment-unproven")
 	}
+	if fact == shadowConnection && r.binding.Vendor == "claude" { // guard:claude-connection-no-official-surface
+		return unknown("no-official-surface")
+	}
 	var src shadowSource
 	for s, vendor := range shadowSourceVendor {
 		if vendor == r.binding.Vendor {
@@ -288,7 +296,7 @@ var shadowKnownInputs = map[string]bool{shadowInputHerdrAgent: true, shadowInput
 
 var shadowSiteFacts = map[string][]shadowFact{
 	shadowSiteRemoteHook: {shadowAttachment, shadowActivity},
-	shadowSiteConnection: {shadowConnection, shadowActivity},
+	shadowSiteConnection: {shadowConnection, shadowActivity, shadowBridgeIdentity},
 	// Its native verdict is computed at the call site from native inputs only
 	// (compareNative), not from the reducer.
 	shadowSiteGoalReadiness: {shadowReadiness},
@@ -315,6 +323,8 @@ type shadowScopeState struct {
 }
 
 type nativeEvidenceShadow struct {
+	bg          sync.WaitGroup  // background native reads (tests wait on it)
+	inflight    map[string]bool // one background read per scope and source
 	mu          sync.Mutex
 	now         func() time.Time
 	invocations uint64
@@ -437,6 +447,45 @@ func (p *shadowPublisher) turn(thread, id, status string) {
 }
 
 // Daemon remote-control status read; positive and negative are both evidence.
+func (p *shadowPublisher) bridgeIdentity(present bool) {
+	if p == nil {
+		return
+	}
+	value := "absent"
+	if present {
+		value = "present"
+	}
+	p.publish(shadowBridgeIdentity, value, p.thread, "")
+}
+
+// begin claims the one background read of name for this scope.
+func (sc *nativeShadowScope) begin(name string) bool {
+	if sc == nil || sc.shadow == nil {
+		return false
+	}
+	s := sc.shadow
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight == nil {
+		s.inflight = map[string]bool{}
+	}
+	key := sc.key + "\x00" + name
+	if s.inflight[key] {
+		return false
+	}
+	s.inflight[key] = true
+	s.bg.Add(1)
+	return true
+}
+
+func (sc *nativeShadowScope) end(name string) {
+	s := sc.shadow
+	s.mu.Lock()
+	delete(s.inflight, sc.key+"\x00"+name)
+	s.mu.Unlock()
+	s.bg.Done()
+}
+
 func (p *shadowPublisher) connection(connected bool) {
 	if p == nil {
 		return
