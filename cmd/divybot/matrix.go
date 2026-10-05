@@ -164,6 +164,11 @@ var matrixBridge string
 
 func shaText(b []byte) string { d := sha256.Sum256(b); return hex.EncodeToString(d[:]) }
 func briefDigest(is Issue) string {
+	if is.Source != nil {
+		// A comment binding's brief is the trigger comment alone, hashed as its exact
+		// bytes, so the Cockpit can bind an owner grant before posting it.
+		return shaText([]byte(is.Body))
+	}
 	b, _ := json.Marshal(struct{ Title, Body string }{is.Title, is.Body})
 	return shaText(b)
 }
@@ -894,9 +899,10 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		o.Effort = "" // Native default is an omitted flag, not a Harness effort substitution.
 	}
 	if agent == "codex" {
+		home := c.issueHome(n)
 		assignment := is
-		assignment.Number = n
-		if _, e := nativeGoalIntent(c.cfg.Inbox, assignment, o); e != nil {
+		assignment.Number = home.Number
+		if _, e := nativeGoalIntent(home.Repo, assignment, o); e != nil {
 			return refuse(closedGoalReason(e))
 		}
 	}
@@ -941,7 +947,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return "", false
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
-		Issue: dispatchIssue{Repo: c.cfg.Inbox, Number: n}, Source: route.Transport,
+		Issue: c.issueHome(n), Source: route.Transport,
 		Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
 		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}

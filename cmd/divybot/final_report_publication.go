@@ -116,7 +116,7 @@ func (c *Coord) finalScope(j *Job) (string, finalReportScope, error) {
 	if err != nil || finalPrivateRead(dir, "scope.json", &s) != nil {
 		return "", s, errFinalPublication
 	}
-	if s.SchemaVersion != 1 || s.Key != j.DispatchKey || s.Destination.Repo != c.cfg.Inbox || s.Destination.Number != j.Issue ||
+	if s.SchemaVersion != 1 || s.Key != j.DispatchKey || s.Destination != jobHome(c.cfg.Inbox, j) ||
 		!repositoryName.MatchString(s.Destination.Repo) || s.Destination.Number < 1 || s.Host != j.Host || s.Source != j.Agent || s.Repo != j.Repo ||
 		!filepath.IsAbs(s.Cwd) || filepath.Clean(s.Cwd) != s.Cwd || !digestPattern.MatchString(s.BindingDigest) || !digestPattern.MatchString(s.DispatchDigest) {
 		return "", s, errFinalPublication

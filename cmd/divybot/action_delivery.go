@@ -512,7 +512,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	var dispatch dispatchBinding
 	if err := readPrivateActionJSON(filepath.Join(record, "dispatch.json"), &dispatch); err != nil ||
 		dispatch.SchemaVersion != 1 || dispatch.State != "dispatched" || dispatch.RunID != runID ||
-		dispatch.Issue.Repo != c.cfg.Inbox || dispatch.Issue.Number != j.Issue ||
+		dispatch.Issue != jobHome(c.cfg.Inbox, j) ||
 		dispatch.Location == nil || dispatch.Location.PaneID != j.Pane || dispatch.Location.WorkspaceID != j.Workspace ||
 		dispatch.Host != j.Host {
 		r.Reason = "dispatch_receipt_unavailable"
