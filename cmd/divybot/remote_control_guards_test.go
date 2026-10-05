@@ -175,17 +175,7 @@ func TestRemoteControlRPCScopes(t *testing.T) {
 	}
 }
 
-func TestRemoteControlClaudeConnectedProof(t *testing.T) {
-	for _, screen := range []string{"/rc active", "/rc active · synthetic status", "/remote-control is active · Continue here, on your phone, or at synthetic target"} {
-		if !claudeRemoteConnected(screen) {
-			t.Fatal("native connected footer refused")
-		}
-	}
-	for _, screen := range []string{"", "/rc", "requested remote control", "Enable Remote Control", "/rc activeish", "/rc active\nRemote Control failed", "/rc active\nCouldn't reconnect", "quoted: /rc active", "quoted: /remote-control is active", "/remote-control is active"} {
-		if claudeRemoteConnected(screen) {
-			t.Fatal("absent or failed remote control certified connected")
-		}
-	}
+func TestRemoteControlSessionNameForm(t *testing.T) {
 	if _, err := remoteSessionName(0, "task"); err == nil {
 		t.Fatal("unnamed issue accepted")
 	}
@@ -582,7 +572,7 @@ func TestRemoteControlObservationEnvelopeAndRevocation(t *testing.T) {
 		t.Fatal("fixture dispatch unavailable")
 	}
 	path := filepath.Join(filepath.Dir(r.file), "remote-control.json")
-	if writeRemoteObservation(context.Background(), r, "codex", run, "connected", "", &run.Name) != nil {
+	if writeRemoteObservation(context.Background(), r, "codex", run, "connected", "", &run.Name, nil) != nil {
 		t.Fatal("native observation refused")
 	}
 	var row remoteControlObservation
@@ -596,7 +586,7 @@ func TestRemoteControlObservationEnvelopeAndRevocation(t *testing.T) {
 	if e != nil || e2 != nil || until.Sub(at) != 30*time.Second || info.Mode().Perm() != 0600 {
 		t.Fatal("private observation privacy/freshness changed")
 	}
-	if writeRemoteObservation(context.Background(), r, "codex", run, "unconfirmed", "remote-control-unconfirmed", nil) != nil {
+	if writeRemoteObservation(context.Background(), r, "codex", run, "unconfirmed", "remote-control-unconfirmed", nil, nil) != nil {
 		t.Fatal("refusal unavailable")
 	}
 	b, _ = os.ReadFile(path)
@@ -606,15 +596,15 @@ func TestRemoteControlObservationEnvelopeAndRevocation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if writeRemoteObservation(ctx, r, "codex", run, "connected", "", &run.Name) == nil {
+	if writeRemoteObservation(ctx, r, "codex", run, "connected", "", &run.Name, nil) == nil {
 		t.Fatal("cancelled observation published")
 	}
 	for _, state := range []string{"enabled", "ready", "failed"} {
-		if writeRemoteObservation(context.Background(), r, "codex", run, state, "", nil) == nil {
+		if writeRemoteObservation(context.Background(), r, "codex", run, state, "", nil, nil) == nil {
 			t.Fatal("unknown connection state published")
 		}
 	}
-	if writeRemoteObservation(context.Background(), r, "claude", run, "connected", "", nil) == nil {
+	if writeRemoteObservation(context.Background(), r, "claude", run, "connected", "", nil, nil) == nil {
 		t.Fatal("wrong dispatch vendor published")
 	}
 }

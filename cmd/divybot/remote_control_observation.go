@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,49 +20,20 @@ func (c *Coord) clearRemoteControl(j *Job) {
 	_ = syncDirectory(dir)
 }
 
-// A requested title is not an observed native name. This read is optional;
-// absent metadata never manufactures a name or invalidates actual connection.
-const claudeRemoteNamePython = `import os,sys,json,re,stat
-try:
- request=json.loads(sys.stdin.read(8193))
- if set(request)!=set(['cwd','id','name']):raise ValueError()
- directory=re.sub('[^a-zA-Z0-9]','-',request['cwd'])
- path=os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or os.path.join(os.environ['HOME'],'.claude'),'projects',directory,request['id']+'.jsonl')
- fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK);s=os.fstat(fd)
- if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.getuid() or stat.S_IMODE(s.st_mode)!=0o600 or s.st_size>1048576:raise ValueError()
- data=os.read(fd,1048577);os.close(fd)
- if len(data)>1048576:raise ValueError()
- title=None
- for line in data.splitlines():
-  row=json.loads(line)
-  if row.get('type')=='custom-title' and row.get('sessionId')==request['id']:title=row.get('customTitle')
- print(json.dumps({'matched':isinstance(title,str) and title==request['name']}))
-except Exception:print('{"matched":false}')
-`
-
-func (h Host) observedClaudeName(ctx context.Context, run *remoteControlRun) *string {
-	if run == nil || !privateNativeID(run.NativeSessionID) || !validRemoteCwd(run.Cwd) {
-		return nil
-	}
-	body, _ := json.Marshal(map[string]string{"cwd": run.Cwd, "id": run.NativeSessionID, "name": run.Name})
-	// Input is a private here-document, not argv; never report command errors.
-	script := "export HOME=" + shq(h.agentHome()) + "; python3 -c " + shq(claudeRemoteNamePython) + " <<'ORCHID_NATIVE_NAME'\n" + string(body) + "\nORCHID_NATIVE_NAME"
-	out, err := h.runRemote(ctx, script)
-	var v struct {
-		Matched bool `json:"matched"`
-	}
-	if err != nil || len(out) > 1024 || decodeNativeJSON([]byte(out), &v) != nil || !v.Matched || ctx.Err() != nil {
-		return nil
-	}
-	name := run.Name
-	return &name
-}
-
 func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 	if j == nil || j.RemoteControl == nil || (j.Agent != "codex" && j.Agent != "claude") {
 		return
 	}
 	h.ShadowScope = c.shadow.scope(j)
+	h.ClaudeLinks = c.claudeLinks
+	c.claudeLinks.revokeWith(c.revokeRemoteControl)
+	// A lost or changed native identity withdraws the row and any session link.
+	drop := func() {
+		if j.Agent == "claude" {
+			c.claudeLinks.forget(j.DispatchKey, j.Issue, linkIdentityChanged) // guard:claude-link-identity-forgets
+		}
+		c.clearRemoteControl(j)
+	}
 	// Observe-only native evidence, read off the decision path (asynchronous,
 	// own context): it cannot change today's decision or consume its deadline.
 	h.observeClaudeBridge(j) // guard:claude-bridge-off-path
@@ -71,38 +41,63 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 	defer cancel()
 	owner, err := configuredReceiptOwner(c.cfg.Matrix)
 	if err != nil {
-		c.clearRemoteControl(j)
+		drop()
 		return
 	}
 	r, id, err := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
 	if err != nil || id != j.RemoteControl.NativeSessionID || r.dispatch.Location == nil || r.dispatch.Host != j.Host {
-		c.clearRemoteControl(j)
+		drop()
 		return
 	}
 	proofErr := h.remoteProof(check, j.Agent, j.Label, j.RemoteControl, r.dispatch.Location)
+	if proofErr != nil && j.Agent == "claude" {
+		// Claude's proof is the native occupant alone: any failure is an
+		// ended or replaced session, never a connection-only uncertainty.
+		drop() // guard:claude-proof-error-drops
+		return
+	}
 	current, currentID, err := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
 	if err != nil || currentID != id || !reflect.DeepEqual(current.dispatch, r.dispatch) || check.Err() != nil {
-		c.clearRemoteControl(j)
+		drop()
 		return
 	}
 	var name *string
 	state, reason := "connected", ""
-	if proofErr != nil {
+	if proofErr != nil || j.Agent == "claude" { // guard:claude-never-connected
+		// Claude documents no native connection state: always unconfirmed.
 		state, reason = "unconfirmed", "remote-control-unconfirmed"
-	} else if j.Agent == "codex" {
-		name = &j.RemoteControl.Name
 	} else {
-		name = h.observedClaudeName(check, j.RemoteControl)
+		name = &j.RemoteControl.Name
 	}
 	c.shadow.compare(j, shadowSiteConnection, state, remoteProofInputs(j))
 	latest, latestID, bindingErr := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
 	if bindingErr != nil || latestID != id || !reflect.DeepEqual(latest.dispatch, r.dispatch) || check.Err() != nil {
-		c.clearRemoteControl(j)
+		drop()
 		return
 	}
-	if check.Err() != nil || writeRemoteObservation(check, r, j.Agent, j.RemoteControl, state, reason, name) != nil || check.Err() != nil {
-		c.clearRemoteControl(j)
+	write := func(link *string) error {
+		if check.Err() != nil {
+			return check.Err()
+		}
+		return writeRemoteObservation(check, r, j.Agent, j.RemoteControl, state, reason, name, link)
 	}
+	// The Claude session link comes only from Claude's own records agreeing for
+	// the launched process (read off this path, still fresh); never from the
+	// pane. It is published under the lock that withholding takes.
+	if j.Agent == "claude" {
+		alive := func() bool { return h.claudeProcessAlive(check, j.RemoteControl.ClaudeProcess) }
+		err = c.claudeLinks.publish(j.DispatchKey, j.Issue, j.RemoteControl.NativeSessionID, time.Now(), alive, write) // guard:claude-link-native-only
+	} else {
+		err = write(nil)
+	}
+	if err != nil || check.Err() != nil {
+		drop()
+	}
+}
+
+// revokeRemoteControl withdraws a job's published row by its dispatch key.
+func (c *Coord) revokeRemoteControl(key string) {
+	c.clearRemoteControl(&Job{DispatchKey: key})
 }
 
 // The official post-prompt hook remains a second confirmation. Never overwrite
@@ -175,7 +170,7 @@ func (c *Coord) checkRemoteHookToday(ctx context.Context, h Host, j *Job) (bool,
 // Inputs today's Remote Control connection proof consumes for this vendor.
 func remoteProofInputs(j *Job) []string {
 	if j.Agent != "codex" {
-		return []string{shadowInputHerdrAgent, shadowInputScreenFooter}
+		return []string{shadowInputHerdrAgent} // guard:claude-proof-inputs-native
 	}
 	inputs := []string{shadowInputHerdrAgent, shadowInputScreenFooter, shadowInputCodexStatus}
 	if j.RemoteControl.IdentitySource == "codex-native-status" {

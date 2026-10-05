@@ -86,6 +86,7 @@ type Host struct {
 	ShadowScope    *nativeShadowScope   `json:"-"`
 	Acceptance     *codexAcceptance     `json:"-"`
 	GoalReadiness  *goalReadinessShadow `json:"-"` // observe-only native readiness record
+	ClaudeLinks    *claudeLinkStore     `json:"-"` // Claude session links agreed by Claude's own bound records
 	Name           string               `json:"name"`
 	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
 	Key            string               `json:"key"`          // ssh key path; "" = default/agent
@@ -926,6 +927,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if e = h.remoteProof(ctx, agent, label, remote, location); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-proof", e)
 		}
+		if agent == "claude" {
+			// Capture the launched process now, independent of the bridge, and
+			// keep it with the run; no later process is ever pinned instead.
+			remote.ClaudeProcess = h.claudeLaunchedProcess(ctx, location.PaneID, remote.NativeSessionID) // guard:claude-launch-process
+		}
 		if e = writePrivateJSON(filepath.Join(filepath.Dir(receipt.file), "remote-control-run.json"), ".remote-control-run-", receipt.owner, remote); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-proven-binding", errMatrix)
 		}
@@ -963,10 +969,14 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	if remote != nil {
 		var observedName *string
+		state, reason := "connected", ""
 		if agent == "codex" {
 			observedName = &remote.Name
+		} else {
+			// Claude documents no native connection state: always unconfirmed.
+			state, reason = "unconfirmed", "remote-control-unconfirmed"
 		}
-		if e := writeRemoteObservation(ctx, receipt, agent, remote, "connected", "", observedName); e != nil {
+		if e := writeRemoteObservation(ctx, receipt, agent, remote, state, reason, observedName, nil); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-observation", errMatrix)
 		}
 	}
@@ -2224,6 +2234,7 @@ type Coord struct {
 	srcMem      *sourceMemory                                                // source-binding read state; lazily created
 	sourceGrant func(repo string, n int, issueID, body string, key int) bool // test-only grant check; nil uses ownerGrants
 	shadow      *nativeEvidenceShadow                                        // private observation-only; never consulted
+	claudeLinks *claudeLinkStore                                             // Claude session links from the bound native record
 	instance    string                                                       // this process; matches launch progress and heartbeat
 	attemptsMu  sync.Mutex
 	attempts    map[string]*launchAttempt // live launch attempts by reservation key
@@ -2281,7 +2292,7 @@ func newCoord(cfg *Config) *Coord {
 	for _, h := range cfg.Hosts {
 		hosts[h.Name] = h
 	}
-	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID()}
+	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID(), claudeLinks: &claudeLinkStore{}}
 }
 
 func (c *Coord) run(ctx context.Context) {

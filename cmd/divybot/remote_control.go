@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -57,8 +58,11 @@ type remoteControlRun struct {
 	// The daemon version this run's TUI client was pinned to (kept so reloaded
 	// state stays pinned), and that client's directory.
 	ClientVersion string `json:"clientVersion,omitempty"`
-	ClientBinary  string `json:"-"`
-	ClientDir     string `json:"-"`
+	// The Claude process captured at launch (private run state), kept for the
+	// dispatch: only this process may ever supply the session link.
+	ClaudeProcess *claudeProcess `json:"claudeProcess,omitempty"`
+	ClientBinary  string         `json:"-"`
+	ClientDir     string         `json:"-"`
 }
 
 // Owner/operator-only decoration. This envelope must not enter the public tree.
@@ -136,32 +140,6 @@ func remoteStatusOccupant(raw json.RawMessage, kind, label, cwd, native string, 
 		(v.Agent.AgentStatus == "idle" || v.Agent.AgentStatus == "done" || v.Agent.AgentStatus == "working" || v.Agent.AgentStatus == "blocked")
 }
 
-// Only native UI status in an exact, stable occupant can establish connection.
-// Never send /remote-control: in an unconnected session it can enable/reconnect.
-func claudeRemoteConnected(screen string) bool {
-	if len(screen) == 0 || len(screen) > 64*1024 || !utf8.ValidString(screen) {
-		return false
-	}
-	for _, refusal := range []string{"Enable Remote Control", "Remote Control failed", "Remote Control failure", "Remote Control not started", "Remote Control is disabled", "Remote Control is unavailable", "Couldn't reconnect", "couldn't reconnect", "requires a", "not enabled", "reconnect"} {
-		if strings.Contains(screen, refusal) {
-			return false
-		}
-	}
-	// Match the footer line, not quoted task prose. Goal has not been sent yet.
-	for _, line := range strings.Split(screen, "\n") {
-		line = strings.TrimSpace(line)
-		// Installed 2.1.288 hides the verbose footer after repeated impressions.
-		// Its bridge-status renderer requires the current connected session.
-		if strings.HasPrefix(line, "/remote-control is active · Continue here, on your phone, or at ") {
-			return true
-		}
-		if strings.HasPrefix(line, "/rc active") && (len(line) == len("/rc active") || strings.Contains(" ·|", line[len("/rc active"):len("/rc active")+1])) {
-			return true
-		}
-	}
-	return false
-}
-
 func awaitRemoteProof(ctx context.Context, kind, label, cwd, native string, location *dispatchLocation,
 	read func(context.Context) (json.RawMessage, error), proof func(context.Context) (bool, error), wait func(context.Context) bool) error {
 	return awaitRemoteProofWithOccupant(ctx, func(raw json.RawMessage) bool { return remoteOccupant(raw, kind, label, cwd, native, location) }, read, proof, wait)
@@ -212,8 +190,10 @@ func (h Host) remoteProof(ctx context.Context, kind, label string, r *remoteCont
 			return herdrUnwrap(out)
 		}, func(ctx context.Context) (bool, error) {
 			if kind == "claude" {
-				screen, err := h.visiblePromptScreen(ctx, location.PaneID)
-				return err == nil && claudeRemoteConnected(screen), err
+				// Claude documents no native connection state, and terminal text
+				// never decides it: the proof is the stable native occupant alone,
+				// and the connection stays unconfirmed.
+				return true, nil // guard:claude-proof-native-only
 			}
 			var connected bool
 			if err := h.remoteAttachedStatus(ctx, label, r, location); err != nil {
@@ -279,9 +259,16 @@ func (h Host) forJob(j *Job) Host {
 	return h
 }
 
-func writeRemoteObservation(ctx context.Context, r *durableMatrixReceipt, kind string, run *remoteControlRun, state, reason string, observedName *string) error {
+// claudeSessionLink is the documented Claude Code Remote Control session URL
+// form, https://claude.ai/code/<session id>.
+var claudeSessionLink = regexp.MustCompile(`^https://claude\.ai/code/session_[A-Za-z0-9]{1,128}$`)
+
+func writeRemoteObservation(ctx context.Context, r *durableMatrixReceipt, kind string, run *remoteControlRun, state, reason string, observedName, link *string) error {
+	if link != nil && (kind != "claude" || !claudeSessionLink.MatchString(*link)) { // guard:observation-link-form
+		return goalError("remote-control-binding-invalid")
+	}
 	if ctx.Err() != nil || r == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != kind || r.dispatch.ParentRunID != nil || r.dispatch.Location == nil || run == nil || !privateNativeID(run.NativeSessionID) || (kind != "claude" && kind != "codex") ||
-		(state != "connected" && state != "unconfirmed") || (state == "connected" && reason != "") || (state == "unconfirmed" && (reason != "remote-control-unconfirmed" || observedName != nil)) || (observedName != nil && *observedName != run.Name) {
+		(state != "connected" && state != "unconfirmed") || (kind == "claude" && state == "connected") || (state == "connected" && reason != "") || (state == "unconfirmed" && (reason != "remote-control-unconfirmed" || observedName != nil)) || (observedName != nil && *observedName != run.Name) {
 		return goalError("remote-control-binding-invalid")
 	}
 	now := time.Now().UTC()
@@ -295,7 +282,7 @@ func writeRemoteObservation(ctx context.Context, r *durableMatrixReceipt, kind s
 	}
 	row := remoteControlObservation{SchemaVersion: 1, RunID: r.dispatch.RunID, NativeSessionID: run.NativeSessionID,
 		Host: r.dispatch.Host, PaneID: r.dispatch.Location.PaneID, WorkspaceID: r.dispatch.Location.WorkspaceID,
-		Vendor: vendor, State: state, Reason: refusal, SessionName: observedName,
+		Vendor: vendor, State: state, Reason: refusal, SessionName: observedName, Link: link,
 		ObservedAt: now.Format(time.RFC3339Nano), ValidUntil: now.Add(remoteControlFreshness).Format(time.RFC3339Nano)}
 	path := filepath.Join(filepath.Dir(r.file), "remote-control.json")
 	if err := writePrivateJSON(path, ".remote-control-", r.owner, row); err != nil {

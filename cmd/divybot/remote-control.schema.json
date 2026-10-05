@@ -70,7 +70,12 @@
       "maxLength": 192
     },
     "link": {
-      "type": "null"
+      "description": "Claude Remote Control session URL, or null. An OBSERVED, undocumented association: served only when Claude Code's own per-process session record (bridgeSessionId) and the latest bridge_status entry of that session's transcript agree, for the launched process while it is alive. The URL form is documented (the session id is the part of the claude.ai/code session URL after /code/). Identity only, never a connection verdict; never derived from terminal text. Null whenever either source is missing, malformed or disagrees, or the session ended or changed.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^https://claude\\.ai/code/session_[A-Za-z0-9]{1,128}$"
     },
     "observedAt": {
       "type": "string",
@@ -82,6 +87,38 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "vendor": {
+            "const": "chatgpt"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "link": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "vendor": {
+            "const": "claude"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "state": {
+            "const": "unconfirmed"
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {
