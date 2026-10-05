@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -25,13 +26,32 @@ const (
 type goalReadinessShadow struct {
 	shadow *nativeEvidenceShadow
 	job    *Job
+	wg     sync.WaitGroup // background reads (tests wait on it)
 }
 
-func (g *goalReadinessShadow) record(today string, native shadowVerdict) {
+func (g *goalReadinessShadow) record(today string, native shadowVerdict, at time.Time) {
 	if g == nil || g.shadow == nil || g.job == nil {
 		return
 	}
-	g.shadow.compareNative(g.job, shadowSiteGoalReadiness, today, []string{shadowInputHerdrAgent, shadowInputScreenComposer}, native)
+	g.shadow.compareNativeAt(g.job, shadowSiteGoalReadiness, today, []string{shadowInputHerdrAgent, shadowInputScreenComposer}, native, at)
+}
+
+// observe starts the native read for one recording moment off the launch
+// path: it returns at once, and the read runs on its own bounded context,
+// never the delivery's, from an immutable copy of the structured occupant.
+func (h Host) observeGoalReadiness(agent AgentInfo, stable bool, today string, at time.Time) {
+	g := h.GoalReadiness
+	if g == nil {
+		return
+	}
+	g.wg.Add(1)
+	go func() { // guard:readiness-async
+		defer g.wg.Done()
+		defer shadowContain()
+		ctx, cancel := context.WithTimeout(context.Background(), goalReadinessReadBudget) // guard:readiness-own-context
+		defer cancel()
+		g.record(today, h.codexGoalReadiness(ctx, agent, stable), at)
+	}()
 }
 
 func readinessVerdict(value, reason string) shadowVerdict {
@@ -51,8 +71,15 @@ func (h Host) codexGoalReadiness(ctx context.Context, agent AgentInfo, stable bo
 	if !stable || agent.Agent != "codex" { // guard:readiness-occupant
 		return readinessVerdict("unknown", "occupant-unstable")
 	}
-	if !agent.InteractiveReady || (agent.AgentStatus != "idle" && agent.AgentStatus != "done") { // guard:readiness-herdr
+	switch agent.AgentStatus { // guard:readiness-herdr
+	case "idle", "done":
+		if !agent.InteractiveReady {
+			return readinessVerdict("not-ready", "herdr-not-ready")
+		}
+	case "working", "blocked":
 		return readinessVerdict("not-ready", "herdr-not-ready")
+	default: // missing or unknown is not a definite negative
+		return readinessVerdict("unknown", "herdr-status-unknown")
 	}
 	rctx, cancel := context.WithTimeout(ctx, goalReadinessReadBudget)
 	defer cancel()
@@ -71,6 +98,22 @@ func (h Host) codexGoalReadiness(ctx context.Context, agent AgentInfo, stable bo
 			return goalError("remote-control-binding-invalid")
 		}
 		status = v.Thread.Status.Type
+		// Turn notices received on this connection outrank a stale idle reply:
+		// a turn of this thread that started and has not completed is active.
+		pending := map[string]bool{}
+		for _, e := range p.turnEvents { // guard:readiness-turn-reconcile
+			if e.ThreadID != h.RemoteRun.NativeSessionID {
+				continue
+			}
+			if e.Status == "inProgress" {
+				pending[e.ID] = true
+			} else {
+				delete(pending, e.ID)
+			}
+		}
+		if len(pending) > 0 {
+			status = "active"
+		}
 		return nil
 	})
 	if err != nil {

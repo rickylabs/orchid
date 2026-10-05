@@ -61,6 +61,7 @@ var (
 		"codex-tui-attachment-unproven": true, "claude-tui-attachment-unproven": true,
 		"occupant-unstable": true, "herdr-not-ready": true, "native-turn-active": true, "native-thread-unreadable": true,
 		"native-thread-not-loaded": true, "native-thread-system-error": true, "native-thread-unknown": true,
+		"herdr-status-unknown": true,
 	}
 )
 

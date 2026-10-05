@@ -32,8 +32,9 @@ type promptCalls struct {
 	// owns the single submit; no Enter, replay or screen read follows.
 	native func(ctx context.Context, sent string, submit func(context.Context) error) error
 	// Observe-only: records today's readiness verdict beside the native one.
-	// It never changes the decision, the submit or any other effect.
-	readiness func(ctx context.Context, s promptSnapshot, today string)
+	// It gets an immutable snapshot and no delivery context, must return at
+	// once, and never changes the decision, the submit or any other effect.
+	readiness func(s promptSnapshot, today string, at time.Time)
 }
 
 func samePromptOccupant(a, b AgentInfo) bool {
@@ -113,7 +114,7 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 		if d.readiness != nil {
 			func() {
 				defer shadowContain()
-				d.readiness(ctx, s, today)
+				d.readiness(s, today, time.Now())
 			}()
 		}
 	}
@@ -258,7 +259,7 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
 	var native func(context.Context, string, func(context.Context) error) error
-	var readiness func(context.Context, promptSnapshot, string)
+	var readiness func(promptSnapshot, string, time.Time)
 	if h.CanonicalCodex && h.RemoteRun != nil {
 		// Remote Control Codex has no screen-confirmed delivery path.
 		if h.Acceptance == nil {
@@ -273,8 +274,8 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 			return h.acceptCodexPrompt(ctx, h.Acceptance, sent, submit)
 		}
 		if h.GoalReadiness != nil {
-			readiness = func(ctx context.Context, s promptSnapshot, today string) {
-				h.GoalReadiness.record(today, h.codexGoalReadiness(ctx, s.Agent, s.Stable)) // guard:readiness-structured-only
+			readiness = func(s promptSnapshot, today string, at time.Time) {
+				h.observeGoalReadiness(s.Agent, s.Stable, today, at) // guard:readiness-structured-only
 			}
 		}
 	}

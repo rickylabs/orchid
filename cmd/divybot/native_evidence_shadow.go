@@ -463,16 +463,22 @@ func (p *shadowPublisher) close(err error) {
 
 // Record today's decision, the closed inputs it used and the shadow proposal.
 func (s *nativeEvidenceShadow) compare(j *Job, site, today string, inputs []string) {
-	s.record(j, site, today, inputs, nil)
+	s.record(j, site, today, inputs, nil, time.Time{})
 }
 
 // compareNative records today's decision beside a native verdict the caller
 // computed from native inputs only.
 func (s *nativeEvidenceShadow) compareNative(j *Job, site, today string, inputs []string, native shadowVerdict) {
-	s.record(j, site, today, inputs, &native)
+	s.record(j, site, today, inputs, &native, time.Time{})
 }
 
-func (s *nativeEvidenceShadow) record(j *Job, site, today string, inputs []string, native *shadowVerdict) {
+// compareNativeAt is compareNative stamped with the moment today's decision
+// was observed, not when the native read finished.
+func (s *nativeEvidenceShadow) compareNativeAt(j *Job, site, today string, inputs []string, native shadowVerdict, at time.Time) {
+	s.record(j, site, today, inputs, &native, at)
+}
+
+func (s *nativeEvidenceShadow) record(j *Job, site, today string, inputs []string, native *shadowVerdict, at time.Time) {
 	if s == nil {
 		return
 	}
@@ -486,6 +492,9 @@ func (s *nativeEvidenceShadow) record(j *Job, site, today string, inputs []strin
 	}
 	now := s.now()
 	c := shadowComparison{Site: site, Today: today, At: now, Provenance: []string{}}
+	if !at.IsZero() {
+		c.At = at
+	}
 	for _, input := range inputs {
 		if !shadowKnownInputs[input] { // guard:closed-provenance
 			input = shadowInputOther
