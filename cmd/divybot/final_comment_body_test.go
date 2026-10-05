@@ -315,7 +315,9 @@ else:print(json.dumps({'result':{}}))
 			cfg := &Config{Inbox: "fixture/inbox", BranchPrefix: "fixture/", Targets: []Target{{Label: "fixture-target", Repo: "fixture/project"}}}
 			c := &Coord{cfg: cfg, auth: &AuthStore{}, st: loadState(filepath.Join(root, "state.json"))}
 			h := Host{Name: "fixture-host", SSH: "fixture-host", Home: root, WorkdirRoot: root}
-			is := Issue{Number: 7, Title: "[fixture/source#42] Synthetic report", Body: "Post one final comment on fixture/source issue 42, with three bullets.", Labels: []string{"fixture-target"}}
+			// Worked in the target repository while reporting on another source issue:
+			// with a bracketed source title that cross-repository intent must be explicit.
+			is := Issue{Number: 7, Title: "[fixture/source#42] Synthetic report", Body: "/swarm\nrepo: fixture/project\n\nPost one final comment on fixture/source issue 42, with three bullets.", Labels: []string{"fixture-target"}}
 			r := registrationReceipt(t, "codex-run", Overrides{})
 			err := c.spawn(context.Background(), 7, is, h, "codex-run", Overrides{}, r)
 			log, readErr := os.ReadFile(calls)
