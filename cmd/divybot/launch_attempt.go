@@ -571,6 +571,7 @@ func recoverLaunchAttempts(root string, owner *receiptOwner, publish bool, insta
 		// would reject (identity, or a frozen decision that is not exactly the
 		// reducer's) is preserved untouched, never published, decided or retired.
 		if !ok || !snapshotProgressValid(p) { // guard:recover-only-valid
+			log.Printf("launch attempt record invalid; kept for operator inspection")
 			continue
 		}
 		if p.Decision == nil && p.Instance == instance { // guard:recover-live-skip
@@ -802,10 +803,44 @@ func snapshotProgressValid(p attemptProgress) bool {
 	if _, err := time.Parse("2006-01-02T15:04:05.000Z", p.StartedAt); err != nil {
 		return false
 	}
+	if !progressVocabularyKnown(p) { // guard:snapshot-closed-vocabulary
+		return false
+	}
 	if p.Decision == nil {
 		return true
 	}
 	return frozenDecisionValid(p)
+}
+
+// knownStage is the closed stage allow-list. Empty is the record written
+// before any stage was entered.
+func knownStage(stage string, emptyAllowed bool) bool {
+	if stage == "" {
+		return emptyAllowed
+	}
+	for _, name := range stageNames {
+		if stage == name {
+			return true
+		}
+	}
+	return false
+}
+
+// progressVocabularyKnown requires every persisted phase source and fact value
+// to come from the closed vocabulary the collector writes. An unknown or
+// unparseable value is not finished, whatever a decision derived from it.
+func progressVocabularyKnown(p attemptProgress) bool {
+	if !knownStage(p.Stage, true) {
+		return false
+	}
+	if ce := p.Facts.ContextEnded; ce != nil && (!knownStage(ce.Stage, true) || (ce.Kind != "deadline" && ce.Kind != "cancelled")) {
+		return false
+	}
+	switch p.Facts.HerdrStartError {
+	case "", "timeout", "agent_not_ready", "agent_pane_busy":
+		return true
+	}
+	return false
 }
 
 // frozenDecisionValid accepts a frozen decision only when it is exactly the
@@ -824,6 +859,9 @@ func frozenDecisionValid(p attemptProgress) bool {
 		return false
 	}
 	if _, err := time.Parse("2006-01-02T15:04:05.000Z", o.ObservedAt); err != nil {
+		return false
+	}
+	if !knownStage(o.Phase, false) { // guard:snapshot-decision-phase
 		return false
 	}
 	base := p

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1206,5 +1207,55 @@ func TestAttemptUsesSourceHome(t *testing.T) {
 	b := c.newMatrixAttempt(cfg, nil, strings.Repeat("e", 64), inbox, 9, syntheticRoute(), "codex", nil)
 	if b == nil || b.p.Issue != (dispatchIssue{Repo: "fixture/inbox", Number: 9}) || b.p.DispatchID != launchStateDispatchID("fixture/inbox", inbox) {
 		t.Fatalf("inbox attempt home changed: %+v", b)
+	}
+}
+
+// ---- REVIEW-o83e: a phase outside the closed vocabulary is never finished ----
+
+// A persisted progress stage or context-end stage the code does not know is
+// not finished, even when the decision derives from it exactly: the snapshot
+// is unknown and recovery keeps the record, writer off or on.
+func TestUnknownPhaseIsNeverFinished(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		facts attemptFacts
+		stage string
+		exit  int
+	}{
+		{"known-registration-stage", attemptFacts{Registered: true}, "registration", 0},
+		{"unknown-progress-stage", attemptFacts{Registered: true}, "elsewhere", 2},
+		{"unknown-context-end-stage", attemptFacts{ContextEnded: &attemptContextEnd{Kind: "deadline", Stage: "elsewhere"}}, "registration", 2},
+		{"unknown-context-end-kind", attemptFacts{ContextEnded: &attemptContextEnd{Kind: "sideways", Stage: "registration"}}, "registration", 2},
+		{"unknown-herdr-start-error", attemptFacts{HerdrStartError: "made_up"}, "registration", 2},
+	} {
+		for _, publish := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/publish=%v", tc.name, publish), func(t *testing.T) {
+				root := privateTestRoot(t)
+				_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: liveInstance, StartedAt: stamp(time.Now()), ObservedAt: stamp(time.Now())})
+				key := strings.Repeat("c", 64)
+				writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"dispatched"}`)
+				p := completeProgress("fedcba9876543210fedcba9876543210", nil)
+				p.Stage, p.Facts = tc.stage, tc.facts
+				body, _ := json.Marshal(decideOutcome(p, nil, stamp(fixedNow())))
+				p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
+				writeProgress(t, root, p)
+				if s := readLaunchSnapshot(root, time.Now()); snapshotExit(s) != tc.exit {
+					t.Fatalf("initial exit %d, want %d: %+v", snapshotExit(s), tc.exit, s)
+				}
+				recoverLaunchAttempts(root, nil, publish, liveInstance, fixedNow())
+				if tc.exit == 0 {
+					return
+				}
+				if s := readLaunchSnapshot(root, time.Now()); snapshotExit(s) != 2 || s.UnknownReason != "evidence-invalid" {
+					t.Fatalf("recovery certified an unknown phase: %+v", s)
+				}
+				if _, err := os.Stat(attemptFile(root, "attempt", p.AttemptID)); err != nil {
+					t.Fatal("recovery removed a record with an unknown phase")
+				}
+				if _, err := os.Stat(attemptFile(root, "outcome", p.AttemptID)); !os.IsNotExist(err) {
+					t.Fatal("recovery published an unknown phase")
+				}
+			})
+		}
 	}
 }
