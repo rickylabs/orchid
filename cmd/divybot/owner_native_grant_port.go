@@ -241,6 +241,9 @@ func (c *Coord) startOwnerNativeGrants(ctx context.Context) {
 }
 
 func (c *Coord) matrixConfigForIssue(ctx context.Context, is Issue, repo string) (MatrixConfig, error) {
+	if is.Source != nil && (c.cfg.OwnerNativeGrantPort == nil || c.ownerGrants == nil) {
+		return MatrixConfig{}, matrixReason("source-grant-missing") // a comment launches only on its grant
+	}
 	if c.cfg.OwnerNativeGrantPort == nil {
 		return c.cfg.Matrix, nil
 	}

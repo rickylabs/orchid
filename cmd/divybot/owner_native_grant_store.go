@@ -797,6 +797,9 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 	key := s.subjectKey(subject)
 	dir := s.subjectDir(subject)
 	_, statErr := os.Lstat(dir)
+	if os.IsNotExist(statErr) && !s.known[key] && subject.comment {
+		return MatrixConfig{}, matrixReason("source-grant-missing")
+	}
 	if os.IsNotExist(statErr) && !s.known[key] {
 		// Startup owner grants remain usable, and still fence edited briefs.
 		ownerKnown := false
@@ -856,9 +859,12 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 			matches++
 		}
 	}
-	// One comment of many on a source issue may carry no owner grant: it routes
-	// through the matrix. An inbox issue with owner intents must match exactly one.
-	if matches > 1 || (matches == 0 && !subject.comment) {
+	// A comment launches only on its own grant (owner rule); an inbox issue with
+	// owner intents must match exactly one.
+	if matches == 0 && subject.comment { // guard:source-grant-admission
+		return MatrixConfig{}, matrixReason("source-grant-missing")
+	}
+	if matches != 1 {
 		return MatrixConfig{}, matrixReason("grant-conflict")
 	}
 	current, err := s.fetchSubject(ctx, subject)
@@ -875,6 +881,30 @@ func (s *ownerNativeGrantStore) subjectIssue(subject ownerNativeSubject, is Issu
 		is.Number = subject.number
 	}
 	return is
+}
+
+// commentGrantReady is true when exactly one active comment grant matches the
+// source issue and the comment body digest, unclaimed or claimed by this binding.
+func (s *ownerNativeGrantStore) commentGrantReady(repo string, number int, issueID, digest string, binding int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.healthy() {
+		return false
+	}
+	subject := ownerNativeSubject{comment: true, repo: repo, number: number}
+	matches := 0
+	for operation, record := range s.active {
+		if s.requestSubject(record.Request) != subject || record.Grant.IssueID != issueID || record.Grant.Repo != repo || record.Grant.BriefDigest != digest {
+			continue
+		}
+		var claim ownerNativeClaim
+		raw, err := ownerNativePrivateRead(filepath.Join(s.options.StoreRoot, "claims", ownerNativeOperationKey(operation)+".json"), os.Getuid())
+		if err == nil && (ownerNativeStrictJSON(raw, &claim) != nil || claim.Binding != binding) {
+			continue // claimed by another comment
+		}
+		matches++
+	}
+	return matches == 1
 }
 
 type ownerNativeClaim struct {

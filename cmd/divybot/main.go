@@ -366,7 +366,11 @@ type State struct {
 	// is each target repository's comment read position. Both are persisted.
 	SourceBindings map[int]*sourceBinding `json:"source_bindings,omitempty"`
 	SourceCursors  map[string]time.Time   `json:"source_cursors,omitempty"`
-	path           string
+	// SourceStarts is each repository's first scan time: nothing created before it
+	// is a trigger. SourceScans is a listing in progress across ticks.
+	SourceStarts map[string]time.Time  `json:"source_starts,omitempty"`
+	SourceScans  map[string]sourceScan `json:"source_scans,omitempty"`
+	path         string
 }
 
 func loadState(path string) *State {
@@ -383,10 +387,14 @@ func loadState(path string) *State {
 			PrevCap       map[string]int           `json:"prev_cap"`
 			Bindings      map[int]*sourceBinding   `json:"source_bindings,omitempty"`
 			Cursors       map[string]time.Time     `json:"source_cursors,omitempty"`
+			Starts        map[string]time.Time     `json:"source_starts,omitempty"`
+			Scans         map[string]sourceScan    `json:"source_scans,omitempty"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
 			s.SourceBindings = raw.Bindings
 			s.SourceCursors = raw.Cursors
+			s.SourceStarts = raw.Starts
+			s.SourceScans = raw.Scans
 			s.CompletedRuns = raw.CompletedRuns
 			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
@@ -427,7 +435,9 @@ func (s *State) saveLocked() error {
 		RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
 		Bindings      map[int]*sourceBinding   `json:"source_bindings,omitempty"`
 		Cursors       map[string]time.Time     `json:"source_cursors,omitempty"`
-	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights, s.SourceBindings, s.SourceCursors}, "", "  ")
+		Starts        map[string]time.Time     `json:"source_starts,omitempty"`
+		Scans         map[string]sourceScan    `json:"source_scans,omitempty"`
+	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights, s.SourceBindings, s.SourceCursors, s.SourceStarts, s.SourceScans}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -2134,10 +2144,12 @@ type Coord struct {
 	st          *State
 	auth        *AuthStore
 	hosts       map[string]Host
-	actions     actionCalls           // injected only by action-delivery tests
-	source      sourceGitHub          // injected only by source-binding tests; nil uses gh
-	shadow      *nativeEvidenceShadow // private observation-only; never consulted
-	dry         bool                  // dry-run: log spawn/adopt decisions, take no spawning action
+	actions     actionCalls                                                  // injected only by action-delivery tests
+	source      sourceGitHub                                                 // injected only by source-binding tests; nil uses gh
+	srcMem      *sourceMemory                                                // source-binding read state; lazily created
+	sourceGrant func(repo string, n int, issueID, body string, key int) bool // test-only grant check; nil uses ownerGrants
+	shadow      *nativeEvidenceShadow                                        // private observation-only; never consulted
+	dry         bool                                                         // dry-run: log spawn/adopt decisions, take no spawning action
 	gov         struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
