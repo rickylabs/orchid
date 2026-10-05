@@ -567,7 +567,10 @@ func recoverLaunchAttempts(root string, owner *receiptOwner, publish bool, insta
 	paths, _ := filepath.Glob(filepath.Join(root, "attempt-*.json"))
 	for _, path := range paths {
 		p, ok := readAttemptProgress(path)
-		if !ok {
+		// What is not proven finished stays not finished: a record the snapshot
+		// would reject (identity, or a frozen decision that is not exactly the
+		// reducer's) is preserved untouched, never published, decided or retired.
+		if !ok || !snapshotProgressValid(p) { // guard:recover-only-valid
 			continue
 		}
 		if p.Decision == nil && p.Instance == instance { // guard:recover-live-skip
@@ -676,8 +679,13 @@ func (c *Coord) newMatrixAttempt(cfg MatrixConfig, owner *receiptOwner, key stri
 	if c.dry || !privateReceiptRoot(cfg.ReceiptRoot) || !digestPattern.MatchString(key) {
 		return nil
 	}
-	return newLaunchAttempt(cfg.ReceiptRoot, owner, cfg.LaunchOutcomes, c.instance, key, launchStateDispatchID(c.cfg.Inbox, is),
-		dispatchIssue{Repo: c.cfg.Inbox, Number: n}, outcomeRoute{Harness: route.Transport, Model: route.Model, Effort: route.Effort},
+	// The attempt belongs to the issue's home, as its dispatch and launch state
+	// do: a comment binding's source issue, otherwise the inbox issue.
+	home := c.issueHome(n) // guard:attempt-source-home
+	src := is
+	src.Number = home.Number
+	return newLaunchAttempt(cfg.ReceiptRoot, owner, cfg.LaunchOutcomes, c.instance, key, launchStateDispatchID(home.Repo, src),
+		home, outcomeRoute{Harness: route.Transport, Model: route.Model, Effort: route.Effort},
 		strings.HasSuffix(agent, "-run"), retry, time.Now)
 }
 
@@ -800,67 +808,32 @@ func snapshotProgressValid(p attemptProgress) bool {
 	return frozenDecisionValid(p)
 }
 
-// outcomeTuples are the only outcome/effects/reason/signal combinations the
-// reducer produces.
-var outcomeTuples = map[[4]string]bool{
-	{"started", "present", "started", "orchid-commit"}:                       true,
-	{"started", "present", "started", "orchid-run"}:                          true,
-	{"failed", "none", "codex-client-unmatched", "codex-app-server"}:         true,
-	{"failed", "none", "codex-client-check-failed", "codex-client-check"}:    true,
-	{"failed", "none", "agy-settings-unreadable", "agy-settings"}:            true,
-	{"unconfirmed", "possible", "launch-cancelled", "orchid-shutdown"}:       true,
-	{"unconfirmed", "possible", "launch-cancelled", "orchid-cancel"}:         true,
-	{"unconfirmed", "possible", "startup-timeout", "orchid-deadline"}:        true,
-	{"unconfirmed", "possible", "startup-timeout", "herdr-structured-error"}: true,
-	{"unconfirmed", "possible", "goal-unconfirmed", "orchid-deadline"}:       true,
-	{"unconfirmed", "possible", "deadline-exceeded", "orchid-deadline"}:      true,
-	{"unconfirmed", "possible", "startup-blocked", "herdr-structured-error"}: true,
-	{"unconfirmed", "possible", "startup-busy", "herdr-structured-error"}:    true,
-	{"unconfirmed", "possible", "progress-unconfirmed", "orchid-progress"}:   true,
-	{"unconfirmed", "possible", "launch-interrupted", "orchid-recovery"}:     true,
-}
-
-var outcomeEvidenceNames = map[string]bool{"herdrStartError": true, "contextEnded": true, "codexClientUnmatched": true,
-	"codexClientCheckFailed": true, "agySettingsUnreadable": true, "registered": true, "goalCommitted": true, "runStarted": true}
-
-func sameOptional(a, b *string) bool {
-	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
-}
-
-// frozenDecisionValid accepts a frozen decision only when it is the complete,
-// canonical outcome the reducer writes for this very attempt: every field
-// present (re-encoding reproduces the bytes exactly), schema 1, the progress
-// record's identity envelope, a known stage, sorted known evidence and a
-// reducer-producible outcome tuple. Anything else is incomplete evidence.
+// frozenDecisionValid accepts a frozen decision only when it is exactly the
+// outcome the reducer derives from this very progress record: recomputing
+// decideOutcome (or recovery's interruptedOutcome) from the record's own
+// identity, run mode, stage and facts at the frozen time reproduces the bytes.
+// That binds every field together: schema, identity envelope, phase, evidence
+// (equal to the recorded facts) and the outcome/effects/reason/signal tuple.
+// Anything else is incomplete or inconsistent evidence; it is never rewritten.
 func frozenDecisionValid(p attemptProgress) bool {
+	if p.Decision == nil {
+		return false
+	}
 	var o launchOutcome
-	if decodeNativeJSON([]byte(p.Decision.Bytes), &o) != nil { // guard:snapshot-decision-complete
-		return false
-	}
-	if canonical, err := json.Marshal(o); err != nil || string(canonical) != p.Decision.Bytes { // guard:snapshot-decision-canonical
-		return false
-	}
-	if o.SchemaVersion != 1 || o.AttemptID != p.AttemptID || o.ActionDispatchID != p.ActionDispatchID || o.DispatchID != p.DispatchID ||
-		o.Issue != p.Issue || o.ResolvedRoute != p.ResolvedRoute || !sameOptional(o.PredecessorAttemptID, p.PredecessorAttemptID) ||
-		!sameOptional(o.RetryOperationID, p.RetryOperationID) || o.ObservedAt != p.Decision.ObservedAt { // guard:snapshot-decision-envelope
+	if decodeNativeJSON([]byte(p.Decision.Bytes), &o) != nil || o.ObservedAt != p.Decision.ObservedAt { // guard:snapshot-decision-complete
 		return false
 	}
 	if _, err := time.Parse("2006-01-02T15:04:05.000Z", o.ObservedAt); err != nil {
 		return false
 	}
-	phase := false
-	for _, name := range stageNames {
-		phase = phase || o.Phase == name
-	}
-	if !phase || !outcomeTuples[[4]string{o.Outcome, o.Effects, o.ReasonCode, o.Signal}] { // guard:snapshot-decision-vocabulary
-		return false
-	}
-	for i, e := range o.Evidence {
-		if !outcomeEvidenceNames[e] || (i > 0 && o.Evidence[i-1] >= e) { // guard:snapshot-decision-evidence
-			return false
+	base := p
+	base.Decision = nil
+	for _, derived := range []launchOutcome{decideOutcome(base, nil, o.ObservedAt), interruptedOutcome(base, o.ObservedAt)} {
+		if body, err := json.Marshal(derived); err == nil && string(body) == p.Decision.Bytes { // guard:snapshot-decision-derived
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // snapshotDispatch strictly reads one reservation's dispatch record: no

@@ -282,7 +282,7 @@ func TestRecoverLaunchAttempts(t *testing.T) {
 	base := func(key string) attemptProgress {
 		return attemptProgress{SchemaVersion: 1, AttemptID: attemptIDFor(key), ActionDispatchID: actionOpaque("assignment", "orchid-"+key),
 			DispatchID: "assignment_" + strings.Repeat("e", 64), Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7},
-			Stage: "registration", Facts: attemptFacts{Registered: true}, Instance: "instance-dead", StartedAt: "2026-10-05T00:00:00.000Z"}
+			Stage: "registration", Facts: attemptFacts{Registered: true}, Instance: "fedcba9876543210fedcba9876543210", StartedAt: "2026-10-05T00:00:00.000Z"}
 	}
 	t.Run("dead-instance-interrupted", func(t *testing.T) {
 		root := privateTestRoot(t)
@@ -622,7 +622,7 @@ func TestRecoverRepublishesAdmission(t *testing.T) {
 	restore := failPublish(t, "admitted")
 	a.begin()
 	restore()
-	a.p.Instance = "instance-dead"
+	a.p.Instance = "fedcba9876543210fedcba9876543210"
 	writeProgress(t, root, a.p)
 	recoverLaunchAttempts(root, nil, true, liveInstance, fixedNow())
 	raw, err := os.ReadFile(attemptFile(root, "admitted", a.p.AttemptID))
@@ -727,7 +727,7 @@ func TestLaunchAttemptFirstContextEndWins(t *testing.T) {
 func TestRecoverPublishesOnlyDurableDecisions(t *testing.T) {
 	root := privateTestRoot(t)
 	p := attemptProgress{SchemaVersion: 1, AttemptID: attemptIDFor(strings.Repeat("5", 64)), ActionDispatchID: actionOpaque("assignment", "orchid-"+strings.Repeat("5", 64)),
-		DispatchID: "assignment_" + strings.Repeat("e", 64), Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Stage: "registration", Instance: "instance-dead", StartedAt: "2026-10-05T00:00:00.000Z"}
+		DispatchID: "assignment_" + strings.Repeat("e", 64), Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Stage: "registration", Instance: "fedcba9876543210fedcba9876543210", StartedAt: "2026-10-05T00:00:00.000Z"}
 	writeProgress(t, root, p)
 	orig := writeProgressRecord
 	writeProgressRecord = func(string, *receiptOwner, attemptProgress) error { return errMatrix }
@@ -1099,5 +1099,112 @@ func TestEveryReducerDecisionIsValidFrozen(t *testing.T) {
 	a.p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
 	if !frozenDecisionValid(a.p) {
 		t.Fatal("a retry attempt's own decision rejected")
+	}
+}
+
+// ---- REVIEW-o83d ----
+
+// R1a: what is not proven finished stays not finished across a restart:
+// recovery preserves a rejected frozen decision (and a record with invalid
+// identity) untouched, writer off or on, and the snapshot stays unknown.
+func TestRecoveryPreservesRejectedEvidence(t *testing.T) {
+	for _, publish := range []bool{false, true} {
+		root := privateTestRoot(t)
+		_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: liveInstance, StartedAt: stamp(time.Now()), ObservedAt: stamp(time.Now())})
+		partial := decidedProgress(t, nil, func(m map[string]any) {
+			for k := range m {
+				if k != "attemptId" && k != "observedAt" {
+					delete(m, k)
+				}
+			}
+			m["outcome"], m["reasonCode"] = "started", "started"
+		})
+		partial.Instance = liveInstance
+		writeProgress(t, root, partial)
+		badIdentity := completeProgress("instance-x", nil)
+		badIdentity.AttemptID = attemptIDFor(strings.Repeat("5", 64))
+		writeProgress(t, root, badIdentity)
+		key := strings.Repeat("c", 64)
+		writeDispatchFixture(t, root, key, `{"schemaVersion":1,"runId":"orchid-`+key+`","issue":{"repo":"fixture/inbox","number":7},"state":"dispatched"}`)
+		before := readLaunchSnapshot(root, time.Now())
+		recoverLaunchAttempts(root, nil, publish, liveInstance, fixedNow())
+		recoverLaunchAttempts(root, nil, publish, "0123456789abcdef0123456789abcdee", fixedNow()) // another instance after a restart
+		after := readLaunchSnapshot(root, time.Now())
+		if snapshotExit(before) != 2 || snapshotExit(after) != 2 || after.UnknownReason != "evidence-invalid" || after.Invalid != 2 {
+			t.Fatalf("publish=%v: recovery turned rejected evidence into a clean zero: before=%+v after=%+v", publish, before, after)
+		}
+		for _, id := range []string{partial.AttemptID, badIdentity.AttemptID} {
+			if _, err := os.Stat(attemptFile(root, "attempt", id)); err != nil {
+				t.Fatalf("publish=%v: rejected record removed", publish)
+			}
+			if _, err := os.Stat(attemptFile(root, "outcome", id)); !os.IsNotExist(err) {
+				t.Fatalf("publish=%v: rejected decision published", publish)
+			}
+		}
+	}
+}
+
+// R1b: canonical bytes are not enough; phase and evidence must be exactly what
+// the reducer derives from the record's own facts and stage.
+func TestSnapshotRejectsInconsistentPhaseAndEvidence(t *testing.T) {
+	committed := func() attemptProgress {
+		p := completeProgress("fedcba9876543210fedcba9876543210", nil)
+		p.Stage, p.Facts = "goal-confirmation", attemptFacts{Registered: true, GoalCommitted: true}
+		return p
+	}
+	write := func(p attemptProgress, edit func(o *launchOutcome)) attemptProgress {
+		o := decideOutcome(p, nil, stamp(fixedNow()))
+		if edit != nil {
+			edit(&o)
+		}
+		body, _ := json.Marshal(o)
+		p.Decision = &attemptDecision{Bytes: string(body), ObservedAt: stamp(fixedNow())}
+		return p
+	}
+	early := completeProgress("fedcba9876543210fedcba9876543210", nil)
+	early.Stage, early.Facts = "client-selection", attemptFacts{CodexClientUnmatched: true}
+	for _, tc := range []struct {
+		name string
+		p    attemptProgress
+		exit int
+	}{
+		{"genuine-success", write(committed(), nil), 0},
+		{"genuine-early-stop", write(early, nil), 0},
+		{"success-null-evidence", write(committed(), func(o *launchOutcome) { o.Evidence = nil }), 2},
+		{"success-at-preparation", write(committed(), func(o *launchOutcome) { o.Phase = "preparation" }), 2},
+		{"early-stop-at-goal-confirmation", write(early, func(o *launchOutcome) { o.Phase = "goal-confirmation" }), 2},
+		{"success-empty-evidence", write(committed(), func(o *launchOutcome) { o.Evidence = []string{} }), 2},
+		{"evidence-disagrees-with-progress", write(committed(), func(o *launchOutcome) { o.Evidence = []string{"agySettingsUnreadable"} }), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := privateTestRoot(t)
+			_ = writePrivateJSON(filepath.Join(root, "producer.json"), ".p-", nil, producerHeartbeat{Instance: liveInstance, StartedAt: stamp(time.Now()), ObservedAt: stamp(time.Now())})
+			writeProgress(t, root, tc.p)
+			if s := readLaunchSnapshot(root, time.Now()); snapshotExit(s) != tc.exit {
+				t.Fatalf("exit %d, want %d: %+v", snapshotExit(s), tc.exit, s)
+			}
+		})
+	}
+}
+
+// F2: a comment launch's attempt belongs to its source issue and the source's
+// launch-state dispatch, as #85's dispatch and launch state do; an inbox
+// issue keeps the inbox home.
+func TestAttemptUsesSourceHome(t *testing.T) {
+	root := privateTestRoot(t)
+	c := &Coord{cfg: &Config{Inbox: "fixture/inbox"}, st: loadState(filepath.Join(root, "state.json")), instance: liveInstance}
+	is := Issue{ID: "fixture-node", Number: 3100000400, Title: "Synthetic", Body: "/swarm\nharness: codex\n\nwork"}
+	c.st.SourceBindings = map[int]*sourceBinding{3100000400: {Repo: "fixture/project", Issue: 7}}
+	cfg := MatrixConfig{ReceiptRoot: root}
+	a := c.newMatrixAttempt(cfg, nil, strings.Repeat("d", 64), is, 3100000400, syntheticRoute(), "codex", nil)
+	src := is
+	src.Number = 7
+	if a == nil || a.p.Issue != (dispatchIssue{Repo: "fixture/project", Number: 7}) || a.p.DispatchID != launchStateDispatchID("fixture/project", src) {
+		t.Fatalf("comment attempt not under its source issue: %+v", a)
+	}
+	inbox := Issue{ID: "fixture-node-2", Number: 9, Title: "Native", Body: "work"}
+	b := c.newMatrixAttempt(cfg, nil, strings.Repeat("e", 64), inbox, 9, syntheticRoute(), "codex", nil)
+	if b == nil || b.p.Issue != (dispatchIssue{Repo: "fixture/inbox", Number: 9}) || b.p.DispatchID != launchStateDispatchID("fixture/inbox", inbox) {
+		t.Fatalf("inbox attempt home changed: %+v", b)
 	}
 }
