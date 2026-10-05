@@ -284,14 +284,17 @@ const (
 	shadowInputScreenFooter = "screen-footer"
 	shadowInputCodexStatus  = "codex-canonical-status"
 	shadowInputTUIProcess   = "codex-tui-process"
-	shadowInputUnchecked    = "unchecked"
-	shadowInputOther        = "other"
+	// The stored native resume record (#82): the canonical daemon resumed the
+	// prepared thread for the attached codex-tui client.
+	shadowInputResumeProof = "codex-resume-proof"
+	shadowInputUnchecked   = "unchecked"
+	shadowInputOther       = "other"
 
 	shadowSiteRemoteHook = "remote-hook"
 	shadowSiteConnection = "remote-control-connection"
 )
 
-var shadowKnownInputs = map[string]bool{shadowInputHerdrAgent: true, shadowInputScreenFooter: true, shadowInputCodexStatus: true, shadowInputTUIProcess: true, shadowInputUnchecked: true,
+var shadowKnownInputs = map[string]bool{shadowInputHerdrAgent: true, shadowInputScreenFooter: true, shadowInputCodexStatus: true, shadowInputTUIProcess: true, shadowInputResumeProof: true, shadowInputUnchecked: true,
 	shadowInputScreenComposer: true}
 
 var shadowSiteFacts = map[string][]shadowFact{
