@@ -11,7 +11,7 @@ import (
 // Keep the original receipt immutable: neither a footer nor an absent hook may
 // replace it. Recheck all private dispatch/binding bytes around native proof.
 func bindRemoteNativeGoal(ctx context.Context, r *durableMatrixReceipt, j *Job, proof func() error) (string, error) {
-	if ctx.Err() != nil || r == nil || j == nil || j.RemoteControl == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != "codex" || j.Agent != "codex" || r.dispatch.Issue.Number != j.Issue || r.dispatch.RunID != "orchid-"+j.DispatchKey || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace || r.dispatch.Host != j.Host {
+	if ctx.Err() != nil || r == nil || j == nil || j.RemoteControl == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != "codex" || j.Agent != "codex" || r.dispatch.Issue.Number != jobHome("", j).Number || r.dispatch.RunID != "orchid-"+j.DispatchKey || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace || r.dispatch.Host != j.Host {
 		return "", goalError("goal-dispatch-binding-invalid")
 	}
 	read := func() (*dispatchBinding, map[string]json.RawMessage, error) {

@@ -103,7 +103,7 @@ const nativeGoalBindingAttempts = 200
 const nativeGoalStartTimeout = 60 * time.Second
 
 func acquireNativeGoalBinding(ctx context.Context, r *durableMatrixReceipt, j *Job, read func() (json.RawMessage, error), wait func(context.Context) bool) (string, error) {
-	if r == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != "codex" || r.dispatch.Issue.Number != j.Issue || j.Agent != "codex" || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace {
+	if r == nil || r.dispatch == nil || r.dispatch.State != "dispatched" || r.dispatch.Source != "codex" || r.dispatch.Issue.Number != jobHome("", j).Number || j.Agent != "codex" || r.dispatch.Location == nil || r.dispatch.Location.PaneID != j.Pane || r.dispatch.Location.WorkspaceID != j.Workspace {
 		return "", goalError("goal-dispatch-binding-invalid")
 	}
 	// The native thread hook can arrive tens of seconds after the prompt is confirmed.
@@ -199,7 +199,7 @@ func loadNativeBindingReceipt(root, key string, j *Job, inbox string, owner *rec
 	if e := read("dispatch.json", &d); e != nil {
 		return nil, "", e
 	}
-	if d.SchemaVersion != 1 || d.State != "dispatched" || d.Source != source || d.Issue.Repo != inbox || d.Issue.Number != j.Issue || d.RunID != "orchid-"+key || d.ParentRunID != nil {
+	if d.SchemaVersion != 1 || d.State != "dispatched" || d.Source != source || d.Issue != jobHome(inbox, j) || d.RunID != "orchid-"+key || d.ParentRunID != nil {
 		return nil, "", goalError("goal-dispatch-binding-invalid")
 	}
 	var b struct {
@@ -511,7 +511,8 @@ func (c *Coord) finishAssignmentGoal(ctx context.Context, j *Job) {
 		State  string `json:"state"`
 		Reason string `json:"stateReason"`
 	}
-	if ghJSON(ctx, &issue, "issue", "view", fmt.Sprint(j.Issue), "--repo", c.cfg.Inbox, "--json", "state,stateReason") != nil {
+	home := jobHome(c.cfg.Inbox, j)
+	if ghJSON(ctx, &issue, "issue", "view", fmt.Sprint(home.Number), "--repo", home.Repo, "--json", "state,stateReason") != nil {
 		log.Printf("issue #%d: native goal transition INCONCLUSIVE reason=goal-inbox-unavailable", j.Issue)
 		return
 	}

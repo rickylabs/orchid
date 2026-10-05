@@ -35,6 +35,9 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"target-revision-invalid":      {"matrix.target_revisions", "Pin the target repository to a full lowercase commit."},
 	"source-repo-invalid":          {"issue.repo", "Name the source repository once in the /swarm block as repo: owner/name."},
 	"source-repo-unavailable":      {"targets", "The source repository is not a configured Orchid target with a pinned revision. Orchid never works in another repository instead."},
+	"brief-encoding-invalid":       {"comment.body", "Post the /swarm comment with LF line ends; a stray carriage return is never read as part of a value."},
+	"source-issue-closed":          {"issue.state", "Reopen the source issue, then post a new /swarm comment."},
+	"source-grant-missing":         {"grant", "A comment launches only with the owner's grant for this exact comment, installed through Cockpit before the comment is posted."},
 	"source-repo-mismatch":         {"issue.repo", "The binding names a source repository that its label target does not match. Add repo: owner/name to the /swarm block."},
 	"issue-invalid":                {"inbox", "Verify the inbox repository and issue number."},
 	"issue-identity-missing":       {"issue.id", "Fetch the complete GitHub issue identity."},
@@ -113,7 +116,8 @@ func validQuotaDetail(detail string) bool {
 // plain notices only: the Harness reader's closed launch-state vocabulary does
 // not include them yet, and an unknown code would make it reject the record.
 func sourceRepoRefusal(reason string) bool {
-	return reason == "source-repo-invalid" || reason == "source-repo-unavailable" || reason == "source-repo-mismatch"
+	return reason == "source-repo-invalid" || reason == "source-repo-unavailable" || reason == "source-repo-mismatch" ||
+		reason == "source-grant-missing" || reason == "brief-encoding-invalid" || reason == "source-issue-closed"
 }
 
 func validMatrixRefusal(r matrixRefusal) bool {
@@ -202,7 +206,11 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if post(ctx, c.cfg.Inbox, n, body) != nil {
+	state := "refused"
+	if r.Status != "refused" {
+		state = "blocked"
+	}
+	if c.postIssueNotice(ctx, n, state, r.ReasonCode, body, post) != nil {
 		log.Printf("issue #%d: matrix refusal comment unavailable; will retry", n)
 		return
 	}
@@ -240,7 +248,10 @@ func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post 
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	body := "divybot: a later poll launched an agent for this issue. The earlier matrix refusal notice on this issue is superseded."
-	if post(ctx, c.cfg.Inbox, n, body) != nil {
+	if _, binding := c.sourceBinding(n); binding {
+		body = "" // the binding's started reply supersedes its refusal
+	}
+	if body != "" && post(ctx, c.cfg.Inbox, n, body) != nil {
 		log.Printf("issue #%d: superseded-refusal notice unavailable", n)
 		return
 	}
