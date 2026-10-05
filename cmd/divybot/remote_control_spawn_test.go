@@ -9,10 +9,13 @@ import (
 	"time"
 )
 
-// An isolated CLI/Herdr fixture, never a native launch. In particular, the
-// failed/absent RC controls must not publish a dispatched/native decoration.
+// An isolated CLI/Herdr fixture, never a native launch. Terminal text never
+// gates a managed Claude launch: whatever the footer shows, the stable native
+// occupant alone admits it, recorded as unconfirmed. An unstable occupant
+// (native state changing between reads) must not publish a dispatched/native
+// decoration.
 func TestRemoteControlClaudeSpawnGate(t *testing.T) {
-	for _, mode := range []string{"connected", "absent", "failed"} {
+	for _, mode := range []string{"connected", "absent", "failed", "unstable"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			cwd := t.TempDir()
@@ -22,14 +25,19 @@ func TestRemoteControlClaudeSpawnGate(t *testing.T) {
 			}
 			t.Setenv("REMOTE_FIXTURE_CWD", cwd)
 			t.Setenv("REMOTE_FIXTURE_ID", privateTestID(t))
+			t.Setenv("REMOTE_FIXTURE_COUNTER", filepath.Join(root, "agent-get-count"))
 			t.Setenv("REMOTE_FIXTURE_MODE", mode)
 			script := `#!/usr/bin/env python3
 import sys,json,os
 a=sys.argv[1:]
-agent={'agent':'claude','name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','cwd':os.environ['REMOTE_FIXTURE_CWD'],'agent_status':'idle','interactive_ready':True,'state_change_seq':1,'agent_session':{'source':'herdr:claude','agent':'claude','kind':'id','value':os.environ['REMOTE_FIXTURE_ID']}}
+def agent(seq):return {'agent':'claude','name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','cwd':os.environ['REMOTE_FIXTURE_CWD'],'agent_status':'idle','interactive_ready':True,'state_change_seq':seq,'agent_session':{'source':'herdr:claude','agent':'claude','kind':'id','value':os.environ['REMOTE_FIXTURE_ID']}}
+def seq():
+ if os.environ['REMOTE_FIXTURE_MODE']!='unstable':return 1
+ c=os.environ['REMOTE_FIXTURE_COUNTER'];n=int(open(c).read()) if os.path.exists(c) else 0
+ open(c,'w').write(str(n+1));return n+1
 if a[:2]==['workspace','create']:r={'type':'workspace_created','workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1','workspace_id':'w1'}}
-elif a[:2]==['agent','start']:r={'type':'agent_started','agent':agent}
-elif a[:2]==['agent','get']:r={'type':'agent_info','agent':agent}
+elif a[:2]==['agent','start']:r={'type':'agent_started','agent':agent(1)}
+elif a[:2]==['agent','get']:r={'type':'agent_info','agent':agent(seq())}
 elif a[:2]==['pane','read']:
  print('/rc active' if os.environ['REMOTE_FIXTURE_MODE']=='connected' else 'Remote Control failed' if os.environ['REMOTE_FIXTURE_MODE']=='failed' else 'idle composer');sys.exit(0)
 else:r={'type':'ok'}
@@ -41,30 +49,26 @@ print(json.dumps({'result':r}))
 			on := true
 			host := Host{Name: "fixture-host", Home: root, RemoteControl: &RemoteControlConfig{Claude: &on}}
 			receipt := registrationReceipt(t, "claude", Overrides{})
-			budget := 800 * time.Millisecond
-			if mode == "connected" {
-				budget = 3 * time.Second
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), budget)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			_, _, err := host.spawnAgent(ctx, "fixture-agent", cwd, nil, "claude", Overrides{}, receipt, "synthetic task")
-			if (err == nil) != (mode == "connected") {
-				t.Fatal("managed spawn accepted absent/failed RC or refused connected control")
+			if (err == nil) != (mode != "unstable") { // guard:spawn-native-not-text
+				t.Fatalf("footer %s: managed spawn err=%v", mode, err)
 			}
 			path := filepath.Join(filepath.Dir(receipt.file), "remote-control.json")
-			if mode != "connected" {
+			if mode == "unstable" {
 				if _, e := os.Lstat(path); !os.IsNotExist(e) {
 					t.Fatal("failed remote launch published capability")
 				}
 				if receipt.dispatch.State == "dispatched" {
 					t.Fatal("failed remote launch published successful dispatch")
 				}
-			} else {
-				b, e := os.ReadFile(path)
-				var row remoteControlObservation
-				if e != nil || json.Unmarshal(b, &row) != nil || row.State != "connected" || row.SessionName != nil {
-					t.Fatal("connected launch lost truthful name/connection distinction")
-				}
+				return
+			}
+			b, e := os.ReadFile(path)
+			var row remoteControlObservation
+			if e != nil || json.Unmarshal(b, &row) != nil || row.State != "unconfirmed" || row.SessionName != nil || row.Link != nil {
+				t.Fatal("a Claude launch was not recorded as unconfirmed without name or link")
 			}
 		})
 	}

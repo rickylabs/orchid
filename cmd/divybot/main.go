@@ -85,8 +85,8 @@ type Host struct {
 	RemoteRun      *remoteControlRun    `json:"-"`
 	ShadowScope    *nativeShadowScope   `json:"-"`
 	Acceptance     *codexAcceptance     `json:"-"`
-	GoalReadiness  *goalReadinessShadow `json:"-"`
-	ClaudeLinks    *claudeLinkStore     `json:"-"` // Claude session links from the bound native record // observe-only native readiness record
+	GoalReadiness  *goalReadinessShadow `json:"-"` // observe-only native readiness record
+	ClaudeLinks    *claudeLinkStore     `json:"-"` // Claude session links agreed by Claude's own bound records
 	Name           string               `json:"name"`
 	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
 	Key            string               `json:"key"`          // ssh key path; "" = default/agent
@@ -964,10 +964,14 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	}
 	if remote != nil {
 		var observedName *string
+		state, reason := "connected", ""
 		if agent == "codex" {
 			observedName = &remote.Name
+		} else {
+			// Claude documents no native connection state: always unconfirmed.
+			state, reason = "unconfirmed", "remote-control-unconfirmed"
 		}
-		if e := writeRemoteObservation(ctx, receipt, agent, remote, "connected", "", observedName, nil); e != nil {
+		if e := writeRemoteObservation(ctx, receipt, agent, remote, state, reason, observedName, nil); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-observation", errMatrix)
 		}
 	}

@@ -15,10 +15,10 @@ The envelope has exactly these fields:
 | nativeSessionId | private native join key; never disclose this field |
 | host, paneId, workspaceId | exact private dispatch placement |
 | vendor | `claude` or `chatgpt`, corroborated by dispatch source |
-| state | `connected` or `unconfirmed` |
+| state | `connected` or `unconfirmed`; Claude is always `unconfirmed` |
 | reason | null for connected; a closed refusal string for unconfirmed |
 | sessionName | observed native name, or null; never a requested-only name |
-| link | null in this producer revision; no URL construction |
+| link | Claude session URL or null; see below. Always null for ChatGPT |
 | observedAt | UTC RFC3339Nano native observation time |
 | validUntil | observedAt plus exactly 30 seconds |
 
@@ -36,11 +36,32 @@ the native identity here.
 Names are native readback. Codex uses `thread/name/set` followed by `thread/read`
 against the exact prepared/resumed thread on the canonical connected daemon.
 Claude's launch uses the required name flags, but the requested string is not
-published until its native title source corroborates it. Null means unavailable,
-even when connection is proven. Both vendors have `link:null` in this revision;
-an Open action is unavailable. A later target producer needs separate native
-provenance, accepted origin/format and disclosure review; it cannot concatenate
-an identifier or title into a URL.
+published as a native name: Claude rows are never connected, so their name is null.
+
+Claude documents no native Remote Control connection state, and terminal text
+never decides one: the footer is not read. A managed Claude launch, goal delivery
+and every observation are gated on the stable native occupant alone (exact Herdr
+session, cwd and state across two reads), and the row is always `unconfirmed`.
+
+The Claude `link` is an OBSERVED, undocumented association. The URL form is
+documented: the session id is the part of the claude.ai/code session URL after
+`/code/`. The link is served only when two of Claude Code's own records agree:
+`sessions/<pid>.json` bound to a live pane process by pid, kernel start time and
+the native session id (`bridgeSessionId`), and the latest typed `bridge_status`
+entry of that session's own transcript (owner-only regular file, no symlinks).
+The first bound process pins the run; a later process never supplies the link
+(the pin is in memory, so a restarted coordinator pins the next bound process of
+the same native session). The link is exactly
+`https://claude.ai/code/session_<1-128 alphanumerics>`; it is identity, never a
+connection verdict, and is never read from terminal text. Any missing, malformed,
+ambiguous or disagreeing source, another process, or an ended or replaced
+session leaves `link:null` with a private named reason in the coordinator log
+(`claude session link withheld (<reason>)`; reasons: process-unavailable,
+record-unbound, record-ambiguous, record-malformed, read-failed, bridge-absent,
+process-replaced, transcript-entry-absent, transcript-unreadable,
+sources-disagree, identity-changed). Withholding a link that is on the published
+row withdraws that row under the same lock the publisher holds; the next
+observation writes it again without a link.
 
 The connection observation is independent of native liveness and completion.
 It grants no authority to launch, pair, enable, consent, reconnect, Steer or Stop.
@@ -48,8 +69,9 @@ Refresh uses the retained run mode, not today's launch switch. Explicit switch
 off opts future managed launches out of Orchid's remote integration; missing
 observations on those runs grant no capability.
 
-On failed proof the producer replaces the row with `unconfirmed`, clears its
-name/target, or removes it if binding or publication cannot be verified. Stop,
+On failed proof the producer replaces the row with `unconfirmed` and clears its
+name, or removes it if binding or publication cannot be verified. A failed Claude
+proof is a lost native identity: the row and its link are removed. Stop,
 teardown, completion retirement and uncertain dispatch remove it. The reader
 must also refuse terminal/fenced roots independently, and reject future times,
 expired observations, invalid validity windows and results arriving after a
@@ -68,7 +90,8 @@ policy and no cross-principal cache sharing.
 
 The exact closed envelope is `remote-control.schema.json`. Synthetic consumer
 fixtures are `testdata/remote-control/chatgpt-connected.json`,
-`claude-connected-unnamed.json`, and `chatgpt-unconfirmed.json`. Their clock is
+`claude-unconfirmed.json`, `claude-unconfirmed-linked.json` and
+`chatgpt-unconfirmed.json`. Their clock is
 2026-01-01T00:00:00Z; tests inject that clock, then move it to expiry. All values
 are synthetic. Producer boundary controls live in `remote_control_*_test.go`. Operational values remain private. Consumer READY
 must pin the reviewed merged producer revision, not a candidate branch.

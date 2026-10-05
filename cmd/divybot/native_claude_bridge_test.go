@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +50,35 @@ func claudeBridgeHost(t *testing.T, pids []int, records map[int]any) Host {
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	return Host{Name: "fixture-host", Home: home}
+}
+
+// writeBridgeTranscript writes the session's own transcript (owner-only)
+// where Claude Code keeps it for cwd.
+func writeBridgeTranscript(t *testing.T, home, cwd, sid string, lines ...string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "projects", regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(cwd, "-"))
+	path := filepath.Join(dir, sid+".jsonl")
+	if os.MkdirAll(dir, 0700) != nil || os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600) != nil || os.Chmod(path, 0600) != nil {
+		t.Fatal("fixture transcript")
+	}
+	return path
+}
+
+// bridgeStatus is a typed bridge_status transcript entry.
+func bridgeStatus(sid, url string) string {
+	b, _ := json.Marshal(map[string]any{"type": "system", "subtype": "bridge_status", "sessionId": sid, "url": url, "content": "synthetic status"})
+	return string(b)
+}
+
+// setPanePIDs makes the fake Herdr report other pane processes.
+func setPanePIDs(t *testing.T, h Host, pids ...int) {
+	t.Helper()
+	procs := []map[string]any{}
+	for _, pid := range pids {
+		procs = append(procs, map[string]any{"pid": pid, "name": "claude"})
+	}
+	info, _ := json.Marshal(map[string]any{"result": map[string]any{"process_info": map[string]any{"foreground_processes": procs}}})
+	writeFixture(t, filepath.Join(h.Home, ".local", "bin", "herdr"), "#!/bin/sh\nprintf '%s\\n' '"+string(info)+"'\n")
 }
 
 // Claude's own session record, bound to the exact live process by pid, kernel
@@ -257,12 +288,13 @@ func TestClaudeBridgeObservationParity(t *testing.T) {
 		cancel()
 		return ctx, cancel
 	}
-	if without := observationResult(t, false, "slow", budget(4*time.Second)); without != "connected" {
-		t.Fatalf("baseline fixture did not prove connection: %s", without)
+	// Claude documents no native connection state: always unconfirmed.
+	if without := observationResult(t, false, "slow", budget(4*time.Second)); without != "unconfirmed" {
+		t.Fatalf("baseline fixture not unconfirmed: %s", without)
 	}
 	for _, mode := range []string{"present", "absent", "unknown", "malformed", "slow"} {
 		t.Run("decision-"+mode, func(t *testing.T) {
-			if with := observationResult(t, true, mode, budget(4*time.Second)); with != "connected" {
+			if with := observationResult(t, true, mode, budget(4*time.Second)); with != "unconfirmed" {
 				t.Fatalf("native read changed today's decision: %s", with)
 			}
 		})
@@ -270,7 +302,7 @@ func TestClaudeBridgeObservationParity(t *testing.T) {
 	t.Run("caller-deadline", func(t *testing.T) {
 		without := observationResult(t, false, "slow", budget(600*time.Millisecond))
 		with := observationResult(t, true, "slow", budget(600*time.Millisecond))
-		if without != "connected" || with != without {
+		if without != "unconfirmed" || with != without {
 			t.Fatalf("caller deadline parity broken: without=%s with=%s", without, with)
 		}
 	})
@@ -300,6 +332,18 @@ func TestClaudeBridgeNeverReadsScreen(t *testing.T) {
 	if !strings.Contains(productionSources(t)["remote_control_observation.go"], "h.observeClaudeBridge(j) // guard:claude-bridge-off-path") {
 		t.Fatal("observation does not start the read off the decision path")
 	}
+	// Terminal text never proves a Claude connection or gates a launch.
+	proof := productionSources(t)["remote_control.go"]
+	start := strings.Index(proof, "func (h Host) remoteProof(")
+	end := strings.Index(proof[start+1:], "\nfunc ")
+	if start < 0 || end < 0 {
+		t.Fatal("remote proof not found")
+	}
+	for _, banned := range []string{"visiblePromptScreen", "Screen", "/rc active", "claudeRemoteConnected"} {
+		if strings.Contains(proof[start:start+1+end], banned) {
+			t.Fatalf("the remote proof reads terminal text: %s", banned)
+		}
+	}
 }
 
 // fixtureBridge is a bridge session id in Claude's documented session id form.
@@ -322,9 +366,9 @@ func TestClaudeBridgeSessionIDForm(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := claudeBridgeHost(t, []int{self}, map[int]any{self: map[string]any{"pid": self, "sessionId": sid, "procStart": start, "bridgeSessionId": tc.bridge}})
-			bridge, present, ok := h.claudeBridgeSession(context.Background(), "w1:p1", sid)
-			if ok != tc.ok || (tc.ok && (bridge != tc.bridge || !present)) || (!tc.ok && bridge != "") {
-				t.Fatalf("bridge=%q present=%v ok=%v", bridge, present, ok)
+			read, reason := h.claudeBridgeSession(context.Background(), "w1:p1", sid, "")
+			if (reason == "") != tc.ok || (tc.ok && read.Bridge != tc.bridge) || (!tc.ok && read != (claudeBridgeRead{})) {
+				t.Fatalf("bridge=%q reason=%q", read.Bridge, reason)
 			}
 		})
 	}
@@ -333,8 +377,9 @@ func TestClaudeBridgeSessionIDForm(t *testing.T) {
 func TestClaudeLinkStore(t *testing.T) {
 	s := &claudeLinkStore{}
 	now := time.Now()
-	s.set("k", "native-a", "https://claude.ai/code/"+fixtureBridge, now)
-	if got := s.fresh("k", "native-a", now.Add(claudeLinkFreshness)); got == nil || *got != "https://claude.ai/code/"+fixtureBridge {
+	link := "https://claude.ai/code/" + fixtureBridge
+	s.set("k", "native-a", link, now)
+	if got := s.fresh("k", "native-a", now.Add(claudeLinkFreshness)); got == nil || *got != link {
 		t.Fatal("fresh link not returned")
 	}
 	if s.fresh("k", "native-b", now) != nil || s.fresh("other", "native-a", now) != nil {
@@ -343,46 +388,131 @@ func TestClaudeLinkStore(t *testing.T) {
 	if s.fresh("k", "native-a", now.Add(claudeLinkFreshness+time.Second)) != nil || s.fresh("k", "native-a", now.Add(-time.Second)) != nil {
 		t.Fatal("stale or future link returned")
 	}
-	s.clear("k")
-	if s.fresh("k", "native-a", now) != nil {
-		t.Fatal("cleared link returned")
+	// Withholding a published link revokes the published row exactly once; a
+	// later publish writes no link.
+	revoked := 0
+	s.revokeWith(func(key string) {
+		if key == "k" {
+			revoked++
+		}
+	})
+	var wrote *string
+	write := func(l *string) error { wrote = l; return nil }
+	if s.publish("k", "native-a", now, write) != nil || wrote == nil || *wrote != link {
+		t.Fatal("control: fresh link not published")
+	}
+	s.withhold("k", 7, linkRecordUnbound)
+	if revoked != 1 || s.fresh("k", "native-a", now) != nil {
+		t.Fatal("withheld link not revoked from the published row")
+	}
+	s.withhold("k", 7, linkRecordUnbound)
+	if s.publish("k", "native-a", now, write) != nil || wrote != nil {
+		t.Fatal("a withheld link was published again")
+	}
+	s.withhold("k", 7, linkBridgeAbsent)
+	if revoked != 1 {
+		t.Fatal("a row without a link was revoked")
+	}
+	s.set("k", "native-a", link, now)
+	if s.publish("k", "native-a", now, func(*string) error { return errClaudeBridgeUnknown }) == nil {
+		t.Fatal("write error lost")
+	}
+	s.withhold("k", 7, linkRecordUnbound)
+	if revoked != 1 {
+		t.Fatal("an unwritten link was revoked")
+	}
+	// The first bound process pins the job; another pid or start never does.
+	p := claudeProcess{10, "100"}
+	if !s.pinned("k", p) || !s.pinned("k", p) || s.pinned("k", claudeProcess{11, "100"}) || s.pinned("k", claudeProcess{10, "101"}) {
+		t.Fatal("launched process pin not kept")
+	}
+	s.forget("k", 7, linkIdentityChanged)
+	if !s.pinned("k", claudeProcess{11, "100"}) {
+		t.Fatal("an ended session kept its process pin")
 	}
 	var none *claudeLinkStore
 	none.set("k", "n", "u", now)
-	if none.fresh("k", "n", now) != nil {
-		t.Fatal("nil store returned a link")
+	none.withhold("k", 7, linkRecordUnbound)
+	none.forget("k", 7, linkIdentityChanged)
+	none.revokeWith(nil)
+	if none.fresh("k", "n", now) != nil || none.pinned("k", p) || none.publish("k", "n", now, write) != nil || wrote != nil {
+		t.Fatal("nil store returned or published a link")
 	}
 }
 
-// End to end through the production observation: the Claude session link
-// comes only from Claude's own record bound to the exact process, on both a
-// connected and an unconfirmed (footer failed) observation; without a bound
-// record it is null even when the pane shows a session URL as text.
+// A withheld link is logged once per reason change, naming only the reason.
+func TestClaudeLinkWithheldReasonLogged(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	s := &claudeLinkStore{}
+	s.withhold("k", 7, linkBridgeAbsent)
+	s.withhold("k", 7, linkBridgeAbsent)
+	s.withhold("k", 7, linkSourcesDisagree)
+	s.set("k", "native-a", "https://claude.ai/code/"+fixtureBridge, time.Now())
+	s.withhold("k", 7, linkSourcesDisagree)
+	got := buf.String()
+	if strings.Count(got, "claude session link withheld") != 3 || strings.Count(got, "("+linkBridgeAbsent+")") != 1 || strings.Contains(got, fixtureBridge) || strings.Contains(got, "native-a") {
+		t.Fatalf("withheld reasons not logged once per change without private values: %d lines", strings.Count(got, "\n"))
+	}
+}
+
+// End to end through the production observation: the Claude session link is
+// served only when Claude's own record bound to the launched process and the
+// latest bridge_status entry of its transcript agree. Terminal text never
+// matters: the state is unconfirmed whatever the pane shows, and a session URL
+// shown as text never becomes a link.
 func TestObservationCarriesNativeClaudeLink(t *testing.T) {
+	url := "https://claude.ai/code/" + fixtureBridge
+	other := "https://claude.ai/code/session_ZyXwVuTsRqPoNmLkJiHgFeDc"
+	entry := func(u string) func(string) []string {
+		return func(sid string) []string { return []string{`{"type":"user","sessionId":"x"}`, bridgeStatus(sid, u)} }
+	}
 	for _, tc := range []struct {
 		name, mode, pane string
-		state            string
+		transcript       func(sid string) []string
 		link             bool
 	}{
-		{"connected-with-bridge", "present", "/rc active", "connected", true},
-		{"footer-failed-with-bridge", "present", "no indicator here", "unconfirmed", true},
-		{"no-bridge-field", "absent", "/rc active", "connected", false},
-		{"no-record-pane-shows-url", "none", "/rc active https://claude.ai/code/" + fixtureBridge, "connected", false},
-		{"malformed-record", "malformed", "/rc active", "connected", false},
+		{"both-agree", "present", "/rc active", entry(url), true},
+		{"both-agree-footer-failed", "present", "Remote Control failed", entry(url), true},
+		{"both-agree-no-footer", "present", "idle composer", entry(url), true},
+		{"latest-entry-agrees", "present", "", func(sid string) []string { return []string{bridgeStatus(sid, other), bridgeStatus(sid, url)} }, true},
+		{"latest-entry-disagrees", "present", "", func(sid string) []string { return []string{bridgeStatus(sid, url), bridgeStatus(sid, other)} }, false},
+		{"record-only", "present", "/rc active", nil, false},
+		{"transcript-only", "absent", "/rc active", entry(url), false},
+		{"sources-disagree", "present", "/rc active", entry(other), false},
+		{"foreign-session-entry", "present", "", func(string) []string { return []string{bridgeStatus("another-session", url)} }, false},
+		{"duplicate-key-entry", "present", "", func(sid string) []string {
+			return []string{fmt.Sprintf(`{"type":"system","subtype":"bridge_status","sessionId":%q,"url":%q,"url":%q}`, sid, url, url)}
+		}, false},
+		{"url-not-string", "present", "", func(sid string) []string {
+			return []string{fmt.Sprintf(`{"type":"system","subtype":"bridge_status","sessionId":%q,"url":7}`, sid)}
+		}, false},
+		{"no-record-pane-shows-url", "none", "/rc active " + url, entry(url), false},
+		{"malformed-record", "malformed", "/rc active", entry(url), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state, link := observeClaudeLink(t, tc.mode, tc.pane)
-			if state != tc.state {
-				t.Fatalf("state %q, want %q", state, tc.state)
+			state, link := observeClaudeLink(t, tc.mode, tc.pane, tc.transcript)
+			if state != "unconfirmed" {
+				t.Fatalf("state %q, want unconfirmed", state)
 			}
-			if tc.link != (link != nil) || (link != nil && *link != "https://claude.ai/code/"+fixtureBridge) {
-				t.Fatalf("link %v, want present=%v", link, tc.link)
+			if tc.link != (link != nil) || (link != nil && *link != url) { // guard:claude-link-e2e
+				t.Fatalf("link present=%v, want %v", link != nil, tc.link)
 			}
 		})
 	}
 }
 
-func observeClaudeLink(t *testing.T, mode, pane string) (string, *string) {
+// claudeLinkFixture is a Claude job with synthetic receipts, Herdr and native
+// records, observed through the production observation entry point.
+type claudeLinkFixture struct {
+	c   *Coord
+	h   Host
+	j   *Job
+	row string
+}
+
+func newClaudeLinkFixture(t *testing.T, mode, pane string, transcript func(sid string) []string) *claudeLinkFixture {
 	t.Helper()
 	r := registrationReceipt(t, "claude", Overrides{})
 	r.dispatch.Host = "fixture-host"
@@ -408,6 +538,9 @@ func observeClaudeLink(t *testing.T, mode, pane string) (string, *string) {
 		records[os.Getpid()] = "{not-json"
 	}
 	h := claudeBridgeHost(t, []int{os.Getpid()}, records)
+	if transcript != nil {
+		writeBridgeTranscript(t, h.Home, run.Cwd, run.NativeSessionID, transcript(run.NativeSessionID)...)
+	}
 	agent := claudeAgentInfo(t, run.NativeSessionID)
 	a := agent["agent"].(map[string]any)
 	a["cwd"], a["agent_status"], a["state_change_seq"] = run.Cwd, "idle", 1
@@ -416,21 +549,130 @@ func observeClaudeLink(t *testing.T, mode, pane string) (string, *string) {
 	script := "#!/usr/bin/env python3\nimport sys\na=sys.argv[1:]\nif a[:2]==['pane','process-info']:\n print(" + fmt.Sprintf("%q", processInfo) + ")\nelif a[:2]==['agent','get']:\n print(" + fmt.Sprintf("%q", string(info)) + ")\nelif a[:2]==['pane','read']:\n print(" + fmt.Sprintf("%q", pane) + ")\nelse: sys.exit(1)\n"
 	writeFixture(t, filepath.Join(h.Home, ".local", "bin", "herdr"), script)
 	c := &Coord{cfg: &Config{Inbox: "fixture/inbox", Matrix: MatrixConfig{ReceiptRoot: root}}, shadow: newNativeEvidenceShadow(time.Now), claudeLinks: &claudeLinkStore{}}
-	for pass := 0; pass < 2; pass++ { // the first pass starts the off-path read; the second writes its link
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		c.observeRemoteControl(ctx, h, j)
-		cancel()
-		c.shadow.bg.Wait()
-	}
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(r.file), "remote-control.json"))
-	if err != nil {
-		return "absent", nil
+	return &claudeLinkFixture{c: c, h: h, j: j, row: filepath.Join(filepath.Dir(r.file), "remote-control.json")}
+}
+
+// observe runs one observation and waits for its off-path read.
+func (f *claudeLinkFixture) observe() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	f.c.observeRemoteControl(ctx, f.h, f.j)
+	cancel()
+	f.c.shadow.bg.Wait()
+}
+
+// published reads the row on disk: whether it exists and its link.
+func (f *claudeLinkFixture) published(t *testing.T) (bool, string, *string) {
+	t.Helper()
+	b, err := os.ReadFile(f.row)
+	if os.IsNotExist(err) {
+		return false, "", nil
 	}
 	var o remoteControlObservation
-	if json.Unmarshal(b, &o) != nil {
+	if err != nil || json.Unmarshal(b, &o) != nil {
 		t.Fatal("observation malformed")
 	}
-	return o.State, o.Link
+	return true, o.State, o.Link
+}
+
+func observeClaudeLink(t *testing.T, mode, pane string, transcript func(sid string) []string) (string, *string) {
+	t.Helper()
+	f := newClaudeLinkFixture(t, mode, pane, transcript)
+	f.observe() // the first pass starts the off-path read; the second writes its link
+	f.observe()
+	for _, c := range f.c.shadow.ledger(f.j) {
+		if c.Site == shadowSiteConnection && c.ScreenDerived {
+			t.Fatal("the Claude connection verdict is recorded as screen-derived")
+		}
+	}
+	ok, state, link := f.published(t)
+	if !ok {
+		return "absent", nil
+	}
+	return state, link
+}
+
+// A published link is revoked from the row on disk as soon as a later native
+// read no longer supports it (the record ended or lost its bridge), even while
+// the occupant itself is unchanged; the next row carries no link.
+func TestClaudeLinkRevokedFromPublishedRow(t *testing.T) {
+	for _, later := range []string{"record-removed", "bridge-removed", "transcript-disagrees"} {
+		t.Run(later, func(t *testing.T) {
+			f := newClaudeLinkFixture(t, "present", "", func(sid string) []string { return []string{bridgeStatus(sid, "https://claude.ai/code/"+fixtureBridge)} })
+			f.observe()
+			f.observe()
+			if _, _, link := f.published(t); link == nil {
+				t.Fatal("control: agreeing sources did not publish a link")
+			}
+			run := f.j.RemoteControl
+			record := filepath.Join(f.h.Home, ".claude", "sessions", fmt.Sprintf("%d.json", os.Getpid()))
+			switch later {
+			case "record-removed":
+				_ = os.Remove(record)
+			case "bridge-removed":
+				b, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "sessionId": run.NativeSessionID, "procStart": procStart(t, os.Getpid())})
+				writeFixture(t, record, string(b))
+			case "transcript-disagrees":
+				writeBridgeTranscript(t, f.h.Home, run.Cwd, run.NativeSessionID, bridgeStatus(run.NativeSessionID, "https://claude.ai/code/session_ZyXwVuTsRqPoNmLkJiHgFeDc"))
+			}
+			// This pass publishes from the still-fresh cache while its off-path
+			// read withholds: the withheld link must not stay on disk.
+			f.observe()
+			if _, _, link := f.published(t); link != nil { // guard:claude-link-revoked-on-disk
+				t.Fatal("a withheld link stayed on the published row")
+			}
+			f.observe()
+			if ok, state, link := f.published(t); !ok || state != "unconfirmed" || link != nil {
+				t.Fatal("the next row was not unconfirmed without a link")
+			}
+		})
+	}
+}
+
+// Only the launched process supplies the link: a later process in the pane
+// with its own bound record for the same session is refused.
+func TestClaudeLinkPinnedToLaunchedProcess(t *testing.T) {
+	j := shadowFixtureJob(t, "claude")
+	self, parent := os.Getpid(), os.Getppid()
+	rec := func(pid int) map[string]any {
+		return map[string]any{"pid": pid, "sessionId": j.RemoteControl.NativeSessionID, "procStart": procStart(t, pid), "bridgeSessionId": fixtureBridge}
+	}
+	h := claudeBridgeHost(t, []int{self}, map[int]any{self: rec(self), parent: rec(parent)})
+	writeBridgeTranscript(t, h.Home, j.RemoteControl.Cwd, j.RemoteControl.NativeSessionID, bridgeStatus(j.RemoteControl.NativeSessionID, "https://claude.ai/code/"+fixtureBridge))
+	h.ShadowScope = newNativeEvidenceShadow(time.Now).scope(j)
+	h.ClaudeLinks = &claudeLinkStore{}
+	h.readClaudeBridge(j)
+	if h.ClaudeLinks.fresh(j.DispatchKey, j.RemoteControl.NativeSessionID, time.Now()) == nil {
+		t.Fatal("control: launched process did not yield a link")
+	}
+	setPanePIDs(t, h, parent)
+	h.readClaudeBridge(j)
+	if h.ClaudeLinks.fresh(j.DispatchKey, j.RemoteControl.NativeSessionID, time.Now()) != nil { // guard:claude-link-pinned
+		t.Fatal("a replacement process supplied the link")
+	}
+}
+
+// The transcript must be Claude's own private regular file.
+func TestClaudeLinkTranscriptMustBePrivate(t *testing.T) {
+	j := shadowFixtureJob(t, "claude")
+	self := os.Getpid()
+	for _, mode := range []string{"world-readable", "symlink"} {
+		t.Run(mode, func(t *testing.T) {
+			h := claudeBridgeHost(t, []int{self}, map[int]any{self: map[string]any{"pid": self, "sessionId": j.RemoteControl.NativeSessionID, "procStart": procStart(t, self), "bridgeSessionId": fixtureBridge}})
+			path := writeBridgeTranscript(t, h.Home, j.RemoteControl.Cwd, j.RemoteControl.NativeSessionID, bridgeStatus(j.RemoteControl.NativeSessionID, "https://claude.ai/code/"+fixtureBridge))
+			if mode == "world-readable" {
+				_ = os.Chmod(path, 0644)
+			} else {
+				real := path + ".real"
+				if os.Rename(path, real) != nil || os.Symlink(real, path) != nil {
+					t.Fatal("fixture symlink")
+				}
+			}
+			read, reason := h.claudeBridgeSession(context.Background(), j.Pane, j.RemoteControl.NativeSessionID, j.RemoteControl.Cwd)
+			if reason != "" || read.Transcript != "unreadable" || read.URL != "" {
+				t.Fatalf("transcript accepted: reason=%q transcript=%q", reason, read.Transcript)
+			}
+		})
+	}
 }
 
 // The observation writer accepts only a Claude link in the documented form.
@@ -453,6 +695,10 @@ func TestObservationLinkForm(t *testing.T) {
 	link := "https://claude.ai/code/" + fixtureBridge
 	if writeRemoteObservation(context.Background(), codex, "codex", run, "unconfirmed", "remote-control-unconfirmed", nil, &link) == nil {
 		t.Fatal("a Claude link was written on a Codex observation")
+	}
+	// Claude documents no native connection state: a connected Claude row is refused.
+	if writeRemoteObservation(context.Background(), r, "claude", run, "connected", "", nil, nil) == nil { // guard:claude-never-connected-writer
+		t.Fatal("a connected Claude row was written")
 	}
 	for _, tc := range []struct {
 		kind, link string
@@ -486,9 +732,10 @@ func TestClaudeLinkClearedByLaterRead(t *testing.T) {
 		}
 		return r
 	}
-	for _, later := range []string{"malformed", "no-bridge"} {
+	for _, later := range []string{"malformed", "no-bridge", "no-transcript-entry"} {
 		t.Run(later, func(t *testing.T) {
 			h := claudeBridgeHost(t, []int{self}, map[int]any{self: rec(true)})
+			transcript := writeBridgeTranscript(t, h.Home, j.RemoteControl.Cwd, j.RemoteControl.NativeSessionID, bridgeStatus(j.RemoteControl.NativeSessionID, "https://claude.ai/code/"+fixtureBridge))
 			h.ShadowScope = newNativeEvidenceShadow(time.Now).scope(j)
 			h.ClaudeLinks = &claudeLinkStore{}
 			h.readClaudeBridge(j)
@@ -498,6 +745,9 @@ func TestClaudeLinkClearedByLaterRead(t *testing.T) {
 			path := filepath.Join(h.Home, ".claude", "sessions", fmt.Sprintf("%d.json", self))
 			if later == "malformed" {
 				writeFixture(t, path, "{not json")
+			} else if later == "no-transcript-entry" {
+				writeBridgeTranscript(t, h.Home, j.RemoteControl.Cwd, j.RemoteControl.NativeSessionID, `{"type":"user"}`)
+				_ = transcript
 			} else {
 				b, _ := json.Marshal(rec(false))
 				writeFixture(t, path, string(b))

@@ -20,7 +20,7 @@ func TestRemoteControlPrivateConsumerFixtures(t *testing.T) {
 	if err != nil || json.Unmarshal(body, &schema) != nil || schema.AdditionalProperties || len(schema.Required) != 13 || len(schema.Properties) != 13 {
 		t.Fatal("closed private schema unavailable")
 	}
-	for _, name := range []string{"chatgpt-connected", "claude-connected-unnamed", "chatgpt-unconfirmed"} {
+	for _, name := range []string{"chatgpt-connected", "claude-unconfirmed", "claude-unconfirmed-linked", "chatgpt-unconfirmed"} {
 		t.Run(name, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join("testdata", "remote-control", name+".json"))
 			var fixture remoteControlObservation
@@ -35,7 +35,7 @@ func TestRemoteControlPrivateConsumerFixtures(t *testing.T) {
 			}
 			at, e1 := time.Parse(time.RFC3339Nano, fixture.ObservedAt)
 			until, e2 := time.Parse(time.RFC3339Nano, fixture.ValidUntil)
-			if e1 != nil || e2 != nil || until.Sub(at) != remoteControlFreshness || fixture.Link != nil {
+			if e1 != nil || e2 != nil || until.Sub(at) != remoteControlFreshness || (fixture.Link != nil) != (name == "claude-unconfirmed-linked") {
 				t.Fatal("fixture freshness/target semantics changed")
 			}
 			kind := "codex"
@@ -52,7 +52,7 @@ func TestRemoteControlPrivateConsumerFixtures(t *testing.T) {
 			if fixture.Reason != nil {
 				reason = *fixture.Reason
 			}
-			if writeRemoteObservation(context.Background(), r, kind, run, fixture.State, reason, fixture.SessionName, nil) != nil {
+			if writeRemoteObservation(context.Background(), r, kind, run, fixture.State, reason, fixture.SessionName, fixture.Link) != nil {
 				t.Fatal("producer refused reader fixture semantics")
 			}
 			out, _ := os.ReadFile(filepath.Join(filepath.Dir(r.file), "remote-control.json"))
