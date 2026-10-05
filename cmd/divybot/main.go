@@ -238,6 +238,9 @@ func loadConfig(path string) (*Config, error) {
 	if strictJSON(b, &fields) != nil {
 		return nil, fmt.Errorf("config object required")
 	}
+	if i := invalidMirrorAssignments(fields["targets"]); i >= 0 {
+		return nil, fmt.Errorf("targets[%d].mirror_assignments must be a JSON boolean", i)
+	}
 	if block, present := fields["remote_control"]; present {
 		var raw map[string]json.RawMessage
 		if string(block) == "null" || strictJSON(block, &c.RemoteControl) != nil || json.Unmarshal(block, &raw) != nil {
@@ -1551,6 +1554,23 @@ func (c *Config) mirrorsAssignments() bool {
 		}
 	}
 	return false
+}
+
+// invalidMirrorAssignments returns the index of the first target whose
+// mirror_assignments is present but not a JSON boolean, or -1. encoding/json
+// decodes null into a bool as false, so without this an explicit null would
+// silently switch off a feeder instead of failing the config.
+func invalidMirrorAssignments(targets json.RawMessage) int {
+	var list []map[string]json.RawMessage
+	if json.Unmarshal(targets, &list) != nil {
+		return -1 // not a list of objects: ordinary decoding reports it
+	}
+	for i, t := range list {
+		if v, ok := t["mirror_assignments"]; ok && string(v) != "true" && string(v) != "false" {
+			return i
+		}
+	}
+	return -1
 }
 
 type PRView struct {

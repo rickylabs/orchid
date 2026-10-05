@@ -33,6 +33,9 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 	if strictJSON(data, &raw) != nil || raw == nil {
 		return nil, nil, configProblem("config", "invalid-or-duplicate-json")
 	}
+	if i := invalidMirrorAssignments(raw["targets"]); i >= 0 {
+		return nil, nil, configProblem(fmt.Sprintf("targets[%d].mirror_assignments", i), "boolean-required")
+	}
 	var cfg Config
 	if block, ok := raw["matrix"]; ok {
 		var fields map[string]json.RawMessage

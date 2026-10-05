@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -85,15 +86,62 @@ func TestAssignmentTickMirrorsOnlyOptedInTargets(t *testing.T) {
 	}
 }
 
+// A supplied mirror_assignments must be a JSON boolean in both config readers.
+// null is the case encoding/json lets through into a bool as false.
+var nonBooleanMirrorAssignments = []string{`null`, `"yes"`, `1`, `{}`, `[]`}
+
+func mirrorAssignmentsConfig(value string) string {
+	return `{"inbox": "fixture-owner/inbox", "targets": [{"label": "ok", "repo": "fixture-owner/ok", "mirror_assignments": true},
+		{"label": "work", "repo": "fixture-owner/work", "mirror_assignments": ` + value + `}]}`
+}
+
 func TestLoadConfigMirrorAssignmentsMustBeBoolean(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "divybot.json")
-	for _, value := range []string{`"yes"`, `1`, `{}`} {
-		cfg := `{"inbox": "fixture-owner/inbox", "targets": [{"label": "work", "repo": "fixture-owner/work", "mirror_assignments": ` + value + `}]}`
-		if os.WriteFile(path, []byte(cfg), 0600) != nil {
+	for _, value := range nonBooleanMirrorAssignments {
+		if os.WriteFile(path, []byte(mirrorAssignmentsConfig(value)), 0600) != nil {
 			t.Fatal("fixture config")
 		}
-		if _, err := loadConfig(path); err == nil {
-			t.Fatalf("mirror_assignments %s accepted", value)
+		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "mirror_assignments") {
+			t.Fatalf("mirror_assignments %s accepted or not named: %v", value, err)
+		}
+	}
+	if os.WriteFile(path, []byte(mirrorAssignmentsConfig(`null`)), 0600) != nil {
+		t.Fatal("fixture config")
+	}
+	if _, err := loadConfig(path); err == nil || err.Error() != "targets[1].mirror_assignments must be a JSON boolean" {
+		t.Fatalf("null mirror_assignments diagnostic = %v", err)
+	}
+	for _, value := range []string{`true`, `false`} {
+		if os.WriteFile(path, []byte(mirrorAssignmentsConfig(value)), 0600) != nil {
+			t.Fatal("fixture config")
+		}
+		if _, err := loadConfig(path); err != nil {
+			t.Fatalf("mirror_assignments %s rejected: %v", value, err)
+		}
+	}
+}
+
+func TestMatrixConfigMirrorAssignmentsMustBeBoolean(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "divybot.json")
+	for _, value := range nonBooleanMirrorAssignments {
+		if os.WriteFile(path, []byte(mirrorAssignmentsConfig(value)), 0600) != nil {
+			t.Fatal("fixture config")
+		}
+		if _, _, p := readMatrixConfigFile(path); len(p) != 1 || p[0] != (matrixConfigProblem{"targets[1].mirror_assignments", "boolean-required"}) {
+			t.Fatalf("matrix reader mirror_assignments %s: %v", value, p)
+		}
+		var out, diagnostic bytes.Buffer
+		if code := invokeMatrixConfigCLI([]string{"validate", "-config", path}, &out, &diagnostic); code != 2 ||
+			!strings.Contains(out.String()+diagnostic.String(), "targets[1].mirror_assignments") {
+			t.Fatalf("matrix validate mirror_assignments %s: exit %d %s%s", value, code, out.String(), diagnostic.String())
+		}
+	}
+	for _, value := range []string{`true`, `false`} {
+		if os.WriteFile(path, []byte(mirrorAssignmentsConfig(value)), 0600) != nil {
+			t.Fatal("fixture config")
+		}
+		if _, _, p := readMatrixConfigFile(path); len(p) != 0 {
+			t.Fatalf("matrix reader rejected mirror_assignments %s: %v", value, p)
 		}
 	}
 }
