@@ -2603,7 +2603,7 @@ func (c *Coord) tick(ctx context.Context) {
 			c.supervise(ctx, n, j2, status, is)
 			continue
 		}
-		tgt, ok := c.targetFor(is)
+		tgt, ok := c.admissionTarget(ctx, n, is, postMatrixComment)
 		if !ok {
 			continue
 		}
@@ -2755,12 +2755,58 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 }
 
 func (c *Coord) targetFor(is Issue) (Target, bool) {
-	for _, tgt := range c.cfg.Targets {
+	t, reason, ok := c.resolveTarget(is)
+	return t, ok && reason == ""
+}
+
+// admissionTarget is the work target admission launches in. A source-repository
+// refusal is reported plainly and nothing is launched.
+func (c *Coord) admissionTarget(ctx context.Context, n int, is Issue, post func(context.Context, string, int, string) error) (Target, bool) {
+	tgt, reason, ok := c.resolveTarget(is)
+	if ok && reason != "" { // guard:source-repo-refusal
+		c.reportIssueMatrixRefusal(ctx, n, is, refusalFor(matrixReason(reason)), post)
+		return Target{}, false
+	}
+	return tgt, ok
+}
+
+// bindingSourceRef is the source reference a binding issue's title starts with.
+var bindingSourceRef = regexp.MustCompile(`^\[([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[0-9]+\]`)
+
+// resolveTarget chooses the work repository for an inbox issue. ok=false means
+// the issue carries no target label and is not Orchid's. Otherwise a non-empty
+// reason is a plain refusal: the work never falls back to another repository.
+//   - A /swarm "repo: owner/name" key is authoritative: exactly that configured
+//     target, or a refusal.
+//   - Without it, the label target applies, unless the title names a different
+//     source repository; that binding refuses instead of working elsewhere.
+func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
+	var labelled *Target
+	for i, tgt := range c.cfg.Targets {
 		if contains(is.Labels, tgt.Label) {
-			return tgt, true
+			labelled = &c.cfg.Targets[i]
+			break
 		}
 	}
-	return Target{}, false
+	if labelled == nil {
+		return Target{}, "", false
+	}
+	o := parseOverrides(is.Body)
+	if o.RepoInvalid {
+		return Target{}, "source-repo-invalid", true
+	}
+	if o.Repo != "" { // guard:source-repo-authoritative
+		for _, tgt := range c.cfg.Targets {
+			if strings.EqualFold(tgt.Repo, o.Repo) {
+				return tgt, "", true
+			}
+		}
+		return Target{}, "source-repo-unavailable", true
+	}
+	if m := bindingSourceRef.FindStringSubmatch(strings.TrimSpace(is.Title)); m != nil && !strings.EqualFold(m[1], labelled.Repo) { // guard:source-repo-mismatch
+		return Target{}, "source-repo-mismatch", true
+	}
+	return *labelled, "", true
 }
 
 // agentList is the target's ordered agent-overflow preference (normalized to

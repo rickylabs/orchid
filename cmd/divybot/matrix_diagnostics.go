@@ -33,6 +33,9 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"revision-invalid":             {"matrix.revision", "Configure a full lowercase source commit."},
 	"receipt-root-invalid":         {"matrix.receipt_root", "Use an existing private directory, mode 0700, outside Git and without symlink aliases."},
 	"target-revision-invalid":      {"matrix.target_revisions", "Pin the target repository to a full lowercase commit."},
+	"source-repo-invalid":          {"issue.repo", "Name the source repository once in the /swarm block as repo: owner/name."},
+	"source-repo-unavailable":      {"targets", "The source repository is not a configured Orchid target with a pinned revision. Orchid never works in another repository instead."},
+	"source-repo-mismatch":         {"issue.repo", "The binding names a source repository that its label target does not match. Add repo: owner/name to the /swarm block."},
 	"issue-invalid":                {"inbox", "Verify the inbox repository and issue number."},
 	"issue-identity-missing":       {"issue.id", "Fetch the complete GitHub issue identity."},
 	"brief-routing-invalid":        {"issue.body", "Correct duplicate or malformed routing fields."},
@@ -106,6 +109,13 @@ func validQuotaDetail(detail string) bool {
 	return true
 }
 
+// sourceRepoRefusal reports the source-repository refusals. They are posted as
+// plain notices only: the Harness reader's closed launch-state vocabulary does
+// not include them yet, and an unknown code would make it reject the record.
+func sourceRepoRefusal(reason string) bool {
+	return reason == "source-repo-invalid" || reason == "source-repo-unavailable" || reason == "source-repo-mismatch"
+}
+
 func validMatrixRefusal(r matrixRefusal) bool {
 	_, ok := matrixReasons[r.ReasonCode]
 	if !ok || (r.Cause != "" && !matrixSites[r.Cause]) {
@@ -170,7 +180,7 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	// An inconclusive registered launch must never be called a no-agent refusal.
 	if r.ReasonCode == "goal-prompt-unconfirmed" {
 		c.publishLaunchState(n, is, "blocked", r.ReasonCode)
-	} else if r.Status == "refused" && r.ReasonCode != "launch-failed" {
+	} else if r.Status == "refused" && r.ReasonCode != "launch-failed" && !sourceRepoRefusal(r.ReasonCode) { // guard:source-repo-reader-first
 		c.publishLaunchState(n, is, "refused", r.ReasonCode)
 	}
 	key := shaText([]byte(is.ID + "\x00" + briefDigest(is) + "\x00" + r.ReasonCode + "\x00" + r.Cause + "\x00" + r.Detail))

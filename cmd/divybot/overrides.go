@@ -37,8 +37,12 @@ type Overrides struct {
 	Role             string `json:"role,omitempty"`
 	Pin              string `json:"pin,omitempty"`
 	RoutingInvalid   bool   `json:"-"`
-	Harness          string `json:"harness,omitempty"`
-	Model            string `json:"model,omitempty"`
+	// Repo is the source repository the work belongs to (owner/name). When set it
+	// alone chooses the target; the inbox issue is only the dispatch binding.
+	Repo        string `json:"repo,omitempty"`
+	RepoInvalid bool   `json:"-"`
+	Harness     string `json:"harness,omitempty"`
+	Model       string `json:"model,omitempty"`
 	// Router is the opencode provider prefix ("openai", "openrouter", …). opencode
 	// models are addressed as provider/model; router lets an operator name the
 	// two halves separately (model: gpt-5.5 + router: openai). Ignored when the
@@ -131,6 +135,11 @@ func parseOverrides(text string) Overrides {
 					o.MaxTokensPresent = true
 				case "profile":
 					o.Profile = val
+				case "repo":
+					if o.Repo != "" || !repositoryName.MatchString(val) {
+						o.RepoInvalid = true
+					}
+					o.Repo = val
 				case "timeout":
 					if d, err := time.ParseDuration(val); err == nil && d > 0 {
 						o.Timeout = d
