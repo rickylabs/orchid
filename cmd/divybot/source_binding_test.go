@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -64,7 +66,7 @@ func (f *fakeSource) comments(_ context.Context, repo, since string, page int, e
 	}
 	var all []sourceComment
 	for _, c := range f.feed[repo] {
-		if !c.UpdatedAt.Before(from) && !f.deleted[c.ID] {
+		if c.UpdatedAt.Truncate(time.Second).After(from) && !f.deleted[c.ID] { // GitHub: strictly after, whole seconds
 			all = append(all, c)
 		}
 	}
@@ -390,6 +392,10 @@ func TestSourceRepliesSurviveTransientFailures(t *testing.T) {
 	if !c2.st.SourceBindings[key].Launched || len(c2.st.SourceBindings[key].Outbox) != 1 {
 		t.Fatal("started not decided durably")
 	}
+	c2.sourceTick(context.Background()) // the POST fails; the reply stays queued
+	if len(c2.st.SourceBindings[key].Outbox) != 1 {
+		t.Fatal("a failed reply left the queue")
+	}
 	c2.sourceTick(context.Background())
 	if got := f.markers(); got[len(got)-1] != sourceRepo+"#2063 "+sourceMarker(3100000121, "started", "", "") {
 		t.Fatalf("started not delivered later: %v", got)
@@ -435,8 +441,8 @@ func TestSourceCursorAdvancesOnlyPastHandledComments(t *testing.T) {
 		t.Fatal("the retried comment was not bound")
 	}
 	after := c.st.SourceCursors[sourceRepo]
-	if !after.Equal(written) {
-		t.Fatalf("cursor %s, want the newest comment read (%s)", after, written)
+	if !after.Equal(written.Add(-time.Second)) {
+		t.Fatalf("cursor %s, want one second before the newest comment read (%s): since is exclusive", after, written)
 	}
 	restarted := loadState(path)
 	if restarted.SourceBindings[3100000020] == nil || !restarted.SourceCursors[sourceRepo].Equal(after) || !restarted.SourceStarts[sourceRepo].Equal(before) {
@@ -539,6 +545,23 @@ func TestSourceReadsAreConditionalAndBudgeted(t *testing.T) {
 	mem.mu.Unlock()
 	if checked != 20 {
 		t.Fatalf("%d of 20 bindings were ever checked", checked)
+	}
+	// Re-checks take turns: a trigger deleted on the last binding in order is
+	// noticed within ceil(20 / 6) + 1 ticks.
+	f.mu.Lock()
+	f.deleted[3100000219] = true
+	f.mu.Unlock()
+	mem.mu.Lock()
+	mem.checkTurn = 0 // start from the first binding: the deleted one is checked last
+	mem.mu.Unlock()
+	noticed := false
+	for tick := 0; tick < 5 && !noticed; tick++ {
+		all := map[int]bool{}
+		c.pollSourceBindings(context.Background(), map[int]Issue{}, all)
+		noticed = !all[3100000219]
+	}
+	if !noticed {
+		t.Fatal("a deleted trigger was not noticed within five ticks")
 	}
 }
 
@@ -676,6 +699,7 @@ func TestSourceRepliesAreMarkedOnceAndEndTheBinding(t *testing.T) {
 		t.Fatal("a binding refusal was posted to the inbox")
 		return nil
 	})
+	c.deliverSourceReplies(context.Background())
 	want := []string{
 		sourceRepo + "#2063 " + sourceMarker(3100000040, "started", "", ""),
 		sourceRepo + "#2063 " + sourceMarker(3100000040, "pr", "", sourceRepo+"#99"),
@@ -690,6 +714,7 @@ func TestSourceRepliesAreMarkedOnceAndEndTheBinding(t *testing.T) {
 	delete(c.st.Jobs, key)
 	c.finishSource(context.Background(), map[int]Issue{}, true)
 	c.finishSource(context.Background(), map[int]Issue{}, true)
+	c.deliverSourceReplies(context.Background())
 	if got := f.markers(); len(got) != 4 || got[3] != sourceRepo+"#2063 "+sourceMarker(3100000040, "done", "source-closed", "") || c.st.SourceBindings[key].Closed != "done" {
 		t.Fatalf("finish replies %v", got)
 	}
@@ -714,6 +739,7 @@ func TestSourceBlockedReplyKeepsTheBindingSupervised(t *testing.T) {
 	if !c.reportBlockedLaunch(context.Background(), 3100000045) {
 		t.Fatal("blocked launch not reported")
 	}
+	c.deliverSourceReplies(context.Background())
 	got := f.markers()
 	if len(got) != 1 || got[0] != sourceRepo+"#2063 "+sourceMarker(3100000045, "blocked", "registration_failed", "") {
 		t.Fatalf("blocked reply %v", got)
@@ -735,6 +761,7 @@ func TestSourceCompletionRepliesDone(t *testing.T) {
 	is := c.st.SourceBindings[key].issue(c)
 	c.st.CompletedRuns = map[int]completedRun{key: {Phase: "observed"}}
 	c.finishSource(context.Background(), map[int]Issue{key: is}, true)
+	c.deliverSourceReplies(context.Background())
 	if got := f.markers(); len(got) != 1 || got[0] != sourceRepo+"#2063 "+sourceMarker(3100000050, "done", "", "") {
 		t.Fatalf("completion reply %v", got)
 	}
@@ -927,6 +954,7 @@ func TestSourceGrantedCommentLaunchesOnceAndAcknowledges(t *testing.T) {
 	}
 	f.failReplies = 1
 	c.replySourceStarted(context.Background(), 3100000400)
+	c.sourceTick(context.Background()) // the POST fails; the reply stays queued
 	c.sourceTick(context.Background())
 	if got := f.markers(); len(got) != 1 || got[0] != "example/project#7 "+sourceMarker(3100000400, "started", "", "") {
 		t.Fatalf("started reply after an outage: %v", got)
@@ -942,5 +970,126 @@ func TestSourceGrantedCommentLaunchesOnceAndAcknowledges(t *testing.T) {
 	}
 	if launches != 1 {
 		t.Fatalf("launches=%d, want 1", launches)
+	}
+}
+
+// B4 (re-review): GitHub's since is exclusive and whole-second. A granted
+// trigger sharing its second with a full page of other comments is still read.
+func TestSourceEqualSecondGroupIsReadWhole(t *testing.T) {
+	c, f, path := sourceFixture(t)
+	startSource(t, c)
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	c.st.SourceCursors[sourceRepo], c.st.SourceStarts[sourceRepo] = base, base
+	group := base.Add(30 * time.Minute)
+	for i := 0; i < 100; i++ {
+		f.post(sourceRepo, 2063, int64(3300000000+i), 4242, "ordinary comment", group)
+	}
+	f.post(sourceRepo, 2063, 3100000500, ownerGitHubID, sourceTrigger, group)
+	f.post(sourceRepo, 2063, 3300000999, 4242, "later comment", group.Add(time.Second))
+	_ = c.st.save()
+	for tick := 0; tick < 6 && c.st.SourceBindings[3100000500] == nil; tick++ {
+		c = &Coord{cfg: c.cfg, st: loadState(path), source: f, sourceGrant: c.sourceGrant}
+		c.sourceTick(context.Background())
+	}
+	if c.st.SourceBindings[3100000500] == nil {
+		t.Fatal("a granted trigger sharing its second with a full page was skipped")
+	}
+}
+
+// B4 (re-review): every reply POST goes through one per-tick budget, and every
+// binding's reply is delivered over the following ticks.
+func TestSourceRepliesShareOneBudget(t *testing.T) {
+	c, f, _ := sourceFixture(t)
+	at := startSource(t, c)
+	for i := 0; i < 20; i++ {
+		key := 3100000600 + i
+		f.post(sourceRepo, 2063, int64(key), ownerGitHubID, sourceTrigger, at)
+	}
+	c.sourceTick(context.Background())
+	for i := 0; i < 20; i++ {
+		key := 3100000600 + i
+		c.st.Jobs[key] = &Job{Issue: key, Host: "h1", Agent: "codex", Repo: sourceRepo, PR: 7, Home: &dispatchIssue{Repo: sourceRepo, Number: 2063}}
+	}
+	for tick := 0; tick < 8; tick++ {
+		before := len(f.replies)
+		c.sourceTick(context.Background())
+		if posted := len(f.replies) - before; posted > sourceRepliesPerTick {
+			t.Fatalf("tick %d posted %d replies", tick, posted)
+		}
+	}
+	if len(f.replies) != 40 {
+		t.Fatalf("%d of 40 started and pr replies delivered", len(f.replies))
+	}
+}
+
+// B4 (re-review): admitting a granted comment reads nothing from GitHub; the
+// source feed's budgeted check is the only liveness read.
+func TestSourceGrantAdmissionMakesNoRead(t *testing.T) {
+	s, r, is := ownerPortFixture(t, "claude")
+	_ = os.Remove(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"))
+	body := "/swarm\nharness: claude\nrepo: example/project\n\nFix it."
+	r.Trigger = ownerNativeCommentTrigger
+	r.ExpectedBriefDigest = shaText([]byte(body))
+	if s.install(context.Background(), r).State != "LIVE" {
+		t.Fatal("grant not LIVE")
+	}
+	reads := 0
+	command := s.deps.command
+	s.deps.command = func(ctx context.Context, dir, name string, in []byte, args ...string) ([]byte, error) {
+		reads++
+		return command(ctx, dir, name, in, args...)
+	}
+	binding := Issue{ID: is.ID, Number: 3100000700, Title: is.Title, Body: body, Labels: []string{"fixture-target"}, Source: &issueSource{Repo: "example/project", Number: 7}}
+	for i := 0; i < 44; i++ {
+		if _, err := s.matrixForIssue(binding, "example/project"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reads != 0 {
+		t.Fatalf("admission made %d GitHub reads", reads)
+	}
+}
+
+// After a restart a binding launches only once a budgeted check confirms it;
+// never-checked bindings are checked first, and an unchecked one is never torn
+// down.
+func TestSourceUnconfirmedBindingIsHeldNotDropped(t *testing.T) {
+	c, f, path := sourceFixture(t)
+	at := startSource(t, c)
+	f.post(sourceRepo, 2063, 3100000800, ownerGitHubID, sourceTrigger, at)
+	c.sourceTick(context.Background())
+	restarted := &Coord{cfg: c.cfg, st: loadState(path), source: f, sourceGrant: c.sourceGrant}
+	restarted.sourceMem().pauseTill = time.Now().Add(time.Hour) // no reads at all
+	open, all := map[int]Issue{}, map[int]bool{}
+	restarted.pollSourceBindings(context.Background(), open, all)
+	if _, admitted := open[3100000800]; admitted || !all[3100000800] {
+		t.Fatal("an unconfirmed binding was admitted, or dropped")
+	}
+	restarted.sourceMem().pauseTill = time.Time{}
+	open, all = map[int]Issue{}, map[int]bool{}
+	restarted.pollSourceBindings(context.Background(), open, all)
+	if _, admitted := open[3100000800]; !admitted {
+		t.Fatal("a confirmed binding was not admitted")
+	}
+}
+
+// Owner rule: a refused trigger logs one plain reason, once.
+func TestSourceRefusalLogsOneReason(t *testing.T) {
+	c, f, _ := sourceFixture(t)
+	at := startSource(t, c)
+	var logs bytes.Buffer
+	prior := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prior)
+	f.failReplies = 2
+	f.post(sourceRepo, 2063, 3100000900, ownerGitHubID, strings.Replace(sourceTrigger, "Fix the parser.", "Other.", 1), at)
+	for tick := 0; tick < 4; tick++ {
+		c.sourceTick(context.Background())
+	}
+	if n := strings.Count(logs.String(), "comment 3100000900 refused (source-grant-missing): "+matrixReasons["source-grant-missing"].hint); n != 1 {
+		t.Fatalf("refusal logged %d times:\n%s", n, logs.String())
+	}
+	if len(f.replies) != 1 {
+		t.Fatal("refusal reply not delivered after the outage")
 	}
 }

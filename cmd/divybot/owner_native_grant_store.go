@@ -867,6 +867,11 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 	if matches != 1 {
 		return MatrixConfig{}, matrixReason("grant-conflict")
 	}
+	if subject.comment {
+		// The source feed admits a binding only after its own budgeted, conditional
+		// check found the trigger and the same open issue; admission adds no read.
+		return copy.Matrix, nil // guard:source-admission-no-read
+	}
 	current, err := s.fetchSubject(ctx, subject)
 	if err != nil || !s.subjectCurrent(subject, ownerNativeIssue{Issue: s.subjectIssue(subject, is)}, current, repo, false) {
 		return MatrixConfig{}, matrixReason("override-invalid")

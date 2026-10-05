@@ -370,7 +370,7 @@ func (c *Coord) sourceRepos() []string {
 func (c *Coord) sourceTick(ctx context.Context) {
 	now := time.Now().UTC()
 	c.catchUpSourceReplies(ctx)
-	c.deliverSourceReplies(ctx)
+	defer c.deliverSourceReplies(ctx) // after this tick's decisions, within its reply budget
 	mem := c.sourceMem()
 	if mem.paused(now) {
 		return
@@ -500,8 +500,11 @@ func (c *Coord) scanSourceRepo(ctx context.Context, repo string, now time.Time, 
 			completed = true
 			break
 		}
-		if summary.Last.After(scan.Since) { // guard:source-scan-advance
-			scan.Since, scan.Page = summary.Last, 1
+		// GitHub's since is exclusive and whole-second: continue one second before
+		// the page's last update, so the rest of that second is read too, and page
+		// within it when that makes no progress.
+		if next := summary.Last.Add(-time.Second); next.After(scan.Since) { // guard:source-scan-advance
+			scan.Since, scan.Page = next, 1
 		} else {
 			scan.Page++
 		}
@@ -511,7 +514,7 @@ func (c *Coord) scanSourceRepo(ctx context.Context, repo string, now time.Time, 
 		// The overlap covers listing lag behind now: the cursor never passes the
 		// newest comment read, nor now minus the overlap, so a quiet repository's
 		// re-read window ages out instead of being listed again every tick.
-		next := scan.Newest
+		next := scan.Newest.Add(-time.Second) // exclusive since: re-read the newest second
 		if lag := now.Add(-sourceCursorOverlap); lag.Before(next) {
 			next = lag
 		}
@@ -609,9 +612,18 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 	if err != nil {
 		return false
 	}
-	log.Printf("source triggers: bound %s#%d comment %d", repo, n, cm.ID)
+	if refusal == "" {
+		// The comment was just listed and its issue just read: confirmed live.
+		mem := c.sourceMem()
+		mem.mu.Lock()
+		mem.open[key] = true
+		mem.mu.Unlock()
+	}
 	if refusal != "" {
-		c.deliverSourceReply(ctx, key)
+		// Logged once, after the decision is saved; the binding is never reconsidered.
+		log.Printf("source triggers: %s#%d comment %d refused (%s): %s", repo, n, cm.ID, refusal, matrixReasons[refusal].hint) // guard:source-refusal-log
+	} else {
+		log.Printf("source triggers: bound %s#%d comment %d", repo, n, cm.ID)
 	}
 	return true
 }
@@ -645,8 +657,8 @@ func sourceReplyFor(b *sourceBinding, state, reason, pr, text string) sourceRepl
 }
 
 // replySource decides one reply per binding, state and reason: it persists the
-// reply (and a terminal state's end of the binding) first, then tries to deliver
-// it. It reports whether the decision is durable.
+// reply (and a terminal state's end of the binding). Every reply is posted only
+// by deliverSourceReplies. It reports whether the decision is durable.
 func (c *Coord) replySource(ctx context.Context, key int, state, reason, pr, text string) bool {
 	c.st.mu.Lock()
 	b := c.st.SourceBindings[key]
@@ -673,8 +685,7 @@ func (c *Coord) replySource(ctx context.Context, key int, state, reason, pr, tex
 		return false
 	}
 	c.st.mu.Unlock()
-	c.deliverSourceReply(ctx, key)
-	return true
+	return true // delivered by deliverSourceReplies, within the per-tick reply budget
 }
 
 func sourceQueued(b *sourceBinding, id string) bool {
@@ -686,61 +697,69 @@ func sourceQueued(b *sourceBinding, id string) bool {
 	return false
 }
 
-// deliverSourceReply posts a binding's pending replies in order until one fails.
-// It reports how many it posted.
-func (c *Coord) deliverSourceReply(ctx context.Context, key int) int {
-	if c.dry {
-		return 0
+// deliverSourceReplies posts queued replies, at most sourceRepliesPerTick POSTs
+// per tick across every binding: one reply per binding per round, oldest first
+// within a binding, so a long outbox never starves the others. A failed POST
+// keeps its reply queued.
+func (c *Coord) deliverSourceReplies(ctx context.Context) {
+	if c.dry || c.st == nil {
+		return
 	}
-	posted := 0
-	for {
+	left := sourceRepliesPerTick
+	failed := map[int]bool{}
+	for left > 0 {
 		c.st.mu.Lock()
-		b := c.st.SourceBindings[key]
-		if b == nil || len(b.Outbox) == 0 {
-			c.st.mu.Unlock()
-			return posted
+		var keys []int
+		for key, b := range c.st.SourceBindings {
+			if len(b.Outbox) > 0 && !failed[key] {
+				keys = append(keys, key)
+			}
 		}
-		head, repo, n := b.Outbox[0], b.Repo, b.Issue
 		c.st.mu.Unlock()
-		rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err := c.sourceAPI().reply(rctx, repo, n, head.Body)
-		cancel()
-		if err != nil {
-			log.Printf("source triggers: reply on %s#%d failed; it stays queued", repo, n)
-			return posted
+		if len(keys) == 0 {
+			return
 		}
-		posted++
-		c.st.mu.Lock()
-		if len(b.Outbox) > 0 && b.Outbox[0].ID == head.ID {
-			b.Outbox = b.Outbox[1:]
+		sort.Ints(keys)
+		for _, key := range keys {
+			if left <= 0 {
+				return
+			}
+			left-- // guard:source-reply-budget
+			if !c.postSourceHead(ctx, key) {
+				failed[key] = true
+			}
 		}
-		if b.Replies == nil {
-			b.Replies = map[string]bool{}
-		}
-		b.Replies[head.ID] = true
-		_ = c.st.saveLocked()
-		c.st.mu.Unlock()
 	}
 }
 
-// deliverSourceReplies retries every queued reply, a bounded number per tick.
-func (c *Coord) deliverSourceReplies(ctx context.Context) {
+// postSourceHead posts a binding's oldest queued reply.
+func (c *Coord) postSourceHead(ctx context.Context, key int) bool {
 	c.st.mu.Lock()
-	var keys []int
-	for key, b := range c.st.SourceBindings {
-		if len(b.Outbox) > 0 {
-			keys = append(keys, key)
-		}
+	b := c.st.SourceBindings[key]
+	if b == nil || len(b.Outbox) == 0 {
+		c.st.mu.Unlock()
+		return true
 	}
+	head, repo, n := b.Outbox[0], b.Repo, b.Issue
 	c.st.mu.Unlock()
-	sort.Ints(keys)
-	left := sourceRepliesPerTick
-	for _, key := range keys {
-		if left <= 0 {
-			return
-		}
-		left -= c.deliverSourceReply(ctx, key) + 1
+	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	err := c.sourceAPI().reply(rctx, repo, n, head.Body)
+	cancel()
+	if err != nil {
+		log.Printf("source triggers: reply on %s#%d failed; it stays queued", repo, n)
+		return false
 	}
+	c.st.mu.Lock()
+	if len(b.Outbox) > 0 && b.Outbox[0].ID == head.ID {
+		b.Outbox = b.Outbox[1:]
+	}
+	if b.Replies == nil {
+		b.Replies = map[string]bool{}
+	}
+	b.Replies[head.ID] = true
+	_ = c.st.saveLocked()
+	c.st.mu.Unlock()
+	return true
 }
 
 // catchUpSourceReplies decides any started or pr reply a live job is owed, so an
@@ -864,14 +883,23 @@ func (c *Coord) pollSourceBindings(ctx context.Context, open map[int]Issue, all 
 	sort.Ints(keys)
 	mem.mu.Lock()
 	turn := mem.checkTurn
+	// Bindings never checked since this process started go first, in turn order,
+	// so new granted work is confirmed (and can launch) before re-checks.
+	if len(keys) > 0 {
+		keys = append(keys[turn%len(keys):], keys[:turn%len(keys)]...)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		_, ki := mem.open[keys[i]]
+		_, kj := mem.open[keys[j]]
+		return !ki && kj
+	})
 	mem.mu.Unlock()
 	budget, checkedKeys := sourceCheckRequestsPerTick, 0
 	if mem.paused(now) {
 		budget = 0
 	}
 	ok := true
-	for i := range keys {
-		key := keys[(turn+i)%len(keys)]
+	for _, key := range keys {
 		b, found := c.sourceBinding(key)
 		if !found {
 			continue
@@ -893,8 +921,13 @@ func (c *Coord) pollSourceBindings(ctx context.Context, open map[int]Issue, all 
 			}
 		}
 		if live || !known { // guard:source-still-open
-			open[key] = b.issue(c)
-			all[key] = true
+			all[key] = true // never torn down for lack of a read
+			c.st.mu.Lock()
+			job := c.st.Jobs[key] != nil
+			c.st.mu.Unlock()
+			if known || job { // guard:source-admit-confirmed
+				open[key] = b.issue(c) // launched only once confirmed live
+			}
 		}
 	}
 	mem.mu.Lock()
