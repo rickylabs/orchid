@@ -35,6 +35,8 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"target-revision-invalid":      {"matrix.target_revisions", "Pin the target repository to a full lowercase commit."},
 	"source-repo-invalid":          {"issue.repo", "Name the source repository once in the /swarm block as repo: owner/name."},
 	"source-repo-unavailable":      {"targets", "The source repository is not a configured Orchid target with a pinned revision. Orchid never works in another repository instead."},
+	"brief-encoding-invalid":       {"comment.body", "Post the /swarm comment with LF line ends; a stray carriage return is never read as part of a value."},
+	"source-issue-closed":          {"issue.state", "Reopen the source issue, then post a new /swarm comment."},
 	"source-repo-mismatch":         {"issue.repo", "The binding names a source repository that its label target does not match. Add repo: owner/name to the /swarm block."},
 	"issue-invalid":                {"inbox", "Verify the inbox repository and issue number."},
 	"issue-identity-missing":       {"issue.id", "Fetch the complete GitHub issue identity."},

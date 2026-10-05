@@ -398,6 +398,9 @@ func (c *Coord) closeSource(key int, state string) {
 }
 
 func (c *Coord) sourceBinding(n int) (sourceBinding, bool) {
+	if c.st == nil {
+		return sourceBinding{}, false
+	}
 	c.st.mu.Lock()
 	defer c.st.mu.Unlock()
 	b := c.st.SourceBindings[n]
