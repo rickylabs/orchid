@@ -82,7 +82,10 @@ func (c *Coord) reportBlockedLaunch(ctx context.Context, n int) bool {
 	}
 	commentCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if err := postMatrixComment(commentCtx, c.cfg.Inbox, n, body); err != nil {
+	if _, binding := c.sourceBinding(n); binding {
+		body = strings.NewReplacer("for this inbox issue", "for this trigger", "in a new inbox issue", "with a new /swarm comment").Replace(body)
+	}
+	if err := c.postIssueNotice(commentCtx, n, "blocked", reason, body, postMatrixComment); err != nil {
 		log.Printf("issue #%d: launch abandonment comment unavailable; will retry comment only", n)
 		return true
 	}

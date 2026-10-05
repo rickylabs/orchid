@@ -137,7 +137,8 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 			Author    struct{ Login string } `json:"author"`
 		} `json:"comments"`
 	}
-	if err := ghJSON(ctx, &issue, "issue", "view", fmt.Sprint(j.Issue), "--repo", c.cfg.Inbox, "--json", "comments"); err != nil {
+	home := jobHome(c.cfg.Inbox, j)
+	if err := ghJSON(ctx, &issue, "issue", "view", fmt.Sprint(home.Number), "--repo", home.Repo, "--json", "comments"); err != nil {
 		return false, err
 	}
 	for _, comment := range issue.Comments {

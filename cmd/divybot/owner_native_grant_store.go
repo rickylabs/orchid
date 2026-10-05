@@ -38,6 +38,11 @@ type ownerNativeInstallRequest struct {
 	Role                string               `json:"role"`
 	Profile             string               `json:"profile"`
 	NativeOverride      *ownerNativeOverride `json:"ownerNativeOverride"`
+	// Trigger "comment" binds the grant to a /swarm comment the owner will post on
+	// the source issue Target#IssueNumber; ExpectedIssueID is that issue's node ID
+	// and ExpectedBriefDigest the sha256 of the exact comment body. Absent = an
+	// inbox issue, unchanged.
+	Trigger string `json:"trigger,omitempty"`
 }
 
 type ownerNativeApproval struct {
@@ -181,7 +186,7 @@ func newOwnerNativeGrantStore(ctx context.Context, cfg *Config, options ownerNat
 	uid := *options.OperatorUID
 	options.OperatorUID = &uid
 	s := &ownerNativeGrantStore{cfg: copy, options: options, deps: deps, active: map[string]ownerNativeGrantRecord{}, known: map[string]bool{}}
-	for _, name := range []string{"records", "intents"} {
+	for _, name := range []string{"records", "intents", "claims"} {
 		path := filepath.Join(options.StoreRoot, name)
 		if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
 			return nil, errMatrix
@@ -199,7 +204,7 @@ func newOwnerNativeGrantStore(ctx context.Context, cfg *Config, options ownerNat
 func ownerNativeRequestValid(r ownerNativeInstallRequest) bool {
 	return r.SchemaVersion == 1 && actionIDPattern.MatchString(r.OperationID) && ownerNativeApprovalRef.MatchString(r.ApprovalRef) && r.IssueNumber > 0 && cleanText(r.ExpectedIssueID) && len(r.ExpectedIssueID) <= 256 &&
 		repositoryName.MatchString(r.Target) && digestPattern.MatchString(r.ExpectedBriefDigest) && budgetTierPattern.MatchString(r.Tier) &&
-		profileStem.MatchString(strings.ReplaceAll(r.Role, "_", "-")) && profileStem.MatchString(r.Profile) && validOwnerNativeOverride(r.NativeOverride)
+		profileStem.MatchString(strings.ReplaceAll(r.Role, "_", "-")) && profileStem.MatchString(r.Profile) && validOwnerNativeOverride(r.NativeOverride) && (r.Trigger == "" || r.Trigger == ownerNativeCommentTrigger)
 }
 
 func (s *ownerNativeGrantStore) issueKey(n int) string {
@@ -211,6 +216,57 @@ func (s *ownerNativeGrantStore) recordPath(operation string) string {
 }
 func (s *ownerNativeGrantStore) intentDir(n int) string {
 	return filepath.Join(s.options.StoreRoot, "intents", s.issueKey(n))
+}
+
+const ownerNativeCommentTrigger = "comment"
+
+// A grant subject is the issue a grant is bound to: an inbox issue, or a source
+// issue whose owner /swarm comment will trigger the launch. Comment subjects use
+// their own key space, so a source issue in the inbox repository never shares
+// intents with the same issue used as an inbox binding.
+type ownerNativeSubject struct {
+	comment bool
+	repo    string
+	number  int
+}
+
+func (s *ownerNativeGrantStore) requestSubject(r ownerNativeInstallRequest) ownerNativeSubject {
+	if r.Trigger == ownerNativeCommentTrigger {
+		return ownerNativeSubject{comment: true, repo: r.Target, number: r.IssueNumber}
+	}
+	return ownerNativeSubject{repo: s.cfg.Inbox, number: r.IssueNumber}
+}
+
+func (s *ownerNativeGrantStore) issueSubject(is Issue) ownerNativeSubject {
+	if is.Source != nil {
+		return ownerNativeSubject{comment: true, repo: is.Source.Repo, number: is.Source.Number}
+	}
+	return ownerNativeSubject{repo: s.cfg.Inbox, number: is.Number}
+}
+
+func (s *ownerNativeGrantStore) subjectKey(subject ownerNativeSubject) string {
+	if subject.comment {
+		return shaText([]byte("comment\x00" + strings.ToLower(subject.repo) + "\x00" + strconv.Itoa(subject.number)))
+	}
+	return s.issueKey(subject.number)
+}
+
+func (s *ownerNativeGrantStore) subjectDir(subject ownerNativeSubject) string {
+	return filepath.Join(s.options.StoreRoot, "intents", s.subjectKey(subject))
+}
+
+func (s *ownerNativeGrantStore) fetchSubject(ctx context.Context, subject ownerNativeSubject) (ownerNativeIssue, error) {
+	return s.fetchIssueIn(ctx, subject.repo, subject.number)
+}
+
+// subjectCurrent: an inbox issue must still carry the exact brief and target; a
+// source issue only has to be the same open issue, because its brief is the
+// comment, which is checked by digest at admission.
+func (s *ownerNativeGrantStore) subjectCurrent(subject ownerNativeSubject, bound, current ownerNativeIssue, repo string, inert bool) bool {
+	if subject.comment {
+		return current.State == "OPEN" && bound.Issue.ID == current.Issue.ID && bound.Issue.Number == current.Issue.Number
+	}
+	return ownerNativeIssueMatches(bound, current, inert) && s.targetMatches(current.Labels, repo)
 }
 
 func (s *ownerNativeGrantStore) healthy() bool {
@@ -266,7 +322,11 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 
 // The Go reader binds the whole title/body and also verifies inert issue state.
 func (s *ownerNativeGrantStore) fetchIssue(ctx context.Context, n int) (ownerNativeIssue, error) {
-	raw, err := s.deps.command(ctx, "", "gh", nil, "issue", "view", strconv.Itoa(n), "--repo", s.cfg.Inbox, "--json", "id,number,title,body,state,labels")
+	return s.fetchIssueIn(ctx, s.cfg.Inbox, n)
+}
+
+func (s *ownerNativeGrantStore) fetchIssueIn(ctx context.Context, repo string, n int) (ownerNativeIssue, error) {
+	raw, err := s.deps.command(ctx, "", "gh", nil, "issue", "view", strconv.Itoa(n), "--repo", repo, "--json", "id,number,title,body,state,labels")
 	var fields map[string]json.RawMessage
 	if err != nil || len(raw) > 1024*1024 || !utf8.Valid(raw) || strictJSON(raw, &fields) != nil {
 		return ownerNativeIssue{}, errMatrix
@@ -312,6 +372,9 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 	digest, err := s.approval(r)
 	if err != nil {
 		return ownerNativeGrantRecord{}, err
+	}
+	if r.Trigger == ownerNativeCommentTrigger {
+		return s.makeCommentRecord(ctx, r, digest)
 	}
 	is, err := s.fetchIssue(ctx, r.IssueNumber)
 	switch {
@@ -369,7 +432,58 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: s.cfg.Matrix.TargetRevisions[r.Target], ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
 }
 
+// makeCommentRecord binds a grant to a source issue before the owner posts the
+// trigger. The comment does not exist yet, so its brief is bound by digest only;
+// route and profile are checked against the comment when it is admitted.
+func (s *ownerNativeGrantStore) makeCommentRecord(ctx context.Context, r ownerNativeInstallRequest, digest string) (ownerNativeGrantRecord, error) {
+	is, err := s.fetchIssueIn(ctx, r.Target, r.IssueNumber)
+	switch {
+	case err != nil:
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the source issue could not be read")
+	case is.State != "OPEN":
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the source issue is closed")
+	case is.Issue.ID != r.ExpectedIssueID:
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the source issue is not the approved issue")
+	}
+	grant, ok := s.commentGrant(r, is.Issue)
+	if !ok {
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the target is not configured or is disabled")
+	}
+	copy, err := cloneOwnerNativeConfig(s.cfg)
+	if err != nil {
+		return ownerNativeGrantRecord{}, err
+	}
+	for _, old := range copy.Matrix.Grants {
+		if old.IssueID == grant.IssueID && old.Repo == grant.Repo && old.BriefDigest == grant.BriefDigest {
+			return ownerNativeGrantRecord{}, ownerNativeWhy("a startup grant already covers this issue and brief")
+		}
+	}
+	copy.Matrix.Grants = append(copy.Matrix.Grants, grant)
+	if problems := validateMatrixConfig(ctx, copy); len(problems) > 0 {
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the matrix config refuses the grant (" + problems[0].Field + ": " + problems[0].Reason + ")")
+	}
+	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: s.cfg.Matrix.TargetRevisions[r.Target], ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
+}
+
+// commentGrant is the grant a comment request binds: the source issue, the
+// configured target repository and the digest of the comment to come.
+func (s *ownerNativeGrantStore) commentGrant(r ownerNativeInstallRequest, source Issue) (MatrixGrant, bool) {
+	found := false
+	for _, t := range s.cfg.Targets {
+		if t.Repo == r.Target && !t.Disabled {
+			found = true
+		}
+	}
+	input, _ := json.Marshal(MatrixGrant{Tier: r.Tier, Role: r.Role, NativeOverride: r.NativeOverride})
+	grant, problems := bindMatrixGrant(source, r.Target, input)
+	grant.BriefDigest = r.ExpectedBriefDigest
+	return grant, found && len(problems) == 0
+}
+
 func (s *ownerNativeGrantStore) recordValid(record ownerNativeGrantRecord) bool {
+	if record.Request.Trigger == ownerNativeCommentTrigger {
+		return s.commentRecordValid(record)
+	}
 	found := false
 	for _, target := range s.cfg.Targets {
 		if target.Repo == record.Request.Target && !target.Disabled {
@@ -399,6 +513,25 @@ func (s *ownerNativeGrantStore) recordValid(record ownerNativeGrantRecord) bool 
 	input, _ := json.Marshal(MatrixGrant{Tier: record.Request.Tier, Role: record.Request.Role, NativeOverride: record.Request.NativeOverride})
 	bound, problems := bindMatrixGrant(record.Issue.Issue, record.Request.Target, input)
 	return len(problems) == 0 && reflect.DeepEqual(bound, record.Grant)
+}
+
+func (s *ownerNativeGrantStore) commentRecordValid(record ownerNativeGrantRecord) bool {
+	r := record.Request
+	if record.SchemaVersion != 1 || record.Inbox != s.cfg.Inbox || record.MatrixRevision != s.cfg.Matrix.Revision || record.TargetRevision != s.cfg.Matrix.TargetRevisions[r.Target] || !ownerNativeRequestValid(r) ||
+		record.Issue.Issue.Number != r.IssueNumber || record.Issue.Issue.ID != r.ExpectedIssueID || record.Issue.State != "OPEN" || record.Grant.BriefDigest != r.ExpectedBriefDigest {
+		return false
+	}
+	approval, err := s.approval(r)
+	if err != nil || approval != record.ApprovalDigest {
+		return false
+	}
+	for _, old := range s.cfg.Matrix.Grants {
+		if old.IssueID == record.Grant.IssueID && old.Repo == record.Grant.Repo && old.BriefDigest == record.Grant.BriefDigest {
+			return false
+		}
+	}
+	bound, ok := s.commentGrant(r, record.Issue.Issue)
+	return ok && reflect.DeepEqual(bound, record.Grant)
 }
 
 func (s *ownerNativeGrantStore) publish(path string, raw []byte) error {
@@ -487,8 +620,9 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 			return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "this operation already holds a different grant")
 		}
 	}
-	current, err := s.fetchIssue(ctx, r.IssueNumber)
-	if err != nil || !ownerNativeIssueMatches(record.Issue, current, true) || !s.targetMatches(current.Labels, r.Target) {
+	subject := s.requestSubject(r)
+	current, err := s.fetchSubject(ctx, subject)
+	if err != nil || !s.subjectCurrent(subject, record.Issue, current, r.Target, true) {
 		return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "override-invalid", "the issue changed while the grant was being prepared")
 	}
 	records, e := ownerNativePrivateEntries(filepath.Join(s.options.StoreRoot, "records"), 1024)
@@ -500,8 +634,8 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 			return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "the grant store holds its maximum number of records")
 		}
 	}
-	dir := s.intentDir(r.IssueNumber)
-	s.known[s.issueKey(r.IssueNumber)] = true
+	dir := s.subjectDir(subject)
+	s.known[s.subjectKey(subject)] = true
 	if err = os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 		return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "the issue grant directory could not be created")
 	}
@@ -526,7 +660,7 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 		}
 		oldRaw, e := ownerNativePrivateRead(s.recordPath(intent.OperationID), os.Getuid())
 		var old ownerNativeGrantRecord
-		if e != nil || ownerNativeStrictJSON(oldRaw, &old) != nil || shaText(oldRaw) != intent.RecordChecksum || old.Request.OperationID != intent.OperationID || old.Request.IssueNumber != r.IssueNumber {
+		if e != nil || ownerNativeStrictJSON(oldRaw, &old) != nil || shaText(oldRaw) != intent.RecordChecksum || old.Request.OperationID != intent.OperationID || s.requestSubject(old.Request) != subject {
 			return s.refuse(r.IssueNumber, r.OperationID, "UNKNOWN", "override-invalid", "an earlier grant record for this issue is unreadable")
 		}
 		if old.Grant.BriefDigest == record.Grant.BriefDigest {
@@ -566,7 +700,7 @@ func (s *ownerNativeGrantStore) readRecordLocked(operation string) (ownerNativeG
 	if err != nil || ownerNativeStrictJSON(raw, &record) != nil || record.Request.OperationID != operation || !s.recordValid(record) {
 		return record, nil, errMatrix
 	}
-	intentRaw, e := ownerNativePrivateRead(filepath.Join(s.intentDir(record.Request.IssueNumber), ownerNativeOperationKey(operation)+".json"), os.Getuid())
+	intentRaw, e := ownerNativePrivateRead(filepath.Join(s.subjectDir(s.requestSubject(record.Request)), ownerNativeOperationKey(operation)+".json"), os.Getuid())
 	var intent ownerNativeIntent
 	if e != nil || ownerNativeStrictJSON(intentRaw, &intent) != nil || intent.SchemaVersion != 1 || intent.OperationID != operation || intent.RecordChecksum != shaText(raw) {
 		return record, nil, errMatrix
@@ -579,9 +713,15 @@ func (s *ownerNativeGrantStore) ackLocked(ctx context.Context, operation string,
 	if err != nil || !reflect.DeepEqual(s.active[operation], record) {
 		return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the saved grant is missing, damaged or no longer valid")
 	}
-	current, err := s.fetchIssue(ctx, record.Request.IssueNumber)
-	if err != nil || !ownerNativeIssueMatches(record.Issue, current, inert) || !s.targetMatches(current.Labels, record.Grant.Repo) {
+	subject := s.requestSubject(record.Request)
+	current, err := s.fetchSubject(ctx, subject)
+	if err != nil || !s.subjectCurrent(subject, record.Issue, current, record.Grant.Repo, inert) {
 		return s.refuse(0, operation, "REFUSED", "override-invalid", "the issue changed after the grant was saved")
+	}
+	route := record.Request.NativeOverride.Route
+	live := ownerNativeAck{SchemaVersion: 1, OperationID: operation, State: "LIVE", IssueID: record.Grant.IssueID, IssueNumber: record.Request.IssueNumber, Inbox: record.Inbox, Target: record.Grant.Repo, BriefDigest: record.Grant.BriefDigest, Profile: record.Request.Profile, MatrixRevision: record.MatrixRevision, TargetRevision: record.TargetRevision, Route: &route, RecordChecksum: shaText(raw)}
+	if subject.comment {
+		return live // the brief is the comment to come; admission checks it by digest
 	}
 	config, e := s.matrixForIssueLocked(ctx, Issue{ID: current.Issue.ID, Number: current.Issue.Number, Title: current.Issue.Title, Body: current.Issue.Body, Labels: current.Labels}, record.Grant.Repo)
 	if e != nil {
@@ -591,8 +731,7 @@ func (s *ownerNativeGrantStore) ackLocked(ctx context.Context, operation string,
 	if e != nil || !reflect.DeepEqual(request.NativeOverride, record.Request.NativeOverride) {
 		return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the issue brief no longer carries the granted route")
 	}
-	route := record.Request.NativeOverride.Route
-	return ownerNativeAck{SchemaVersion: 1, OperationID: operation, State: "LIVE", IssueID: record.Grant.IssueID, IssueNumber: record.Request.IssueNumber, Inbox: record.Inbox, Target: record.Grant.Repo, BriefDigest: record.Grant.BriefDigest, Profile: record.Request.Profile, MatrixRevision: record.MatrixRevision, TargetRevision: record.TargetRevision, Route: &route, RecordChecksum: shaText(raw)}
+	return live
 }
 
 func (s *ownerNativeGrantStore) readStatus(ctx context.Context, operation string) ownerNativeAck {
@@ -618,14 +757,14 @@ func (s *ownerNativeGrantStore) recover(ctx context.Context) error {
 		if e != nil || ownerNativeStrictJSON(raw, &record) != nil {
 			return errMatrix
 		}
-		key := s.issueKey(record.Request.IssueNumber)
+		key := s.subjectKey(s.requestSubject(record.Request))
 		s.known[key] = true
 		if entry.Name() != ownerNativeOperationKey(record.Request.OperationID)+".json" {
 			return errMatrix
 		}
 		valid, _, e := s.readRecordLocked(record.Request.OperationID)
 		if e == nil {
-			if syncDirectory(filepath.Dir(s.recordPath(record.Request.OperationID))) != nil || syncDirectory(s.intentDir(record.Request.IssueNumber)) != nil {
+			if syncDirectory(filepath.Dir(s.recordPath(record.Request.OperationID))) != nil || syncDirectory(s.subjectDir(s.requestSubject(record.Request))) != nil {
 				return errMatrix
 			}
 			s.active[record.Request.OperationID] = valid
@@ -654,9 +793,13 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 	if err != nil {
 		return MatrixConfig{}, errMatrix
 	}
-	key := s.issueKey(is.Number)
-	dir := s.intentDir(is.Number)
+	subject := s.issueSubject(is)
+	key := s.subjectKey(subject)
+	dir := s.subjectDir(subject)
 	_, statErr := os.Lstat(dir)
+	if os.IsNotExist(statErr) && !s.known[key] && subject.comment {
+		return MatrixConfig{}, matrixReason("source-grant-missing")
+	}
 	if os.IsNotExist(statErr) && !s.known[key] {
 		// Startup owner grants remain usable, and still fence edited briefs.
 		ownerKnown := false
@@ -675,8 +818,8 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 		if matches != 1 {
 			return MatrixConfig{}, matrixReason("override-invalid")
 		}
-		current, e := s.fetchIssue(ctx, is.Number)
-		if e != nil || !ownerNativeIssueMatches(ownerNativeIssue{Issue: is}, current, false) || !s.targetMatches(current.Labels, repo) {
+		current, e := s.fetchSubject(ctx, subject)
+		if e != nil || !s.subjectCurrent(subject, ownerNativeIssue{Issue: s.subjectIssue(subject, is)}, current, repo, false) {
 			return MatrixConfig{}, matrixReason("override-invalid")
 		}
 		req, e := prepareMatrixRequest(copy.Matrix, is, repo, parseOverrides(is.Body))
@@ -701,7 +844,7 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 		}
 		recordRaw, e := ownerNativePrivateRead(s.recordPath(intent.OperationID), os.Getuid())
 		var history ownerNativeGrantRecord
-		if e != nil || ownerNativeStrictJSON(recordRaw, &history) != nil || shaText(recordRaw) != intent.RecordChecksum || history.Request.OperationID != intent.OperationID || history.Request.IssueNumber != is.Number {
+		if e != nil || ownerNativeStrictJSON(recordRaw, &history) != nil || shaText(recordRaw) != intent.RecordChecksum || history.Request.OperationID != intent.OperationID || s.requestSubject(history.Request) != subject {
 			return MatrixConfig{}, matrixReason("override-invalid")
 		}
 		if history.Grant.IssueID == is.ID && history.Grant.Repo == repo && history.Grant.BriefDigest == briefDigest(is) && s.targetMatches(is.Labels, repo) {
@@ -709,18 +852,77 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 			if e != nil || !reflect.DeepEqual(s.active[intent.OperationID], record) {
 				return MatrixConfig{}, matrixReason("override-invalid")
 			}
+			if subject.comment && !s.claimLocked(intent.OperationID, is.Number) { // guard:grant-claim-once
+				return MatrixConfig{}, matrixReason("grant-conflict")
+			}
 			copy.Matrix.Grants = append(copy.Matrix.Grants, record.Grant)
 			matches++
 		}
 	}
+	// A comment launches only on its own grant (owner rule); an inbox issue with
+	// owner intents must match exactly one.
+	if matches == 0 && subject.comment { // guard:source-grant-admission
+		return MatrixConfig{}, matrixReason("source-grant-missing")
+	}
 	if matches != 1 {
 		return MatrixConfig{}, matrixReason("grant-conflict")
 	}
-	current, err := s.fetchIssue(ctx, is.Number)
-	if err != nil || !ownerNativeIssueMatches(ownerNativeIssue{Issue: is}, current, false) || !s.targetMatches(current.Labels, repo) {
+	if subject.comment {
+		// The source feed admits a binding only after its own budgeted, conditional
+		// check found the trigger and the same open issue; admission adds no read.
+		return copy.Matrix, nil // guard:source-admission-no-read
+	}
+	current, err := s.fetchSubject(ctx, subject)
+	if err != nil || !s.subjectCurrent(subject, ownerNativeIssue{Issue: s.subjectIssue(subject, is)}, current, repo, false) {
 		return MatrixConfig{}, matrixReason("override-invalid")
 	}
 	return copy.Matrix, nil
+}
+
+// subjectIssue is the issue identity a subject is checked against: a comment
+// binding's key is its comment ID, so the source issue number stands in for it.
+func (s *ownerNativeGrantStore) subjectIssue(subject ownerNativeSubject, is Issue) Issue {
+	if subject.comment {
+		is.Number = subject.number
+	}
+	return is
+}
+
+// commentGrantReady is true when exactly one active comment grant matches the
+// source issue and the comment body digest, unclaimed or claimed by this binding.
+func (s *ownerNativeGrantStore) commentGrantReady(repo string, number int, issueID, digest string, binding int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.healthy() {
+		return false
+	}
+	subject := ownerNativeSubject{comment: true, repo: repo, number: number}
+	matches := 0
+	for operation, record := range s.active {
+		if s.requestSubject(record.Request) != subject || record.Grant.IssueID != issueID || record.Grant.Repo != repo || record.Grant.BriefDigest != digest {
+			continue
+		}
+		var claim ownerNativeClaim
+		raw, err := ownerNativePrivateRead(filepath.Join(s.options.StoreRoot, "claims", ownerNativeOperationKey(operation)+".json"), os.Getuid())
+		if err == nil && (ownerNativeStrictJSON(raw, &claim) != nil || claim.Binding != binding) {
+			continue // claimed by another comment
+		}
+		matches++
+	}
+	return matches == 1
+}
+
+type ownerNativeClaim struct {
+	SchemaVersion int    `json:"schema_version"`
+	OperationID   string `json:"operation_id"`
+	Binding       int    `json:"binding"`
+}
+
+// claimLocked lets one comment binding use a comment grant. A second comment
+// with the same body is refused rather than launched on the same approval.
+func (s *ownerNativeGrantStore) claimLocked(operation string, binding int) bool {
+	raw, _ := json.Marshal(ownerNativeClaim{SchemaVersion: 1, OperationID: operation, Binding: binding})
+	return s.publish(filepath.Join(s.options.StoreRoot, "claims", ownerNativeOperationKey(operation)+".json"), raw) == nil
 }
 
 // Directory reads are bounded before allocation, including crash leftovers.

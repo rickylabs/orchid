@@ -114,7 +114,10 @@ func (c *Coord) publishLaunchState(n int, is Issue, state, reason string) {
 	}
 	owner, err := configuredReceiptOwner(c.cfg.Matrix)
 	if err == nil {
-		err = publishLaunchState(c.cfg.Matrix.ReceiptRoot, owner, c.cfg.Inbox, n, is, state, reason)
+		// A comment binding's observation belongs to its source issue.
+		home := c.issueHome(n)
+		is.Number = home.Number
+		err = publishLaunchState(c.cfg.Matrix.ReceiptRoot, owner, home.Repo, home.Number, is, state, reason)
 	}
 	if err != nil {
 		log.Printf("issue #%d: launch state unavailable", n)

@@ -29,6 +29,8 @@ jobs:
           sudo env PATH="$PATH" TMPDIR=/tmp OWNER_ENDPOINT_REQUIRE_ROOT=1 "$proof_dir/endpoint.test" -test.run '^TestOwnerNative(EndpointTwoUIDs|SocketOwnershipNoFollow|SocketRegistrationGuards)$' -test.v -test.count=1
       - name: Compiled owner endpoint guard mutations
         run: python3 .github/scripts/check-owner-endpoint-mutants.py --root
+      - name: Compiled source-comment trigger guard mutations
+        run: python3 .github/scripts/check-source-trigger-mutants.py
       - name: Vet
         run: go vet ./...
       - name: Build
