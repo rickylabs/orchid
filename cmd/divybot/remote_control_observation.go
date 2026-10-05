@@ -64,9 +64,9 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 		return
 	}
 	h.ShadowScope = c.shadow.scope(j)
-	// Observe-only native evidence, read before the proof's own budget starts
-	// so it cannot change today's decision.
-	h.observeClaudeBridge(ctx, j) // guard:claude-bridge-before-check
+	// Observe-only native evidence, read off the decision path (asynchronous,
+	// own context): it cannot change today's decision or consume its deadline.
+	h.observeClaudeBridge(j) // guard:claude-bridge-off-path
 	check, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	owner, err := configuredReceiptOwner(c.cfg.Matrix)
