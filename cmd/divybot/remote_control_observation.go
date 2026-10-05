@@ -85,7 +85,8 @@ func (c *Coord) observeRemoteControl(ctx context.Context, h Host, j *Job) {
 	// the launched process (read off this path, still fresh); never from the
 	// pane. It is published under the lock that withholding takes.
 	if j.Agent == "claude" {
-		err = c.claudeLinks.publish(j.DispatchKey, j.RemoteControl.NativeSessionID, time.Now(), write) // guard:claude-link-native-only
+		alive := func() bool { return h.claudeProcessAlive(check, j.RemoteControl.ClaudeProcess) }
+		err = c.claudeLinks.publish(j.DispatchKey, j.Issue, j.RemoteControl.NativeSessionID, time.Now(), alive, write) // guard:claude-link-native-only
 	} else {
 		err = write(nil)
 	}

@@ -49,19 +49,34 @@ documented: the session id is the part of the claude.ai/code session URL after
 `sessions/<pid>.json` bound to a live pane process by pid, kernel start time and
 the native session id (`bridgeSessionId`), and the latest typed `bridge_status`
 entry of that session's own transcript (owner-only regular file, no symlinks).
-The first bound process pins the run; a later process never supplies the link
-(the pin is in memory, so a restarted coordinator pins the next bound process of
-the same native session). The link is exactly
-`https://claude.ai/code/session_<1-128 alphanumerics>`; it is identity, never a
-connection verdict, and is never read from terminal text. Any missing, malformed,
-ambiguous or disagreeing source, another process, or an ended or replaced
-session leaves `link:null` with a private named reason in the coordinator log
-(`claude session link withheld (<reason>)`; reasons: process-unavailable,
-record-unbound, record-ambiguous, record-malformed, read-failed, bridge-absent,
-process-replaced, transcript-entry-absent, transcript-unreadable,
-sources-disagree, identity-changed). Withholding a link that is on the published
-row withdraws that row under the same lock the publisher holds; the next
-observation writes it again without a link.
+
+Only the process captured at launch may supply it. The managed launch reads that
+process (pid and kernel start time) from Claude's own bound record right after
+the native identity proof, with no bridge needed, and keeps it as
+`claudeProcess` in private `remote-control-run.json` (reloaded with the run after
+a coordinator restart). A launch whose capture fails still runs, without a link;
+no later process is ever chosen instead, and any other process is refused.
+Every publication of a link first reads, natively and now, that this pid still
+has its captured start time; an ended process withholds the link at once.
+
+The transcript is read from a per-run cursor: every complete line is parsed as
+JSON before its typed fields are selected (no byte pre-filter), in bounded
+16 MiB chunks; the link is withheld until the parse has caught up. A line still
+being written waits until it is complete. A replaced, shortened or rewritten
+file (the hash of the 4 KiB before the cursor changed) is read again from the
+start, and a malformed complete line withholds the link.
+
+The link is exactly `https://claude.ai/code/session_<1-128 alphanumerics>`; it
+is identity, never a connection verdict, and is never read from terminal text.
+Anything missing, malformed, ambiguous, pending or disagreeing, another process,
+or an ended or replaced session leaves `link:null` with a private named reason
+in the coordinator log (`claude session link withheld (<reason>)`; reasons:
+process-unavailable, record-unbound, record-ambiguous, record-malformed,
+read-failed, launch-process-unknown, process-replaced, process-ended,
+bridge-absent, transcript-entry-absent, transcript-pending,
+transcript-unreadable, sources-disagree, identity-changed). Withholding a link
+that is on the published row withdraws that row under the same lock the
+publisher holds; the next observation writes it again without a link.
 
 The connection observation is independent of native liveness and completion.
 It grants no authority to launch, pair, enable, consent, reconnect, Steer or Stop.

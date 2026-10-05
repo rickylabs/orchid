@@ -927,6 +927,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if e = h.remoteProof(ctx, agent, label, remote, location); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-proof", e)
 		}
+		if agent == "claude" {
+			// Capture the launched process now, independent of the bridge, and
+			// keep it with the run; no later process is ever pinned instead.
+			remote.ClaudeProcess = h.claudeLaunchedProcess(ctx, location.PaneID, remote.NativeSessionID) // guard:claude-launch-process
+		}
 		if e = writePrivateJSON(filepath.Join(filepath.Dir(receipt.file), "remote-control-run.json"), ".remote-control-run-", receipt.owner, remote); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-proven-binding", errMatrix)
 		}

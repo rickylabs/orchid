@@ -25,7 +25,7 @@ func TestReviewCachedLinkRevocation(t *testing.T) {
 			}
 			root := filepath.Dir(filepath.Dir(filepath.Dir(r.file)))
 			run := syntheticRemoteRun(t)
-			j := &Job{Issue: 7, Agent: "claude", Repo: "fixture/repo", Label: "fixture-agent", Host: "fixture-host", Pane: "w1:p1", Workspace: "w1", DispatchKey: strings.Repeat("d", 64), RemoteControl: run}
+			j := launchedSelf(t, &Job{Issue: 7, Agent: "claude", Repo: "fixture/repo", Label: "fixture-agent", Host: "fixture-host", Pane: "w1:p1", Workspace: "w1", DispatchKey: strings.Repeat("d", 64), RemoteControl: run})
 			binding, _ := json.Marshal(map[string]string{"Repo": j.Repo, "NativeSessionID": run.NativeSessionID})
 			if err := os.WriteFile(filepath.Join(filepath.Dir(r.file), "binding.json"), binding, 0600); err != nil {
 				t.Fatal(err)
@@ -134,22 +134,27 @@ func TestReviewObservationURLValidation(t *testing.T) {
 func TestReviewBridgeResponseConsistency(t *testing.T) {
 	pid := os.Getpid()
 	url := "https://claude.ai/code/" + fixtureBridge
-	resp := func(bridge, transcript, u string) string {
-		return fmt.Sprintf(`{"matches":1,"malformed":false,"pid":%d,"start":"1","bridge":%q,"transcript":%q,"url":%q}`, pid, bridge, transcript, u)
+	resp := func(bridge, transcript string, entry bool, u string, offset int, eof bool) string {
+		tail := map[bool]string{true: strings.Repeat("a", 64)}[transcript == "parsed" && offset > 0]
+		return fmt.Sprintf(`{"matches":1,"malformed":false,"pid":%d,"start":"1","bridge":%q,"transcript":%q,"entry":%v,"url":%q,"dev":%d,"ino":%d,"offset":%d,"tail":%q,"eof":%v,"restarted":false}`,
+			pid, bridge, transcript, entry, u, map[bool]int{true: 1}[transcript == "parsed"], map[bool]int{true: 2}[transcript == "parsed"], offset, tail, eof)
 	}
 	for _, tc := range []struct {
 		name, response string
 		ok             bool
 	}{
-		{"url-without-bridge", resp("", "entry", url), false},
-		{"entry-without-url", resp(fixtureBridge, "entry", ""), false},
-		{"url-without-entry", resp(fixtureBridge, "none", url), false},
-		{"unknown-transcript-state", resp(fixtureBridge, "maybe", ""), false},
-		{"bridge-wrong-form", resp("bridge_x", "none", ""), false},
-		{"unbound-pid", fmt.Sprintf(`{"matches":1,"malformed":false,"pid":0,"start":"","bridge":"","transcript":"none","url":""}`), false},
-		{"unknown-field", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"","transcript":"none","url":"","present":true}`, false},
-		{"consistent-present", resp(fixtureBridge, "entry", url), true},
-		{"consistent-absent", resp("", "none", ""), true},
+		{"url-without-bridge", resp("", "parsed", true, url, 9, true), false},
+		{"url-without-entry", resp(fixtureBridge, "parsed", false, url, 9, true), false},
+		{"entry-without-read", resp(fixtureBridge, "absent", true, "", 0, false), false},
+		{"cursor-without-read", resp(fixtureBridge, "unreadable", false, "", 9, false), false},
+		{"negative-offset", resp(fixtureBridge, "parsed", false, "", -1, true), false},
+		{"cursor-without-tail", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"` + fixtureBridge + `","transcript":"parsed","entry":false,"url":"","dev":1,"ino":2,"offset":9,"tail":"","eof":true,"restarted":false}`, false},
+		{"unknown-transcript-state", resp(fixtureBridge, "maybe", false, "", 0, false), false},
+		{"bridge-wrong-form", resp("bridge_x", "skipped", false, "", 0, false), false},
+		{"unbound-pid", `{"matches":1,"malformed":false,"pid":0,"start":"","bridge":"","transcript":"skipped","entry":false,"url":"","dev":0,"ino":0,"offset":0,"tail":"","eof":false,"restarted":false}`, false},
+		{"unknown-field", `{"matches":1,"malformed":false,"pid":7,"start":"1","bridge":"","transcript":"skipped","entry":false,"url":"","dev":0,"ino":0,"offset":0,"tail":"","eof":false,"restarted":false,"present":true}`, false},
+		{"consistent-present", resp(fixtureBridge, "parsed", true, url, 9, true), true},
+		{"consistent-absent", resp("", "skipped", false, "", 0, false), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sid := syntheticRemoteRun(t).NativeSessionID
@@ -160,7 +165,7 @@ func TestReviewBridgeResponseConsistency(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			read, reason := h.claudeBridgeSession(context.Background(), "w1:p1", sid, "")
+			read, reason := h.claudeBridgeSession(context.Background(), "w1:p1", sid, "", claudeTranscriptCursor{})
 			if tc.ok != (reason == "") || (!tc.ok && read != (claudeBridgeRead{})) {
 				t.Fatalf("response accepted=%v, want %v", reason == "", tc.ok)
 			}

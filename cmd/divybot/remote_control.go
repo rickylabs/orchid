@@ -58,8 +58,11 @@ type remoteControlRun struct {
 	// The daemon version this run's TUI client was pinned to (kept so reloaded
 	// state stays pinned), and that client's directory.
 	ClientVersion string `json:"clientVersion,omitempty"`
-	ClientBinary  string `json:"-"`
-	ClientDir     string `json:"-"`
+	// The Claude process captured at launch (private run state), kept for the
+	// dispatch: only this process may ever supply the session link.
+	ClaudeProcess *claudeProcess `json:"claudeProcess,omitempty"`
+	ClientBinary  string         `json:"-"`
+	ClientDir     string         `json:"-"`
 }
 
 // Owner/operator-only decoration. This envelope must not enter the public tree.
