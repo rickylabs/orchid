@@ -794,6 +794,14 @@ func TestCompletionDoneWorkerReceivesPRDrivenInput(t *testing.T) {
 				c, j, _, sshLog := completionPRWorker(t, agent, event)
 				status := map[int]agentRef{7: completionRef(j)}
 				c.supervise(context.Background(), 7, j, status, Issue{Number: 7})
+				if agent == "codex" && j.RemoteControl == nil {
+					// Codex runs only under Remote Control: a retained Codex job
+					// without it gets no PR-driven input at all.
+					if sent, _ := os.ReadFile(sshLog); strings.Contains(string(sent), "'agent' 'prompt'") {
+						t.Fatalf("a Codex job without Remote Control received PR input: %s", sent)
+					}
+					return
+				}
 				sent, err := os.ReadFile(sshLog)
 				if err != nil {
 					t.Fatal("done PR worker received no input", err)
