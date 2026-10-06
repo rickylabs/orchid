@@ -50,9 +50,7 @@ func (p *accPrompt) deliver(h *accHarness, goal string) error {
 			h.f.setSent(text)
 			return nil
 		},
-		enter: func(context.Context) error { p.enters++; return nil },
-		wait:  func(context.Context) bool { p.now = p.now.Add(2 * time.Second); return p.now.Before(time.Unix(160, 0)) },
-		now:   func() time.Time { return p.now },
+		wait: func(context.Context) bool { p.now = p.now.Add(2 * time.Second); return p.now.Before(time.Unix(160, 0)) },
 		native: func(ctx context.Context, sent string, submit func(context.Context) error) error {
 			return h.host.acceptCodexPrompt(ctx, h.acc, sent, submit)
 		},

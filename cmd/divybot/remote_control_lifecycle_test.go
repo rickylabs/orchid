@@ -118,15 +118,17 @@ func TestRemoteControlTeardownNeedsAttachedIdentity(t *testing.T) {
 func TestRemoteControlNeverAnswersTrustConsent(t *testing.T) {
 	s := promptFixture()
 	s.Screen = "Trust this folder?\n1. Trust and continue\n2. No, quit\n›"
-	submits, enters := 0, 0
+	submits, accepted := 0, 0
 	err := deliverCodexPrompt(context.Background(), s.Agent, promptFixtureGoal, promptCalls{
-		noConsent: true,
-		observe:   func(context.Context) (promptSnapshot, error) { return s, nil },
-		submit:    func(context.Context, string) error { submits++; return nil },
-		enter:     func(context.Context) error { enters++; return nil },
-		wait:      func(context.Context) bool { return false },
+		observe: func(context.Context) (promptSnapshot, error) { return s, nil },
+		submit:  func(context.Context, string) error { submits++; return nil },
+		wait:    func(context.Context) bool { return false },
+		native: func(ctx context.Context, _ string, submit func(context.Context) error) error {
+			accepted++
+			return submit(ctx)
+		},
 	})
-	if err == nil || submits != 0 || enters != 0 {
+	if err == nil || submits != 0 || accepted != 0 {
 		t.Fatal("managed remote launch answered consent")
 	}
 }

@@ -252,6 +252,11 @@ func loadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("remote_control invalid")
 			}
 		}
+		// Codex runs only under Remote Control: its goal is accepted natively,
+		// never confirmed from the screen, so it cannot be switched off.
+		if c.RemoteControl.Codex != nil && !*c.RemoteControl.Codex { // guard:codex-rc-required
+			return nil, fmt.Errorf("remote_control.codex cannot be false: Codex runs only under Remote Control")
+		}
 	}
 	if block, present := fields["unmetered_transports"]; present {
 		if string(block) == "null" || strictJSON(block, &c.UnmeteredTransports) != nil {
