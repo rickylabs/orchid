@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 const promptFixtureGoal = "Read the staged fixture assignment in full and carry it out."
@@ -17,16 +17,23 @@ func promptFixture() promptSnapshot {
 	return promptSnapshot{Agent: AgentInfo{Agent: "codex", Name: "fixture-agent", PaneID: "w1:p1", WorkspaceID: "w1", Cwd: "/fixture/project", AgentStatus: "done", StateChangeSeq: 7, InteractiveReady: true}, Screen: promptFixtureEmpty, Stable: true}
 }
 
+// nativeAcceptStub stands in for the native acceptance: it owns the one submit.
+func nativeAcceptStub(ctx context.Context, _ string, submit func(context.Context) error) error {
+	return submit(ctx)
+}
+
+// promptHarness drives the readiness gate and records the effects; the native
+// acceptance is a stub that submits once and reports its own verdict.
 type promptHarness struct {
-	reads, submits, enters, waits int
-	time                          time.Time
-	read                          func(*promptHarness) (promptSnapshot, error)
-	limit                         int
-	goal, sent                    string
+	reads, submits, accepts, waits int
+	readsAtAccept                  int
+	read                           func(*promptHarness) (promptSnapshot, error)
+	limit                          int
+	goal, sent                     string
+	verdict                        error
 }
 
 func (h *promptHarness) run() error {
-	h.time = time.Unix(100, 0)
 	goal := h.goal
 	if goal == "" {
 		goal = promptFixtureGoal
@@ -35,17 +42,22 @@ func (h *promptHarness) run() error {
 		observe: func(context.Context) (promptSnapshot, error) { h.reads++; return h.read(h) },
 		submit: func(_ context.Context, text string) error {
 			h.submits++
-			if h.sent != "" && h.sent != text {
-				return errors.New("changed repair nonce")
-			}
 			h.sent = text
 			return nil
 		},
-		enter: func(context.Context) error { h.enters++; return nil },
-		wait:  func(context.Context) bool { h.waits++; h.time = h.time.Add(2 * time.Second); return h.waits < h.limit },
-		now:   func() time.Time { return h.time },
+		wait: func(context.Context) bool { h.waits++; return h.waits < h.limit },
+		native: func(ctx context.Context, sent string, submit func(context.Context) error) error {
+			h.accepts++
+			h.readsAtAccept = h.reads
+			if err := submit(ctx); err != nil {
+				return err
+			}
+			return h.verdict
+		},
 	})
 }
+
+// A consumed-looking screen after a submit; the delivery never reads it.
 func consumedPrompt(sent string) promptSnapshot {
 	s := promptFixture()
 	s.Agent.AgentStatus = "working"
@@ -53,6 +65,7 @@ func consumedPrompt(sent string) promptSnapshot {
 	s.Screen = "› " + sent + "\n• Reading the fixture assignment\n"
 	return s
 }
+
 func TestCodexPromptRequiresComposerAndInteractiveReadiness(t *testing.T) {
 	for _, kind := range []string{"not-ready", "no-composer", "unstable-read", "nonempty-composer", "blocked-dialog"} {
 		t.Run(kind, func(t *testing.T) {
@@ -73,89 +86,13 @@ func TestCodexPromptRequiresComposerAndInteractiveReadiness(t *testing.T) {
 				}
 				return s, nil
 			}}
-			if h.run() == nil || h.submits != 0 || h.enters != 0 {
-				t.Fatal("unready/nonempty UI received a goal or an approval answer")
+			if h.run() == nil || h.submits != 0 || h.accepts != 0 {
+				t.Fatal("an unready or nonempty UI received the goal")
 			}
 		})
 	}
 }
-func TestCodexPromptBootDoneDoesNotConfirmOrReplay(t *testing.T) {
-	h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-		s := promptFixture()
-		if h.submits > 0 {
-			s.Agent.StateChangeSeq++
-		}
-		return s, nil
-	}}
-	if h.run() == nil || h.submits != 1 || h.enters != 0 {
-		t.Fatal("boot done certified the missing prompt or licensed replay")
-	}
-}
-func TestCodexPromptLostFirstSubmissionRetriesOnce(t *testing.T) {
-	h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-		if h.submits == 2 {
-			return consumedPrompt(h.sent), nil
-		}
-		return promptFixture(), nil
-	}}
-	if err := h.run(); err != nil || h.submits != 2 || h.enters != 0 {
-		t.Fatal("proved unchanged empty composer was not repaired exactly once")
-	}
-}
-func TestCodexPromptRetainedComposerGetsOnlyEnter(t *testing.T) {
-	h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-		if h.enters > 0 {
-			return consumedPrompt(h.sent), nil
-		}
-		s := promptFixture()
-		if h.submits > 0 {
-			s.Screen = "› " + h.sent
-		}
-		return s, nil
-	}}
-	if err := h.run(); err != nil || h.submits != 1 || h.enters != 1 {
-		t.Fatal("existing composer was double-pasted or not submitted")
-	}
-}
-func TestCodexPromptAmbiguousEffectsNeverLicenseReplay(t *testing.T) {
-	for _, kind := range []string{"session", "sequence", "working-without-text", "changed-pane", "changed-name", "read-failed", "changed-screen"} {
-		t.Run(kind, func(t *testing.T) {
-			h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-				s := promptFixture()
-				if h.submits == 0 {
-					return s, nil
-				}
-				switch kind {
-				case "session":
-					s.Agent.AgentSession = []byte(`{"source":"herdr:codex","value":"fixture-thread"}`)
-				case "sequence":
-					s.Agent.StateChangeSeq++
-				case "working-without-text":
-					s.Agent.AgentStatus = "working"
-					s.Agent.StateChangeSeq++
-				case "changed-pane":
-					s.Agent.PaneID = "w2:p1"
-				case "changed-name":
-					s.Agent.Name = "different-agent"
-				case "read-failed":
-					return promptSnapshot{}, errors.New("private fixture error")
-				case "changed-screen":
-					s.Screen += "• Starting a thread\n"
-				}
-				return s, nil
-			}}
-			if h.run() == nil || h.submits != 1 || h.enters != 0 {
-				t.Fatal("ambiguous prompt effect was accepted or replayed")
-			}
-		})
-	}
-}
-func TestCodexPromptExhaustedRepairFailsLoudly(t *testing.T) {
-	h := &promptHarness{limit: 20, read: func(*promptHarness) (promptSnapshot, error) { return promptFixture(), nil }}
-	if h.run() == nil || h.submits != 2 {
-		t.Fatal("lost second submission did not fail after one retry")
-	}
-}
+
 func TestCodexPromptReadinessKeepsOriginalOccupant(t *testing.T) {
 	h := &promptHarness{limit: 5, read: func(h *promptHarness) (promptSnapshot, error) {
 		s := promptFixture()
@@ -168,163 +105,96 @@ func TestCodexPromptReadinessKeepsOriginalOccupant(t *testing.T) {
 		t.Fatal("new occupant acquired the old assignment")
 	}
 }
-func TestCodexPromptVersionsAndFastTurn(t *testing.T) {
+
+// Past the gate the goal goes once, through the native acceptance, and the
+// screen is not read again: the native verdict alone decides delivery.
+func TestCodexPromptSubmitsOnceThroughNativeAcceptanceAndReadsNoMoreScreen(t *testing.T) {
 	for _, screen := range []string{"OpenAI Codex (v0.159.2)\n› \n", promptFixtureEmpty, "OpenAI Codex (v0.159.3)\n› Ask Codex to do anything\n"} {
 		h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
 			s := promptFixture()
 			s.Screen = screen
-			if h.submits > 0 {
-				s.Agent.StateChangeSeq++
-				s.Screen = "› " + h.sent + "\n• Fixture work completed\n› Ask Codex to do anything\n"
-			}
 			return s, nil
 		}}
-		if err := h.run(); err != nil || h.submits != 1 || h.enters != 0 {
-			t.Fatal("version placeholder/fast consumed turn was not confirmed once")
+		if err := h.run(); err != nil || h.submits != 1 || h.accepts != 1 {
+			t.Fatalf("known empty composer %q: err=%v submits=%d accepts=%d", screen, err, h.submits, h.accepts)
+		}
+		if h.reads != h.readsAtAccept {
+			t.Fatal("the screen was read after the native acceptance took over")
+		}
+		if !strings.Contains(h.sent, promptFixtureGoal) || !strings.HasPrefix(h.sent, "Assignment delivery marker: orch-goal-") {
+			t.Fatal("the marked goal was not the submitted text")
 		}
 	}
-}
-func TestCodexPromptDelayedRealConsumptionNeverDoubleSubmits(t *testing.T) {
-	h := &promptHarness{limit: 30, read: func(h *promptHarness) (promptSnapshot, error) {
-		s := promptFixture()
-		if h.submits > 0 {
-			s.Screen = "› " + h.sent
-			s.Agent.AgentStatus = "unknown"
-			if h.waits > 12 {
-				return consumedPrompt(h.sent), nil
-			}
-		}
-		return s, nil
-	}}
-	if err := h.run(); err != nil || h.submits != 1 || h.enters != 0 {
-		t.Fatal("delayed visible prompt was replayed")
+	// The native verdict is the delivery's verdict: a refusal is never retried.
+	refused := &promptHarness{limit: 20, verdict: errors.New("native-refused"), read: func(*promptHarness) (promptSnapshot, error) { return promptFixture(), nil }}
+	if refused.run() == nil || refused.submits != 1 || refused.reads != refused.readsAtAccept {
+		t.Fatal("a native refusal was replayed or confirmed from the screen")
 	}
 }
 
-func TestCodexPromptFooterCannotCertifyRetainedComposer(t *testing.T) {
-	s := promptFixture()
-	sent, marker, err := markedCodexPrompt(promptFixtureGoal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.Screen = "› " + sent + "\n• Startup tip after the input box\n"
-	if codexPromptConsumed(s, promptFixture(), marker) {
-		t.Fatal("unrelated footer certified a retained composer")
-	}
-}
-
-// This is the actual worker template with the permitted 4000-character body,
-// not the short one-line fixture used by the earlier delivery controls.
-func realisticPromptGoal() string {
-	body := strings.Repeat("Read the fixture implementation and its evidence before changing behavior.\n", 80)
-	return renderGoal("fixture/inbox", "fixture/project", "fixture", "Fixture long goal", body, "/fixture/project", "fixture-branch", "", 42)
-}
-func wrapPromptAndTakeTail(text string, width, lines int) string {
-	var rows []string
-	for _, line := range strings.Split(text, "\n") {
-		chars := []rune(line)
-		for len(chars) > width {
-			rows = append(rows, string(chars[:width]))
-			chars = chars[width:]
-		}
-		rows = append(rows, string(chars))
-	}
-	if len(rows) > lines {
-		rows = rows[len(rows)-lines:]
-	}
-	return strings.Join(rows, "\n")
-}
-func TestCodexPromptRealisticLongWrappedGoalAndVisibleTail(t *testing.T) {
-	for _, width := range []int{100, 17} {
-		t.Run(fmt.Sprint(width), func(t *testing.T) {
-			goal := realisticPromptGoal()
-			if len(goal) < 4000 || strings.Count(goal, "\n") < 40 {
-				t.Fatal("long-goal control is not realistic")
+// With no native acceptance there is no delivery at all: Codex goals are never
+// confirmed from the screen.
+func TestCodexPromptNeedsNativeAcceptance(t *testing.T) {
+	reads, submits := 0, 0
+	var err error
+	func() {
+		defer func() {
+			if recover() != nil {
+				err = errors.New("panicked")
 			}
-			h := &promptHarness{goal: goal, limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-				if h.submits == 0 {
-					return promptFixture(), nil
-				}
-				s := consumedPrompt(h.sent)
-				s.Screen = wrapPromptAndTakeTail(s.Screen, width, 60)
-				if strings.Contains(s.Screen, goal) {
-					t.Fatal("fixture did not cut/wrap the whole goal")
-				}
-				return s, nil
-			}}
-			if err := h.run(); err != nil || h.submits != 1 || h.enters != 0 {
-				t.Fatal("long wrapped consumed assignment was falsely blocked/replayed", err)
-			}
+		}()
+		err = deliverCodexPrompt(context.Background(), promptFixture().Agent, promptFixtureGoal, promptCalls{
+			observe: func(context.Context) (promptSnapshot, error) { reads++; return promptFixture(), nil },
+			submit:  func(context.Context, string) error { submits++; return nil },
+			wait:    func(context.Context) bool { return true },
 		})
-	}
-}
-func TestCodexPromptCollapsedLongPasteGetsEnterWithoutRepaste(t *testing.T) {
-	h := &promptHarness{goal: realisticPromptGoal() + " Unicode fixture é", limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-		if h.submits == 0 {
-			return promptFixture(), nil
-		}
-		if h.enters > 0 {
-			s := consumedPrompt(h.sent)
-			s.Screen = wrapPromptAndTakeTail(s.Screen, 100, 60)
-			return s, nil
-		}
-		s := promptFixture()
-		s.Screen = fmt.Sprintf("› [Pasted Content %d chars]\n", utf8.RuneCountInString(h.sent))
-		return s, nil
-	}}
-	if err := h.run(); err != nil || h.submits != 1 || h.enters != 1 {
-		t.Fatal("retained collapsed paste was blocked or double pasted", err)
-	}
-}
-func TestCodexPromptMarkerAndNewSequenceAreBothRequired(t *testing.T) {
-	sent, marker, err := markedCodexPrompt(realisticPromptGoal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := promptFixture()
-	s := consumedPrompt(sent)
-	s.Agent.StateChangeSeq = before.Agent.StateChangeSeq
-	if codexPromptConsumed(s, before, marker) {
-		t.Fatal("unchanged working state certified a prompt")
-	}
-	s.Agent.StateChangeSeq++
-	s.Screen = "› [Pasted Content 5684 chars]\n• Working\n"
-	if codexPromptConsumed(s, before, marker) {
-		t.Fatal("generic paste placeholder certified unseen assignment")
-	}
-	s.Screen = "› Assignment delivery marker: orch-goal-wrong\n• Working\n"
-	if codexPromptConsumed(s, before, marker) {
-		t.Fatal("another marker certified this assignment")
-	}
-	s.Screen = "› " + sent
-	s.Agent.AgentStatus = "done"
-	if codexPromptConsumed(s, before, marker) {
-		t.Fatal("retained marked composer certified a completed turn")
-	}
-}
-func TestCodexPromptHiddenMarkerNeverCertifiesOrReplays(t *testing.T) {
-	h := &promptHarness{goal: realisticPromptGoal(), limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
-		s := promptFixture()
-		if h.submits > 0 {
-			s.Agent.StateChangeSeq++
-			s.Agent.AgentStatus = "working"
-			s.Screen = "› [Pasted Content 5684 chars]\n• Working\n"
-		}
-		return s, nil
-	}}
-	if h.run() == nil || h.submits != 1 || h.enters != 0 {
-		t.Fatal("unseen nonce was accepted or ambiguous active turn was replayed")
+	}()
+	if err == nil || reads != 0 || submits != 0 {
+		t.Fatalf("delivery without native acceptance: err=%v reads=%d submits=%d", err, reads, submits)
 	}
 }
 
-func TestCodexPromptRetainedBodyComposerGlyphIsNotALaterComposer(t *testing.T) {
-	sent, marker, err := markedCodexPrompt(realisticPromptGoal() + "\n› Ask Codex to do anything\n")
-	if err != nil {
-		t.Fatal(err)
+// A Codex host without Remote Control has no delivery path: it is refused
+// before herdr is asked anything, even with an acceptance and a proven resume.
+func TestInjectCodexGoalRefusesWithoutRemoteControl(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, ".local", "bin")
+	if os.MkdirAll(bin, 0700) != nil {
+		t.Fatal("fixture setup failed")
 	}
-	s := consumedPrompt(sent)
-	s.Agent.AgentStatus = "done"
-	if codexPromptConsumed(s, promptFixture(), marker) {
-		t.Fatal("composer glyph inside unsubmitted text certified delivery")
+	calls := filepath.Join(root, "calls")
+	t.Setenv("INJECT_FIXTURE_CALLS", calls)
+	script := "#!/bin/sh\necho \"$@\" >> \"$INJECT_FIXTURE_CALLS\"\nexit 1\n"
+	if os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0700) != nil {
+		t.Fatal("fixture executable unavailable")
+	}
+	run := syntheticRemoteRun(t)
+	run.ClientVersion, run.Resume = "9.1.0", &codexResumeProof{Producer: strings.Repeat("ab", 32), Connection: "252"}
+	h := Host{Name: "fixture-host", Home: root, RemoteRun: run, Acceptance: &codexAcceptance{}}
+	if err := h.injectCodexGoal(context.Background(), "w1:p1", promptFixtureGoal, promptFixture().Agent); !errors.Is(err, errPromptUnconfirmed) {
+		t.Fatalf("non-Remote-Control Codex delivery was attempted: %v", err)
+	}
+	if raw, err := os.ReadFile(calls); err == nil && len(raw) > 0 {
+		t.Fatalf("herdr was asked for a non-Remote-Control Codex delivery: %s", raw)
+	}
+	// Control: the same host under Remote Control does reach herdr.
+	h.CanonicalCodex = true
+	_ = h.injectCodexGoal(context.Background(), "w1:p1", promptFixtureGoal, promptFixture().Agent)
+	if raw, _ := os.ReadFile(calls); !strings.Contains(string(raw), "agent get") {
+		t.Fatalf("control: the Remote Control delivery did not observe the pane: %q", raw)
+	}
+}
+
+func TestCodexPromptContextEndsTheGate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	<-ctx.Done()
+	if err := deliverCodexPrompt(ctx, promptFixture().Agent, promptFixtureGoal, promptCalls{
+		observe: func(context.Context) (promptSnapshot, error) { return promptFixture(), nil },
+		submit:  func(context.Context, string) error { return nil },
+		wait:    func(context.Context) bool { return true },
+		native:  nativeAcceptStub,
+	}); err == nil {
+		t.Fatal("an ended context delivered")
 	}
 }

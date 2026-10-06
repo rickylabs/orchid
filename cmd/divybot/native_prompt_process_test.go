@@ -10,7 +10,7 @@ import (
 )
 
 func TestCodexPromptUsesInstalledPlainReadContractAndExactPane(t *testing.T) {
-	for _, format := range []string{"plain", "json", "long-tail"} {
+	for _, format := range []string{"plain", "json"} {
 		t.Run(format, func(t *testing.T) {
 			root := t.TempDir()
 			bin := filepath.Join(root, ".local", "bin")
@@ -47,16 +47,20 @@ else:sys.exit(1)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			goal := promptFixtureGoal
-			if format == "long-tail" {
-				goal = realisticPromptGoal()
+			// The readiness gate reads the installed plain (or JSON) visible
+			// contract of the exact pane.
+			snap, err := (Host{Home: root}).promptSnapshot(ctx, "w1:p1")
+			if err != nil || !snap.Stable || !codexReady(snap) {
+				t.Fatalf("real-format visible read not usable by the gate: %v %+v", err, snap)
 			}
-			if err := (Host{Home: root}).injectGoal(ctx, "w1:p1", goal, true); err != nil {
-				t.Fatal("real-format native delivery was not confirmed", err)
+			// A Codex host without Remote Control has no delivery path: nothing is sent.
+			if err := (Host{Home: root}).injectGoal(ctx, "w1:p1", promptFixtureGoal, true); err == nil {
+				t.Fatal("a non-Remote-Control Codex delivery was attempted")
 			}
 			calls, err := os.ReadFile(filepath.Join(root, "calls"))
-			if err != nil || strings.Count(string(calls), `"agent", "prompt"`) != 1 || strings.Contains(string(calls), `"send-keys"`) {
-				t.Fatal("successful actual prompt was replayed")
+			if err != nil || strings.Contains(string(calls), `"agent", "prompt"`) || strings.Contains(string(calls), `"send-keys"`) ||
+				!strings.Contains(string(calls), `"pane", "read", "w1:p1", "--source", "visible"`) {
+				t.Fatalf("calls: %s", calls)
 			}
 		})
 	}
@@ -64,15 +68,13 @@ else:sys.exit(1)
 func TestCodexPromptTrustDialogDoesNotReceiveTheGoal(t *testing.T) {
 	h := &promptHarness{limit: 20, read: func(h *promptHarness) (promptSnapshot, error) {
 		s := promptFixture()
-		if h.enters == 0 {
-			s.Screen = "Folder access\nTrust this folder?\n› 1. Trust and continue\n"
-		} else if h.submits > 0 {
-			return consumedPrompt(h.sent), nil
-		}
+		// The dialog's last prompt line is empty: only the dialog itself refuses it.
+		s.Screen = "Folder access\nTrust this folder?\n1. Trust and continue\n2. No, quit\n›"
 		return s, nil
 	}}
-	if err := h.run(); err != nil || h.enters != 1 || h.submits != 1 {
-		t.Fatal("trust dialog acquired assignment or prompt was not delivered once")
+	// Remote Control never answers the dialog, and the goal never reaches it.
+	if err := h.run(); err == nil || h.submits != 0 || h.accepts != 0 {
+		t.Fatal("trust dialog acquired the assignment")
 	}
 }
 

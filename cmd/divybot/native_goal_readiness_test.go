@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -108,9 +107,8 @@ func TestDeliverCodexPromptReadinessIsObserveOnly(t *testing.T) {
 				return promptFixture(), nil
 			},
 			submit:    func(_ context.Context, text string) error { submits++; sent = text; return nil },
-			enter:     func(context.Context) error { return errors.New("no enter expected") },
 			wait:      func(context.Context) bool { return true },
-			now:       func() time.Time { return time.Unix(100, 0) },
+			native:    nativeAcceptStub,
 			readiness: readiness,
 		})
 		return
@@ -147,9 +145,8 @@ func TestDeliverCodexPromptReadinessIsObserveOnly(t *testing.T) {
 			return s, nil
 		},
 		submit:    func(context.Context, string) error { return nil },
-		enter:     func(context.Context) error { return nil },
 		wait:      func(context.Context) bool { return reads < 3 },
-		now:       func() time.Time { return time.Unix(100, 0) },
+		native:    nativeAcceptStub,
 		readiness: func(_ promptSnapshot, today string, _ time.Time) { calls = append(calls, call{today: today}) },
 	})
 	if len(calls) < 1 || calls[0].today != "not-ready" {
@@ -281,9 +278,8 @@ func TestGoalReadinessNeverAffectsLaunch(t *testing.T) {
 				return promptFixture(), nil
 			},
 			submit:    func(_ context.Context, text string) error { submits++; sent = text; return nil },
-			enter:     func(context.Context) error { return errors.New("no enter expected") },
 			wait:      func(context.Context) bool { return true },
-			now:       func() time.Time { return time.Unix(100, 0) },
+			native:    nativeAcceptStub,
 			readiness: readiness,
 		})
 		return submits, err
