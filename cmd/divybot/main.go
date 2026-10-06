@@ -3662,10 +3662,15 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 	if !suppressInput {
 		c.bindLiveNativeIdentity(ctx, host, j)
+	}
+	// The status observation is read-only and removes its own row when it cannot be made, so it
+	// runs for every matched root: one that finished its turn ("done", stopped at its prompt) is
+	// recorded as not running instead of Unknown (harness#613). Input stays suppressed for it.
+	if matched {
 		c.observeClaudeWorking(ctx, host, j)
-		if ref.Status == "working" || ref.Status == "blocked" {
-			c.retryBoundGoal(ctx, host, j)
-		}
+	}
+	if !suppressInput && (ref.Status == "working" || ref.Status == "blocked") {
+		c.retryBoundGoal(ctx, host, j)
 	}
 
 	// Operator timeout (/swarm "timeout:"): past the deadline the run is torn
