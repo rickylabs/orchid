@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+	"unicode/utf8"
 )
 
 // Durable parity counts of the native-evidence shadow, observe-only.
@@ -116,7 +117,7 @@ func (s *nativeEvidenceShadow) parityStateLocked() shadowParityState {
 // closed and every count positive and bounded, or the whole state is refused.
 func restoredParity(raw []byte) (map[shadowParityKey]int64, time.Time, error) {
 	var st shadowParityState
-	if strictJSON(raw, &st) != nil || st.SchemaVersion != shadowParitySchema || st.Counts == nil {
+	if !utf8.Valid(raw) || strictJSON(raw, &st) != nil || st.SchemaVersion != shadowParitySchema || st.Counts == nil {
 		return nil, time.Time{}, errors.New("parity-state-invalid")
 	}
 	since, err := time.Parse(time.RFC3339Nano, st.Since)
@@ -139,14 +140,20 @@ func restoredParity(raw []byte) (map[shadowParityKey]int64, time.Time, error) {
 }
 
 // loadParity adds the stored counts once, before the loop ever writes them.
-// Absent: counting starts now. Unreadable (an IO or ownership failure): false,
-// so nothing is written and the next tick tries again. Present but invalid:
-// counting restarts now, and the new "since" shows it.
+// The receipt root must be present, private and owned first: a root that is
+// missing or unsafe right now says nothing about the file, so loading stays
+// pending. Absent file: counting starts now. Unreadable (an IO, ownership or
+// safety failure): false, so nothing is written and the next tick tries again.
+// Read but invalid (encoding included): counting restarts now, and the new
+// "since" shows it.
 func (s *nativeEvidenceShadow) loadParity(root string, uid int, started time.Time) bool {
+	if !ownerNativePrivateDir(root, uid) { // guard:parity-root-available
+		return false
+	}
 	path := filepath.Join(root, shadowParityFile)
 	counts, since := map[shadowParityKey]int64{}, started
 	if _, err := os.Lstat(path); err == nil {
-		raw, err := ownerNativePrivateRead(path, uid)
+		raw, err := privateFileBytes(path, uid, ownerNativeOpen)
 		if err != nil {
 			return false // guard:parity-no-overwrite-unread
 		}
