@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -63,4 +64,47 @@ func ownerNativePeerUID(conn *net.UnixConn) (int, error) {
 		return -1, errMatrix
 	}
 	return int(cred.Uid), nil
+}
+
+// heldChildAbsent answers whether name is absent from the private root,
+// judged relative to one held descriptor of that root, never by re-walking
+// its pathname: the root is opened no-follow as a directory and must be 0700
+// and owned by uid; a missing entry in that held directory means absent only
+// if the held directory is still the one at the root path afterwards. ok=false when any
+// of this cannot be established (the root missing, replaced, unsafe or
+// unreadable right now), so callers keep waiting. between runs after the root
+// is held and before the lookup (tests only; nil in production).
+func heldChildAbsent(root, name string, uid int, between func()) (absent, ok bool) {
+	if name == "" || filepath.Base(name) != name {
+		return false, false
+	}
+	fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false, false
+	}
+	held := os.NewFile(uintptr(fd), root)
+	defer held.Close()
+	info, err := held.Stat()
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 || !ownerNativeOwned(info, uid) {
+		return false, false
+	}
+	if between != nil {
+		between()
+	}
+	// Open (never follow, never block) relative to the held root, then close.
+	child, err := syscall.Openat(fd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0) // guard:held-root-lookup
+	switch err {
+	case nil:
+		_ = syscall.Close(child)
+		return false, true
+	case syscall.ENOENT:
+		// Absent only if the held directory is still the one at the root path:
+		// a root replaced during the lookup says nothing about its new contents.
+		if now, err := os.Lstat(root); err != nil || !os.SameFile(info, now) { // guard:held-root-still-root
+			return false, false
+		}
+		return true, true
+	default: // a symlink, a permission or IO failure: not provably absent
+		return false, false
+	}
 }

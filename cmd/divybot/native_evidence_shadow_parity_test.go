@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -265,5 +267,161 @@ func TestOwnerNativePrivateReadStillRefusesInvalidUTF8(t *testing.T) {
 	}
 	if raw, err := privateFileBytes(path, os.Getuid(), ownerNativeOpen); err != nil || len(raw) != 1 {
 		t.Fatalf("control: the safe reader refused a safe file: %v", err)
+	}
+}
+
+func storeSevenParity(t *testing.T, root string) time.Time {
+	t.Helper()
+	old := shadowT0.Add(-time.Hour)
+	stored := shadowParityState{SchemaVersion: shadowParitySchema, Since: old.Format(time.RFC3339Nano), Counts: []shadowParityRow{{Site: hookUnknown.Site,
+		Vendor: hookUnknown.Vendor, Today: hookUnknown.Today, Native: hookUnknown.Native, Agreement: hookUnknown.Agreement, Reason: hookUnknown.Reason, Count: 7}}}
+	raw, _ := json.Marshal(stored)
+	if os.WriteFile(filepath.Join(root, shadowParityFile), raw, 0600) != nil {
+		t.Fatal("fixture")
+	}
+	return old
+}
+
+func assertEightSince(t *testing.T, root string, old time.Time) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, shadowParityFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, since, err := restoredParity(raw)
+	if err != nil || counts[hookUnknown] != 8 || !since.Equal(old) {
+		t.Fatalf("stored counts not kept: got=%d want=8 since=%v want=%v raw=%s", counts[hookUnknown], since, old, raw)
+	}
+}
+
+// REVIEW-o92b P2 (the reviewer's probe): the root moving away and back while
+// the counts load never makes the stored file look absent.
+func TestShadowParityRootTransitionDuringLoad(t *testing.T) {
+	for trial := 0; trial < 64; trial++ {
+		root := shadowReadoutRoot(t)
+		old := storeSevenParity(t, root)
+		away := root + "-offline"
+		quit, done := make(chan struct{}), make(chan error, 1)
+		go func() {
+			for {
+				select {
+				case <-quit:
+					done <- nil
+					return
+				default:
+				}
+				if err := os.Rename(root, away); err != nil {
+					done <- err
+					return
+				}
+				runtime.Gosched()
+				if err := os.Rename(away, root); err != nil {
+					done <- err
+					return
+				}
+				runtime.Gosched()
+			}
+		}()
+		var once sync.Once
+		stopFlipper := func() {
+			once.Do(func() {
+				close(quit)
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+		t.Cleanup(stopFlipper)
+		c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, shadow: newNativeEvidenceShadow(func() time.Time { return shadowT0 })}
+		c.shadow.compare(shadowFixtureJob(t, "codex"), shadowSiteRemoteHook, "pass", nil)
+		tick, stop := runParityLoop(t, c, shadowT0)
+		for attempt := 0; attempt < 2000; attempt++ {
+			tick()
+			if c.shadow.readout(shadowT0).ParitySince != "" {
+				break
+			}
+		}
+		stopFlipper()
+		tick()
+		tick()
+		stop()
+		assertEightSince(t, root, old)
+	}
+}
+
+// Deterministic: the root moves away after it is held and before the lookup.
+// Loading stays pending; once the root is back the stored counts are kept.
+func TestShadowParityRootMovedDuringTheLookup(t *testing.T) {
+	root := shadowReadoutRoot(t)
+	old := storeSevenParity(t, root)
+	away := root + "-away"
+	moved := false
+	parityLoadBetween = func() {
+		if !moved {
+			moved = true
+			if os.Rename(root, away) != nil {
+				t.Fatal("fixture")
+			}
+		}
+	}
+	defer func() { parityLoadBetween = nil }()
+	c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, shadow: newNativeEvidenceShadow(func() time.Time { return shadowT0 })}
+	c.shadow.compare(shadowFixtureJob(t, "codex"), shadowSiteRemoteHook, "pass", nil)
+	tick, stop := runParityLoop(t, c, shadowT0)
+	tick() // held, then moved away before the lookup
+	if !moved || c.shadow.readout(shadowT0).ParitySince != "" {
+		t.Fatal("loading did not stay pending while the root was away")
+	}
+	if os.Rename(away, root) != nil {
+		t.Fatal("fixture")
+	}
+	tick()
+	stop()
+	assertEightSince(t, root, old)
+}
+
+func TestHeldChildAbsentJudgesOnlyTheHeldRoot(t *testing.T) {
+	uid := os.Getuid()
+	root := shadowReadoutRoot(t)
+	if absent, ok := heldChildAbsent(root, shadowParityFile, uid, nil); !ok || !absent {
+		t.Fatal("control: a missing file in a held private root is absent")
+	}
+	storeSevenParity(t, root)
+	if absent, ok := heldChildAbsent(root, shadowParityFile, uid, nil); !ok || absent {
+		t.Fatal("a present file was absent")
+	}
+	// Moved away after it was held: the held directory still has the file.
+	away := root + "-away"
+	if absent, ok := heldChildAbsent(root, shadowParityFile, uid, func() { _ = os.Rename(root, away) }); absent || !ok {
+		t.Fatalf("a root moved after it was held made its file absent: absent=%v ok=%v", absent, ok)
+	}
+	if absent, ok := heldChildAbsent(root, shadowParityFile, uid, nil); ok || absent {
+		t.Fatal("a missing root established absence")
+	}
+	_ = os.Rename(away, root)
+	// Replaced during the lookup by a directory that holds counts: the empty held
+	// root says nothing about it, so absence is not established.
+	empty := shadowReadoutRoot(t)
+	full := shadowReadoutRoot(t)
+	storeSevenParity(t, full)
+	if absent, ok := heldChildAbsent(empty, shadowParityFile, uid, func() {
+		_ = os.Rename(empty, empty+"-old")
+		_ = os.Rename(full, empty)
+	}); ok || absent {
+		t.Fatalf("a replaced root established absence: absent=%v ok=%v", absent, ok)
+	}
+	open := shadowReadoutRoot(t)
+	_ = os.Chmod(open, 0755)
+	link := filepath.Join(t.TempDir(), "link")
+	_ = os.Symlink(root, link)
+	for name, bad := range map[string][3]string{"group-readable": {open, shadowParityFile}, "symlinked root": {link, shadowParityFile},
+		"nested name": {root, "a/" + shadowParityFile}, "foreign owner": {root, shadowParityFile, "foreign"}} {
+		owner := uid
+		if bad[2] == "foreign" {
+			owner = uid + 1
+		}
+		if _, ok := heldChildAbsent(bad[0], bad[1], owner, nil); ok {
+			t.Fatalf("%s: absence judged", name)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -19,6 +18,9 @@ import (
 // id, time or text. The counts live in one owner-only file beside the readout,
 // are read back once when the readout loop starts and only then rewritten, and
 // accumulate across job ends and restarts. Nothing on a decision path reads them.
+
+// parityLoadBetween runs between holding the root and the lookup (tests only).
+var parityLoadBetween func()
 
 const (
 	shadowParityFile     = "native-evidence-parity.json"
@@ -152,7 +154,13 @@ func (s *nativeEvidenceShadow) loadParity(root string, uid int, started time.Tim
 	}
 	path := filepath.Join(root, shadowParityFile)
 	counts, since := map[shadowParityKey]int64{}, started
-	if _, err := os.Lstat(path); err == nil {
+	// Absence is judged inside one held descriptor of the root, so a root that
+	// moves away and back during the load can never make a stored file look absent.
+	absent, ok := heldChildAbsent(root, shadowParityFile, uid, parityLoadBetween) // guard:parity-absent-held-root
+	if !ok {
+		return false
+	}
+	if !absent {
 		raw, err := privateFileBytes(path, uid, ownerNativeOpen)
 		if err != nil {
 			return false // guard:parity-no-overwrite-unread
@@ -160,8 +168,6 @@ func (s *nativeEvidenceShadow) loadParity(root string, uid int, started time.Tim
 		if restored, at, err := restoredParity(raw); err == nil {
 			counts, since = restored, at
 		}
-	} else if !os.IsNotExist(err) {
-		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
