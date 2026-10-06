@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -39,6 +40,10 @@ type shadowReadout struct {
 	StartedAt     string             `json:"startedAt"`
 	GeneratedAt   string             `json:"generatedAt"`
 	Runs          []shadowReadoutRun `json:"runs"`
+	// Durable counts across job ends and restarts since ParitySince (empty
+	// until the stored counts were read back).
+	ParitySince string            `json:"paritySince"`
+	Parity      []shadowParityRow `json:"parity"`
 }
 
 var (
@@ -85,12 +90,15 @@ func shadowRevision() string {
 
 // Closed, ID-free projection of the in-memory ledger, ordered by issue.
 func (s *nativeEvidenceShadow) readout(started time.Time) shadowReadout {
-	out := shadowReadout{SchemaVersion: 1, Revision: shadowRevision(), StartedAt: started.UTC().Format(time.RFC3339Nano), Runs: []shadowReadoutRun{}}
+	out := shadowReadout{SchemaVersion: 1, Revision: shadowRevision(), StartedAt: started.UTC().Format(time.RFC3339Nano), Runs: []shadowReadoutRun{},
+		Parity: []shadowParityRow{}}
 	if s == nil {
 		return out
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	parity := s.parityStateLocked()
+	out.ParitySince, out.Parity = parity.Since, parity.Counts
 	out.GeneratedAt = s.now().UTC().Format(time.RFC3339Nano)
 	for _, scope := range s.scopes {
 		vendor := scope.reducer.binding.Vendor
@@ -148,7 +156,7 @@ func (c *Coord) shadowReadoutLoop(ctx context.Context, ticks <-chan time.Time, s
 	if c == nil || c.shadow == nil || c.cfg == nil || c.cfg.Matrix.ReceiptRoot == "" {
 		return
 	}
-	written, wroteOnce := uint64(0), false
+	written, wroteOnce, loaded := uint64(0), false, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -156,17 +164,29 @@ func (c *Coord) shadowReadoutLoop(ctx context.Context, ticks <-chan time.Time, s
 		case <-ticks:
 			func() {
 				defer shadowContain()
-				version := c.shadow.changeVersion()
-				if wroteOnce && version == written { // guard:readout-on-change
-					return
-				}
 				owner, err := configuredReceiptOwner(c.cfg.Matrix)
 				if err != nil {
 					return
 				}
-				if writeShadowReadout(c.cfg.Matrix.ReceiptRoot, owner, c.shadow.readout(started)) == nil {
-					written, wroteOnce = version, true
+				if !loaded { // guard:parity-load-before-write
+					uid := os.Getuid()
+					if owner != nil {
+						uid = owner.uid
+					}
+					loaded = c.shadow.loadParity(c.cfg.Matrix.ReceiptRoot, uid, started)
 				}
+				version := c.shadow.changeVersion()
+				if wroteOnce && version == written { // guard:readout-on-change
+					return
+				}
+				if writeShadowReadout(c.cfg.Matrix.ReceiptRoot, owner, c.shadow.readout(started)) != nil {
+					return
+				}
+				// Counts are written only once the stored ones were read back.
+				if loaded && writeShadowParity(c.cfg.Matrix.ReceiptRoot, owner, c.shadow.parityState()) != nil {
+					return
+				}
+				written, wroteOnce = version, true
 			}()
 		}
 	}
