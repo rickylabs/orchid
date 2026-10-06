@@ -67,6 +67,7 @@ type actionCalls struct {
 	completed         func(context.Context, Host, *Job, string) (bool, error)
 	list              func(context.Context, Host) ([]AgentInfo, error)
 	send              func(context.Context, Host, string, string) error
+	codexInput        func(context.Context, Host, *Job, string) error // test seam for native Codex input
 	close             func(context.Context, Host, string) error
 	stopProcess       func(context.Context, Host, string, string) (*actionStopProcess, error)
 	processGone       func(context.Context, Host, actionStopProcess) (bool, error)
@@ -84,6 +85,20 @@ func (c *Coord) actionList(ctx context.Context, h Host) ([]AgentInfo, error) {
 	}
 	return h.agentList(ctx)
 }
+
+// jobInput sends text to a job's agent: a Codex job natively on its bound
+// Remote Control thread (never through the pane, never with Enter), any other
+// agent through its pane.
+func (c *Coord) jobInput(ctx context.Context, h Host, j *Job, text string) error {
+	if j != nil && j.Agent == "codex" { // guard:codex-input-native-only
+		if c.actions.codexInput != nil {
+			return c.actions.codexInput(ctx, h, j, text)
+		}
+		return h.forJob(j).submitCodexInput(ctx, text)
+	}
+	return h.send(ctx, j.Pane, text)
+}
+
 func (c *Coord) actionSend(ctx context.Context, h Host, pane, text string) error {
 	if c.actions.send != nil {
 		return c.actions.send(ctx, h, pane, text)
@@ -669,7 +684,11 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 			return
 		}
 		effectCtx, done := context.WithTimeout(ctx, 20*time.Second)
-		err = c.actionSend(effectCtx, host, j.Pane, req.Payload.Text)
+		if j.Agent == "codex" {
+			err = c.jobInput(effectCtx, host, j, req.Payload.Text) // guard:codex-action-native
+		} else {
+			err = c.actionSend(effectCtx, host, j.Pane, req.Payload.Text)
+		}
 		done()
 		if err != nil {
 			r.Reason = "prompt_delivery_unconfirmed"

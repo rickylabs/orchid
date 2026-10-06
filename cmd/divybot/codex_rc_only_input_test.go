@@ -110,11 +110,13 @@ func TestNonRCCodexJobGetsNoSupervisionInput(t *testing.T) {
 		if os.WriteFile(filepath.Join(filepath.Dir(ssh), "gh"), []byte(gh), 0700) != nil {
 			t.Fatal("fixture gh")
 		}
+		var native []string
+		c.actions.codexInput = func(_ context.Context, _ Host, _ *Job, text string) error { native = append(native, text); return nil }
 		c.pollPR(context.Background(), j.Issue, j, c.hosts[j.Host], "idle")
 		commands, _ := os.ReadFile(callLog)
-		prompted := strings.Contains(string(commands), "'agent' 'prompt'")
-		if prompted != rc {
-			t.Fatalf("remote control %v: PR input sent=%v, want %v: %s", rc, prompted, rc, commands)
+		// Never through the pane; under Remote Control, through the native owner.
+		if strings.Contains(string(commands), "'agent' 'prompt'") || (len(native) == 1) != rc {
+			t.Fatalf("remote control %v: native=%v pane=%s", rc, native, commands)
 		}
 	}
 }
@@ -158,11 +160,12 @@ func TestNonRCCodexJobGetsNoFanoutNudge(t *testing.T) {
 			j.RemoteControl = syntheticRemoteRun(t)
 		}
 		callLog := relayLogFixture(t, "#!/bin/sh\ncase \"$1\" in pr) echo '{\"state\":\"MERGED\"}';; *) echo '{\"state\":\"OPEN\"}';; esac\n")
+		var native []string
+		c.actions.codexInput = func(_ context.Context, _ Host, _ *Job, text string) error { native = append(native, text); return nil }
 		deferred := c.fanoutGrace(context.Background(), j.Issue, j)
 		commands, _ := os.ReadFile(callLog)
-		nudged := strings.Contains(string(commands), "'agent' 'prompt'")
-		if nudged != rc || deferred != rc {
-			t.Fatalf("remote control %v: nudged=%v deferred=%v: %s", rc, nudged, deferred, commands)
+		if strings.Contains(string(commands), "'agent' 'prompt'") || (len(native) == 1) != rc || deferred != rc {
+			t.Fatalf("remote control %v: native=%v deferred=%v pane=%s", rc, native, deferred, commands)
 		}
 	}
 }
@@ -175,10 +178,13 @@ func TestNonRCCodexJobIsNotPokedWhenStranded(t *testing.T) {
 	callLog := relayLogFixture(t, "#!/bin/sh\necho '[]'\n")
 	ref := completionRef(j)
 	ref.Status = "idle"
+	native := 0
+	c.actions.codexInput = func(context.Context, Host, *Job, string) error { native++; return nil }
 	c.supervise(context.Background(), j.Issue, j, map[int]agentRef{j.Issue: ref}, Issue{Number: j.Issue})
 	commands, _ := os.ReadFile(callLog)
-	if strings.Contains(string(commands), "'agent' 'prompt'") || strings.Contains(string(commands), "continue — work the assigned issue") {
-		t.Fatalf("a non-RC Codex job was poked: %s", commands)
+	// Not through the pane, and not even offered to the native owner.
+	if native != 0 || strings.Contains(string(commands), "'agent' 'prompt'") || strings.Contains(string(commands), "continue — work the assigned issue") {
+		t.Fatalf("a non-RC Codex job was poked: native=%d pane=%s", native, commands)
 	}
 	if strandedPoke(j, "idle", time.Now()) == "" {
 		t.Fatal("control: the job is stranded and would be poked")

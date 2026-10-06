@@ -3734,7 +3734,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	// strandedPoke for when it is due and what it says.
 	if poke := strandedPoke(j, ref.Status, time.Now()); !suppressInput && poke != "" {
 		gctx, gcancel := context.WithTimeout(ctx, 15*time.Second)
-		if host.send(gctx, j.Pane, poke) == nil {
+		if c.jobInput(gctx, host, j, poke) == nil {
 			j.LastPoke = time.Now()
 		}
 		gcancel()
@@ -3806,7 +3806,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 		if !suppressInput && merged && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 5*time.Minute {
 			msg := "Your PR merged ✅. Keep the loop going: per the tracker, pick the NEXT subtask in scope (or split remaining work into sibling inbox issues so they run in parallel), implement it, and open the next PR. Don't stop while the tracker still has unfinished cells."
 			rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
-			if host.send(rctx, j.Pane, msg) == nil {
+			if c.jobInput(rctx, host, j, msg) == nil {
 				j.LastPoke = time.Now()
 				log.Printf("issue #%d: PR #%d merged — re-engaged warm worker to continue", n, v.Number)
 			}
@@ -3861,7 +3861,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	if !suppressInput && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 15*time.Minute {
 		if msg := stuckPRNudge(v); msg != "" {
 			rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
-			if host.send(rctx, j.Pane, msg) == nil {
+			if c.jobInput(rctx, host, j, msg) == nil {
 				j.LastPoke = time.Now()
 				log.Printf("issue #%d: self-repoke PR #%d (%s)", n, j.PR, prShortState(v))
 			}
@@ -3882,7 +3882,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	}
 	msg := "New activity on your PR — address each item, push fixes, keep the PR green:\n" + strings.Join(lines, "\n")
 	rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
-	if err := host.send(rctx, j.Pane, msg); err != nil {
+	if err := c.jobInput(rctx, host, j, msg); err != nil {
 		log.Printf("issue #%d: relay failed: %v", n, err)
 	}
 	rcancel()
@@ -4216,7 +4216,7 @@ func (c *Coord) fanoutGrace(ctx context.Context, n int, j *Job) bool {
 			"remains, do nothing — the orchestrator handles a single follow-up.",
 		pr, ref, c.cfg.Inbox, c.labelFor(j.Repo), ref, c.cfg.Inbox, ref)
 	sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
-	err := host.send(sctx, j.Pane, msg)
+	err := c.jobInput(sctx, host, j, msg)
 	scancel()
 	if err != nil {
 		log.Printf("issue #%d: fan-out nudge failed: %v — tearing down", n, err)

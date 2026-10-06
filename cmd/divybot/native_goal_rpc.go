@@ -371,7 +371,9 @@ func goalMethodAllowed(method string, serial int) bool {
 		return false
 	}
 	switch method {
-	case "thread/goal/get", "thread/goal/set", "thread/goal/clear", "thread/turns/list", "thread/read", "thread/start", "thread/resume", "thread/name/set", "remoteControl/status/read", "turn/interrupt", "thread/queue/list", "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate", "thread/list", "thread/loaded/list":
+	case "thread/goal/get", "thread/goal/set", "thread/goal/clear", "thread/turns/list", "thread/read", "thread/start", "thread/resume", "thread/name/set", "remoteControl/status/read", "turn/interrupt",
+		// Native Codex input on the bound thread only (request() pins threadId).
+		"turn/start", "turn/steer", "thread/queue/list", "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate", "thread/list", "thread/loaded/list":
 		return true
 	}
 	return false
