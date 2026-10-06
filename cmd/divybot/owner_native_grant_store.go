@@ -127,6 +127,17 @@ func ownerNativePrivateRead(path string, uid int) ([]byte, error) {
 }
 
 func ownerNativePrivateReadWithOpen(path string, uid int, open func(string) (*os.File, error)) ([]byte, error) {
+	raw, err := privateFileBytes(path, uid, open)
+	if err != nil || !utf8.Valid(raw) {
+		return nil, errMatrix
+	}
+	return raw, nil
+}
+
+// privateFileBytes reads a private file safely (absolute clean path, private
+// owned directory, regular owned 0600 file, no symlink swap, 1 MiB bound) and
+// returns its bytes without judging their content.
+func privateFileBytes(path string, uid int, open func(string) (*os.File, error)) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || !ownerNativePrivateDir(filepath.Dir(path), uid) {
 		return nil, errMatrix
 	}
@@ -144,7 +155,7 @@ func ownerNativePrivateReadWithOpen(path string, uid int, open func(string) (*os
 		return nil, errMatrix
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, 1024*1024+1))
-	if err != nil || len(raw) > 1024*1024 || !utf8.Valid(raw) {
+	if err != nil || len(raw) > 1024*1024 {
 		return nil, errMatrix
 	}
 	return raw, nil

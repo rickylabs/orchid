@@ -197,3 +197,73 @@ func TestShadowParityCountIsBounded(t *testing.T) {
 		t.Fatalf("count passed its bound: %d", got)
 	}
 }
+
+// REVIEW-o92 P2: a receipt root missing at the first load says nothing about the
+// stored counts. Loading stays pending, and when the root returns its counts are
+// read back and kept, never replaced.
+func TestShadowParityWaitsForAMissingRoot(t *testing.T) {
+	j := shadowFixtureJob(t, "codex")
+	root := shadowReadoutRoot(t)
+	stored := `{"schemaVersion":1,"since":"2025-12-01T00:00:00Z","counts":[{"site":"remote-hook","vendor":"codex","today":"pass","native":"unknown","agreement":"shadow-unknown","reason":"codex-tui-attachment-unproven","count":7}]}`
+	if os.WriteFile(filepath.Join(root, shadowParityFile), []byte(stored), 0600) != nil {
+		t.Fatal("fixture")
+	}
+	away := root + "-away"
+	if os.Rename(root, away) != nil {
+		t.Fatal("fixture")
+	}
+	c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, shadow: newNativeEvidenceShadow(func() time.Time { return shadowT0 })}
+	c.shadow.compare(j, shadowSiteRemoteHook, "pass", nil)
+	tick, stop := runParityLoop(t, c, shadowT0)
+	tick() // the root is missing
+	if os.Rename(away, root) != nil {
+		t.Fatal("fixture")
+	}
+	tick() // the root is back
+	stop()
+	var st shadowParityState
+	raw, _ := os.ReadFile(filepath.Join(root, shadowParityFile))
+	if strictJSON(raw, &st) != nil || parityCount(st, hookUnknown) != 8 || st.Since != "2025-12-01T00:00:00Z" {
+		t.Fatalf("stored counts were not read back after the root returned: %s", raw)
+	}
+}
+
+// REVIEW-o92 P2: a stored file that was read safely but is not valid UTF-8 is
+// invalid state: the count restarts visibly and is persisted again.
+func TestShadowParityRestartsInvalidEncoding(t *testing.T) {
+	for name, content := range map[string][]byte{"invalid-utf8": {0xff}, "malformed-json": []byte("{")} {
+		t.Run(name, func(t *testing.T) {
+			j := shadowFixtureJob(t, "codex")
+			root := shadowReadoutRoot(t)
+			if os.WriteFile(filepath.Join(root, shadowParityFile), content, 0600) != nil {
+				t.Fatal("fixture")
+			}
+			c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}, shadow: newNativeEvidenceShadow(func() time.Time { return shadowT0 })}
+			c.shadow.compare(j, shadowSiteRemoteHook, "pass", nil)
+			tick, stop := runParityLoop(t, c, shadowT0)
+			tick()
+			stop()
+			var st shadowParityState
+			raw, _ := os.ReadFile(filepath.Join(root, shadowParityFile))
+			if strictJSON(raw, &st) != nil || st.Since != shadowT0.Format(time.RFC3339Nano) || parityCount(st, hookUnknown) != 1 {
+				t.Fatalf("invalid stored counts did not restart visibly: %q", raw)
+			}
+		})
+	}
+}
+
+// The shared safe reader split keeps the owner-native reader's content rule:
+// invalid UTF-8 is still refused there.
+func TestOwnerNativePrivateReadStillRefusesInvalidUTF8(t *testing.T) {
+	root := shadowReadoutRoot(t)
+	path := filepath.Join(root, "binding.json")
+	if os.WriteFile(path, []byte{0xff}, 0600) != nil {
+		t.Fatal("fixture")
+	}
+	if _, err := ownerNativePrivateRead(path, os.Getuid()); err == nil {
+		t.Fatal("owner-native reader accepted invalid UTF-8")
+	}
+	if raw, err := privateFileBytes(path, os.Getuid(), ownerNativeOpen); err != nil || len(raw) != 1 {
+		t.Fatalf("control: the safe reader refused a safe file: %v", err)
+	}
+}
