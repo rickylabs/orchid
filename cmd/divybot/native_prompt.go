@@ -176,6 +176,13 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 	return promptSnapshot{Agent: after, Screen: screen, Stable: before.StateChangeSeq == after.StateChangeSeq}, nil
 }
 
+// codexWithoutRemoteControl is a Codex job with no Remote Control binding (one
+// retained from before Remote Control became the only Codex path). It receives
+// no input of any kind: no goal, steer, send, poke, relay or nudge.
+func codexWithoutRemoteControl(j *Job) bool {
+	return j != nil && j.Agent == "codex" && j.RemoteControl == nil
+}
+
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
 	var native func(context.Context, string, func(context.Context) error) error
 	var readiness func(promptSnapshot, string, time.Time)

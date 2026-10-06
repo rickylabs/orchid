@@ -28,7 +28,9 @@ func TestCodexTrustDialogIsRecognized(t *testing.T) {
 // the trust dialog is reported idle (default fallback), a prompt sent while it
 // shows is lost, an Enter accepts it, and codex then reports working while it
 // boots before settling to done.
-func TestCodexGoalIsDeliveredPastTheTrustDialog(t *testing.T) {
+// A Codex trust dialog on the generic delivery path is refused: never answered
+// with Enter, and the goal is never typed (Codex runs only under Remote Control).
+func TestCodexTrustDialogIsRefusedOnTheGenericPath(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, ".local", "bin")
 	if err := os.MkdirAll(bin, 0700); err != nil {
@@ -75,21 +77,11 @@ else: print(json.dumps({'result':{}}))
 	host := Host{Home: root, Name: "fixture-host"}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := host.injectGoal(ctx, "w43:p1", "Work the linked GitHub issue according to its description.", false); err != nil {
-		t.Fatalf("goal not confirmed: %v", err)
+	if err := host.injectGoal(ctx, "w43:p1", "Work the linked GitHub issue according to its description.", false); err == nil {
+		t.Fatal("a goal was delivered past a Codex trust dialog")
 	}
-	raw, err := os.ReadFile(filepath.Join(state, "events"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	events := strings.Fields(string(raw))
-	if strings.Contains(string(raw), "goal-lost") {
-		t.Fatalf("the goal was typed into the trust dialog and lost: %v", events)
-	}
-	if len(events) < 2 || events[0] != "trust-accepted" || events[1] != "goal-delivered" {
-		t.Fatalf("want the dialog accepted, then the goal delivered once; got %v", events)
-	}
-	if n := strings.Count(string(raw), "goal-delivered"); n != 1 {
-		t.Fatalf("goal delivered %d times, want once: %v", n, events)
+	raw, _ := os.ReadFile(filepath.Join(state, "events"))
+	if len(strings.Fields(string(raw))) != 0 {
+		t.Fatalf("the dialog was answered or the goal typed: %q", raw)
 	}
 }

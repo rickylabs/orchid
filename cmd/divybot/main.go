@@ -1083,7 +1083,9 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 	// taken as the goal being accepted, leaving an empty composer.)
 	for i := 0; i < 30; i++ {
 		if codexTrustDialog(h.screen(ctx, target)) {
-			h.herdr(ctx, "pane", "send-keys", target, "Enter")
+			// Codex runs only under Remote Control, and a trust dialog is never
+			// answered on the operator's behalf.
+			return errPromptUnconfirmed // guard:generic-trust-dialog-refused
 		} else if ready() {
 			break
 		} else if h.agentStatusOf(ctx, target) == "blocked" {
@@ -3622,7 +3624,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		}
 		c.observeRemoteControl(ctx, host, j)
 	}
-	suppressInput := !matched || ref.Status == "done"
+	suppressInput := !matched || ref.Status == "done" || codexWithoutRemoteControl(j) // guard:codex-rc-supervise
 	if matched && j.Agent == "agy" {
 		c.bindAGYLiveIdentity(ctx, host, j)
 	}
@@ -3775,7 +3777,7 @@ func strandedPoke(j *Job, status string, now time.Time) string {
 }
 
 func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status string, inputSuppressed ...bool) {
-	suppressInput := len(inputSuppressed) != 0 && inputSuppressed[0]
+	suppressInput := len(inputSuppressed) != 0 && inputSuppressed[0] || codexWithoutRemoteControl(j) // guard:codex-rc-pr-input
 	if j.PR == 0 {
 		if pr := ghPRByBranch(ctx, j.Repo, j.Branch, c.cfg.BotLogin); pr != 0 {
 			j.PR = pr
@@ -4202,7 +4204,7 @@ func (c *Coord) fanoutGrace(ctx context.Context, n int, j *Job) bool {
 		return true // keep deferring
 	}
 	host, hok := c.hosts[j.Host]
-	if !hok || j.Pane == "" {
+	if !hok || j.Pane == "" || codexWithoutRemoteControl(j) { // guard:codex-rc-fanout
 		return false // can't reach the worker — skip straight to teardown+fallback
 	}
 	msg := fmt.Sprintf(

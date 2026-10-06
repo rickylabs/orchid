@@ -655,6 +655,11 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		}
 		r.Outcome, r.Reason = "accepted", "workspace_close_delivered"
 	case "steer", "send":
+		// A Codex job without Remote Control has no native identity to address.
+		if codexWithoutRemoteControl(j) { // guard:codex-rc-action
+			r.Reason = "native_identity_unavailable"
+			return
+		}
 		if req.Action == "steer" && status != "working" && status != "blocked" {
 			r.Outcome, r.Reason = "rejected", "agent_not_running"
 			return
