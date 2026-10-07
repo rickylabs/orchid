@@ -140,7 +140,7 @@ func testOpenCodeFullGoalSpawn(t *testing.T, mode string) {
 // confirmFault faults only the goal confirmation save on the real spawn path:
 // "late-save" cancels the launch context inside it, "dir-sync" fails it after
 // the rename. Either way the on-time decision stands and the launch continues.
-func openCodeFullGoalSpawn(t *testing.T, mode, confirmFault string) {
+func openCodeFullGoalSpawn(t *testing.T, mode, confirmFault string, ownerChoice ...bool) {
 	t.Helper()
 	h, _, calls := openCodeHostFixture(t, mode)
 	h.SSH, h.WorkdirRoot = "fixture-host", h.Home
@@ -169,6 +169,10 @@ sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 	o := Overrides{Model: "fixture-provider/fixture-model", Router: "fixture-provider", Effort: "high", Prompt: "Synthetic owner instruction: report only; no PR.", Profile: "fix"}
 	r := registrationReceipt(t, "opencode", o)
 	r.dispatch.Host = h.Name
+	if len(ownerChoice) > 0 && ownerChoice[0] {
+		r.dispatch.MatrixSource = ownerNativeSource
+		c.cfg.ProviderBudgets = &ProviderBudgetConfig{} // Unavailable policy remains advisory to the owner.
+	}
 	// The dispatcher's pinned Harness profile; the target checkout carries a conflicting decoy.
 	r.profile = &workerProfile{Name: "fix", Revision: strings.Repeat("e", 40), Text: "Synthetic Harness fix process.\n"}
 	writeFixture(t, filepath.Join(cwd, "profiles", "fix.md"), "Synthetic target decoy process.\n")

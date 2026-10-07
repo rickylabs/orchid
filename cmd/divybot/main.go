@@ -3284,8 +3284,11 @@ func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, 
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
 	attempt := receipt.launchAttempt()
 	attempt.enter(stagePreparation)
-	if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
-		return matrixReason(reason)
+	ownerChoice := receipt != nil && receipt.dispatch != nil && receipt.dispatch.MatrixSource == ownerNativeSource
+	if !ownerChoice {
+		if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
+			return matrixReason(reason)
+		}
 	}
 	var intent goalIntent
 	if agent == "codex" {

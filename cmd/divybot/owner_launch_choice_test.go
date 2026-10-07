@@ -105,3 +105,7 @@ func TestOwnerPlacementIgnoresDeclaredHarnessAndCapacity(t *testing.T) {
 		t.Fatal("declared harness/capacity withheld owner attempt")
 	}
 }
+
+func TestOwnerOpenCodeBudgetIsAdvisoryAtSpawn(t *testing.T) {
+	openCodeFullGoalSpawn(t, "", "", true)
+}
