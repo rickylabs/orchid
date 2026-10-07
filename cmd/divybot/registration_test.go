@@ -163,7 +163,7 @@ else:print(json.dumps({'result':{}}))
 func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 	expectedArgs := map[string][]string{
 		"codex":  {"--dangerously-bypass-approvals-and-sandbox", "-m", "fixture model 'quoted'", "-c", `model_reasoning_effort="high"`},
-		"claude": {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'"},
+		"claude": {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'", "--effort", "fixture-effort"},
 		"agy":    {"--dangerously-skip-permissions", "--model", "fixture model 'quoted'", "--effort", "fixture-effort"},
 	}
 	for kind, configuredArgs := range expectedArgs {

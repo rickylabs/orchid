@@ -53,7 +53,7 @@ func validOwnerNativeOverride(grant *ownerNativeOverride) bool {
 	route := grant.Route
 	if !containsString(matrixTransports, route.Harness) || !openCodeProviderID.MatchString(route.Provider) ||
 		!ownerNativeModel.MatchString(route.Model) || strings.Contains(route.Model, "..") ||
-		!openCodeVariantID.MatchString(route.Effort) {
+		!validNativeEffort(route.Effort) {
 		return false
 	}
 	if route.Harness == "opencode" {

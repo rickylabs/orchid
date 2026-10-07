@@ -70,30 +70,7 @@ func TestRemoteCodexPreparationMaterializesThread(t *testing.T) {
 	}
 }
 
-func TestOwnerQuotaRefusesOnlyOnVendorLimit(t *testing.T) {
-	now := time.Now()
-	future, past := now.Add(time.Hour).Unix(), now.Add(-time.Hour).Unix()
-	for _, tc := range []struct {
-		name string
-		q    quota
-		want string
-	}{
-		{"absent", quota{}, ""},
-		{"unread", quota{ok: false, at: now}, ""},
-		{"stale-but-low", quota{ok: true, at: now.Add(-time.Hour), five: RateLimit{UsedPct: 50, ResetsAt: future}}, ""},
-		{"over-governor-ceiling-not-vendor-limit", quota{ok: true, at: now, seven: RateLimit{UsedPct: 95, ResetsAt: future}}, ""},
-		{"five-hour-at-vendor-limit", quota{ok: true, at: now, five: RateLimit{UsedPct: 100, ResetsAt: future}}, availabilityFiveHourCeiling},
-		{"weekly-at-vendor-limit", quota{ok: true, at: now, seven: RateLimit{UsedPct: 100, ResetsAt: future}}, availabilityWeeklyCeiling},
-		{"limit-window-already-reset", quota{ok: true, at: now, five: RateLimit{UsedPct: 100, ResetsAt: past}}, ""},
-	} {
-		if got := ownerQuotaReason(tc.q, now); got != tc.want {
-			t.Fatalf("%s: got %q want %q", tc.name, got, tc.want)
-		}
-	}
-}
-
-// An owner-native launch is admitted with an absent/stale meter, over the pacing
-// ceiling and at the governor cap, and refused only at a native vendor limit.
+// Owner-native launches are attempted regardless of meter or governor capacity.
 // Autonomous dispatch (production matrixAttempt) keeps every existing guard.
 func freshAt(p float64) map[string]quota {
 	return map[string]quota{"claude": {ok: true, at: time.Now(), seven: RateLimit{UsedPct: p, ResetsAt: time.Now().Add(time.Hour).Unix()}}}
@@ -110,7 +87,7 @@ func TestMatrixOwnerLaunchNotRefusedOnMissingMeter(t *testing.T) {
 		{"owner-absent-meter", true, map[string]quota{}, 1, true},
 		{"owner-governor-cap", true, map[string]quota{}, 0, true},
 		{"owner-over-pacing-ceiling", true, freshAt(95), 1, true},
-		{"owner-vendor-limit", true, freshAt(100), 1, false},
+		{"owner-vendor-limit", true, freshAt(100), 1, true},
 		{"autonomous-absent-meter", false, map[string]quota{}, 1, false},
 		{"autonomous-stale-meter", false, map[string]quota{"claude": {ok: true, at: time.Now().Add(-time.Hour), seven: RateLimit{UsedPct: 10, ResetsAt: time.Now().Add(time.Hour).Unix()}}}, 1, false},
 		{"autonomous-over-pacing-ceiling", false, freshAt(95), 1, false},

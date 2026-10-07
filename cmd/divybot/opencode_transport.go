@@ -18,7 +18,6 @@ import (
 // Provider IDs and models are data. These are syntax bounds, not a catalog.
 var openCodeProviderID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 var openCodeModelID = regexp.MustCompile(`^~?[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$`)
-var openCodeVariantID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 type openCodeRoute struct {
 	Provider string `json:"provider"`
@@ -40,7 +39,7 @@ func resolveOpenCodeRoute(o Overrides) (openCodeRoute, error) {
 	if variant == "provider_default" || variant == "none" {
 		variant = ""
 	}
-	if variant != "" && !openCodeVariantID.MatchString(variant) {
+	if variant != "" && !validNativeEffort(variant) {
 		return openCodeRoute{}, matrixReason("opencode-variant-unavailable")
 	}
 	return openCodeRoute{provider, id, variant}, nil
@@ -137,25 +136,29 @@ func openCodeEnvironment(cwd string, route openCodeRoute) (map[string]string, er
 		"XDG_STATE_HOME": filepath.Join(cwd, ".divybot-opencode", "state")}, nil
 }
 
-func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openCodeRoute, env map[string]string) error {
-	// Catalog commands do not select a variant. Avoid creating the private state
-	// root until the catalog has independently admitted the route.
-	catalog, err := h.openCodeRead(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "models", route.Provider, "--verbose")
-	if err != nil {
-		return matrixReason("opencode-catalog-unavailable")
-	}
-	if err := validateOpenCodeCatalog(catalog, route); err != nil {
-		return err
-	}
-	agent, err := h.openCodeRead(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "debug", "agent", "build")
-	var selected struct {
-		Name, Mode string
-		Hidden     bool
-		Model      struct{ ProviderID, ModelID string }
-	}
-	if err != nil || len(agent) > 1024*1024 || decodeNativeJSON(agent, &selected) != nil || selected.Name != "build" || selected.Hidden ||
-		(selected.Mode != "primary" && selected.Mode != "all") || selected.Model.ProviderID != route.Provider || selected.Model.ModelID != route.Model {
-		return matrixReason("opencode-route-invalid")
+func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openCodeRoute, env map[string]string, ownerChoice ...bool) error {
+	// A trusted owner choice is attempted directly. Autonomous launches retain
+	// their catalog policy; catalog output never authorizes an owner grant.
+	if len(ownerChoice) == 0 || !ownerChoice[0] {
+		// Catalog commands do not select a variant. Avoid creating the private state
+		// root until the catalog has independently admitted the route.
+		catalog, err := h.openCodeRead(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "models", route.Provider, "--verbose")
+		if err != nil {
+			return matrixReason("opencode-catalog-unavailable")
+		}
+		if err := validateOpenCodeCatalog(catalog, route); err != nil {
+			return err
+		}
+		agent, err := h.openCodeRead(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "debug", "agent", "build")
+		var selected struct {
+			Name, Mode string
+			Hidden     bool
+			Model      struct{ ProviderID, ModelID string }
+		}
+		if err != nil || len(agent) > 1024*1024 || decodeNativeJSON(agent, &selected) != nil || selected.Name != "build" || selected.Hidden ||
+			(selected.Mode != "primary" && selected.Mode != "all") || selected.Model.ProviderID != route.Provider || selected.Model.ModelID != route.Model {
+			return matrixReason("opencode-route-invalid")
+		}
 	}
 	state, _ := json.Marshal(map[string]any{"recent": []any{}, "favorite": []any{},
 		"variant": map[string]string{route.qualifiedModel(): route.Variant}})

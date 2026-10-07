@@ -730,7 +730,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if overlayErr != nil {
 			return "", "", matrixSite("spawn.opencode-environment", overlayErr)
 		}
-		if prepareErr := h.prepareOpenCodeLaunch(ctx, cwd, route, overlay); prepareErr != nil {
+		if prepareErr := h.prepareOpenCodeLaunch(ctx, cwd, route, overlay, receipt.dispatch != nil && receipt.dispatch.MatrixSource == ownerNativeSource); prepareErr != nil {
 			return "", "", matrixSite("spawn.opencode-preflight", prepareErr)
 		}
 		if env == nil {
@@ -2732,7 +2732,7 @@ func (c *Coord) tick(ctx context.Context) {
 		acct, launched := c.matrixAttempt(ctx, n, is, tgt, budget, matrixAttemptDeps{
 			report: func(r matrixRefusal) { c.reportIssueMatrixRefusal(ctx, n, is, r, postMatrixComment) },
 			read:   readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
-			host: c.pickHost, launch: c.spawn,
+			host: c.pickHost, ownerHost: c.pickOwnerHost, launch: c.spawn,
 		})
 		if launched {
 			budget[acct]--
@@ -3031,6 +3031,30 @@ func (c *Coord) pickHost(tgt Target, agent string) (Host, bool) {
 	return c.hosts[best], true
 }
 
+// Owner placement attempts a configured capable host even when advisory capacity
+// or the host's declared agent list would withhold the requested CLI.
+func (c *Coord) pickOwnerHost(tgt Target, _ string) (Host, bool) {
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	load := map[string]int{}
+	for _, job := range c.st.Jobs {
+		load[job.Host]++
+	}
+	best := ""
+	for name, host := range c.hosts {
+		if tgt.NeedCap != "" && !host.has(tgt.NeedCap) {
+			continue
+		}
+		if best == "" || load[name] < load[best] || load[name] == load[best] && name < best {
+			best = name
+		}
+	}
+	if best == "" {
+		return Host{}, false
+	}
+	return c.hosts[best], true
+}
+
 // workerPrompt is the full goal injected into every worker — restored from the
 // old orchid production bootstrap_prompt. Tokens: {{issue.number}} {{inbox.repo}}
 // {{issue.title}} {{target.repo}} {{workdir}} {{branch}} {{issue.body}}.
@@ -3260,8 +3284,11 @@ func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, 
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
 	attempt := receipt.launchAttempt()
 	attempt.enter(stagePreparation)
-	if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
-		return matrixReason(reason)
+	ownerChoice := receipt != nil && receipt.dispatch != nil && receipt.dispatch.MatrixSource == ownerNativeSource
+	if !ownerChoice {
+		if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
+			return matrixReason(reason)
+		}
 	}
 	var intent goalIntent
 	if agent == "codex" {

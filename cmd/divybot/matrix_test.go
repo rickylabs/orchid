@@ -21,7 +21,11 @@ func syntheticRoute() matrixRoute {
 }
 func privateTestRoot(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root, err := os.MkdirTemp("", "p-")
+	if err != nil {
+		t.Fatal("private fixture setup failed", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	if os.Chmod(root, 0700) != nil {
 		t.Fatal("private fixture setup failed")
 	}
@@ -159,7 +163,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 					is.Body = "/swarm\ntier: feature\nrole: implementation\nmax-tokens: " + value + "\n\nSynthetic task"
 				}
 			case "invalid-codex-effort":
-				route.Transport, route.Effort = "codex", "invalid"
+				route.Transport, route.Effort = "codex", "invalid\n"
 				c.gov.q["codex"] = q
 				budget["codex"] = 1
 			case "wrong-issue":

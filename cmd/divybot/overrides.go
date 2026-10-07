@@ -130,7 +130,7 @@ func parseOverrides(text string) Overrides {
 				case "router", "provider":
 					o.Router = strings.ToLower(val)
 				case "effort":
-					o.Effort = strings.ToLower(val)
+					o.Effort = val
 				case "max-tokens":
 					o.MaxTokens = val
 					o.MaxTokensPresent = true
@@ -164,17 +164,14 @@ var errCodexEffort = matrixReason("codex-effort-invalid")
 // emptyRepoKey is a syntactically present repo declaration with no value.
 var emptyRepoKey = regexp.MustCompile(`^repo\s*:$`)
 
-// The matrix input vocabulary is Harness packages/routing/matrix/contract.ts EFFORTS.
-// This validates input, not model capability: independent observation still
-// owns the runtime verdict. Contract source:
-// packages/routing/matrix/contract.ts in the pinned Harness checkout
+// Native effort values are CLI input, not a matrix capability allowlist.
+// Bound the transport grammar and let the attempted CLI report unsupported values.
+func validNativeEffort(effort string) bool {
+	return len(effort) <= 64 && cleanText(effort) && !strings.Contains(effort, "#")
+}
+
 func validCodexEffort(effort string) bool {
-	switch effort {
-	case "", "low", "medium", "high", "xhigh", "max":
-		return true
-	default:
-		return false
-	}
+	return effort == "" || validNativeEffort(effort)
 }
 
 // interactiveAgentArgs is the routing argv source for rendering and registration.
@@ -214,6 +211,9 @@ func interactiveAgentArgs(agent string, o Overrides) (string, []string, error) {
 		if o.Model != "" {
 			args = append(args, "--model", o.Model)
 		}
+		if o.Effort != "" {
+			args = append(args, "--effort", o.Effort)
+		}
 	}
 	return kind, args, nil
 }
@@ -232,6 +232,9 @@ func buildAgentCmd(agent string, o Overrides) (string, error) {
 		if o.Model != "" {
 			cmd += " -m " + shq(o.Model)
 		}
+		if o.Effort != "" {
+			cmd += " -c " + shq("model_reasoning_effort="+strconv.Quote(o.Effort))
+		}
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] codex exec exited: $?"; exec sleep 2147483647`), nil
 	case "opencode-run":
@@ -243,6 +246,9 @@ func buildAgentCmd(agent string, o Overrides) (string, error) {
 		cmd := "opencode run"
 		if ocModel != "" {
 			cmd += " --model " + shq(ocModel)
+		}
+		if o.Effort != "" && o.Effort != "provider_default" {
+			cmd += " --variant " + shq(o.Effort)
 		}
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`), nil
