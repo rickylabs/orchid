@@ -290,7 +290,7 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 	if routerErr := routeRouterError(route, o); routerErr != nil {
 		return configProblem("issue.router", string(routerErr.(matrixReason)))
 	}
-	if o.Harness != "" && o.Harness != route.Transport && !(o.Harness == "codex-run" && route.Transport == "codex") {
+	if o.Harness != "" && o.Harness != route.Transport && !(o.Harness == "codex-run" && route.Transport == "codex" || o.Harness == "opencode-run" && route.Transport == "opencode") {
 		return configProblem("issue.harness", "harness-conflict")
 	}
 	if _, _, err := resolveRouteBudget(cfg.Matrix, route.Tier, profile, o); err != nil {

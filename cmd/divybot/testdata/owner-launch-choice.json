@@ -1,0 +1,11 @@
+{
+  "choices": [
+    {"harness":"claude","native":"claude","provider":"fixture-provider","model":"fixture-owner-claude","effort":"Future+Effort"},
+    {"harness":"codex","native":"codex","provider":"fixture-provider","model":"fixture-owner-codex","effort":"Future+Effort"},
+    {"harness":"agy","native":"agy","provider":"fixture-provider","model":"fixture-owner-agy","effort":"Future+Effort"},
+    {"harness":"opencode","native":"opencode","provider":"fixture-provider","model":"fixture-provider/fixture-owner-opencode","effort":"Future+Effort"},
+    {"harness":"codex-run","native":"codex","provider":"fixture-provider","model":"fixture-owner-codex-run","effort":"Future+Effort"},
+    {"harness":"opencode-run","native":"opencode","provider":"fixture-provider","model":"fixture-provider/fixture-owner-opencode-run","effort":"Future+Effort"}
+  ],
+  "placementLabel":"synthetic-placement"
+}

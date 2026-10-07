@@ -110,7 +110,7 @@ func TestMatrixOwnerLaunchNotRefusedOnMissingMeter(t *testing.T) {
 		{"owner-absent-meter", true, map[string]quota{}, 1, true},
 		{"owner-governor-cap", true, map[string]quota{}, 0, true},
 		{"owner-over-pacing-ceiling", true, freshAt(95), 1, true},
-		{"owner-vendor-limit", true, freshAt(100), 1, false},
+		{"owner-vendor-limit", true, freshAt(100), 1, true},
 		{"autonomous-absent-meter", false, map[string]quota{}, 1, false},
 		{"autonomous-stale-meter", false, map[string]quota{"claude": {ok: true, at: time.Now().Add(-time.Hour), seven: RateLimit{UsedPct: 10, ResetsAt: time.Now().Add(time.Hour).Unix()}}}, 1, false},
 		{"autonomous-over-pacing-ceiling", false, freshAt(95), 1, false},

@@ -185,7 +185,7 @@ func TestOwnerNativeAdmissionAndSharedGuards(t *testing.T) {
 			// The owner is refused only on native proof of a vendor limit: an absent or
 			// stale meter, or the autonomous governor cap, no longer blocks the owner.
 			wantSuccess := containsString([]string{"claude", "codex", "agy", "opencode", "opencode-price-alias", "custom-opencode-variant", "ordinary-matrix", "owner-evaluator", "valid-token-budget",
-				"no-quota", "stale-quota", "no-capacity"}, name)
+				"no-quota", "stale-quota", "no-capacity", "opencode-no-pool", "paid-budget"}, name)
 			if ok != wantSuccess || launched != boolInt(wantSuccess) {
 				t.Fatalf("admission=%v launch=%d refusal=%s", ok, launched, refusal.ReasonCode)
 			}
@@ -198,8 +198,8 @@ func TestOwnerNativeAdmissionAndSharedGuards(t *testing.T) {
 			if containsString([]string{"other-authorizer", "missing-authorizer", "missing-route", "missing-harness", "missing-provider", "missing-model", "missing-effort", "unknown-tool", "blank-rationale", "legacy-conflict", "pin-conflict"}, name) && refusal.ReasonCode != "override-invalid" {
 				t.Fatal("invalid owner grant fell through to a different admission path")
 			}
-			if name == "paid-budget" && refusal.ReasonCode != "budget-reached" {
-				t.Fatal("owner selection bypassed paid budget")
+			if name == "paid-budget" && !ok {
+				t.Fatal("budget metadata withheld owner choice")
 			}
 			if name == "agy" && (!reflect.DeepEqual(c.gov.q, beforeQuota) || budget["claude"] != 1) {
 				t.Fatal("AGY moved a subscription meter/Claude capacity")

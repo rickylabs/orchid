@@ -749,6 +749,7 @@ type matrixAttemptDeps struct {
 	persist   func(string, string, string, matrixReceipt, any, ...*receiptOwner) (*durableMatrixReceipt, error)
 	launch    func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) error
 	host      func(Target, string) (Host, bool)
+	ownerHost func(Target, string) (Host, bool)
 	retry     *retryExpectation
 	preflight bool
 }
@@ -864,7 +865,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	agent := route.Transport
 	if o.Harness != "" && o.Harness != agent {
-		if o.Harness == "codex-run" && agent == "codex" {
+		if o.Harness == "codex-run" && agent == "codex" || o.Harness == "opencode-run" && agent == "opencode" {
 			agent = o.Harness
 		} else {
 			return refuse("harness-conflict")
@@ -877,11 +878,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if agent == "opencode" {
 		native, _ := resolveOpenCodeRoute(Overrides{Model: route.Model, Router: o.Router, Effort: route.Effort})
 		openCodeProvider = native.Provider
-		if reason := c.providerBudgetLaunchReason(agent, Overrides{Model: route.Model, Router: o.Router, Effort: route.Effort}, now); reason != "" {
-			return refuse(reason)
-		}
-		if c.cfg.OpenCode.Providers[openCodeProvider].MaxActive < 1 || budget["opencode:"+openCodeProvider] < 1 {
-			return refuse("opencode-provider-capacity")
+		if !req.owner {
+			if reason := c.providerBudgetLaunchReason(agent, Overrides{Model: route.Model, Router: o.Router, Effort: route.Effort}, now); reason != "" {
+				return refuse(reason)
+			}
+			if c.cfg.OpenCode.Providers[openCodeProvider].MaxActive < 1 || budget["opencode:"+openCodeProvider] < 1 {
+				return refuse("opencode-provider-capacity")
+			}
 		}
 	}
 	resolvedBudget, budgetSource, budgetErr := resolveRouteBudget(cfg, route.Tier, o.Profile, o)
@@ -911,7 +914,11 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		report(refusalFor(matrixSite("attempt.command-render", renderErr)))
 		return "", false
 	}
-	host, ok := d.host(target, route.Transport)
+	pick := d.host
+	if req.owner && d.ownerHost != nil {
+		pick = d.ownerHost
+	}
+	host, ok := pick(target, route.Transport)
 	if !ok || !placementHostName.MatchString(host.Name) {
 		return refuse("host-unavailable")
 	}
@@ -1101,6 +1108,12 @@ func transportAvailabilityReason(budget int, q quota, now time.Time, sampleInter
 // quotaAvailability fills req.Available with the transports admission offers and
 // returns the conditions of those it withholds.
 func (c *Coord) quotaAvailability(req *matrixRequest, budget map[string]int, now time.Time) []string {
+	if req.owner {
+		// Quota, pools and capacity describe autonomous scheduling. The owner's
+		// authenticated choice reaches the CLI, which decides actual availability.
+		req.Available = append([]string(nil), matrixTransports...)
+		return nil
+	}
 	var quotaConditions []string
 	c.gov.mu.Lock()
 	for _, transport := range matrixTransports {
@@ -1110,13 +1123,6 @@ func (c *Coord) quotaAvailability(req *matrixRequest, budget map[string]int, now
 		q := c.gov.q[transport]
 		reason := admissionTransportReason(transport, budget[transport], q, now,
 			c.cfg.Governor.sampleIntervalDur(), c.cfg.Governor.WeeklyCeiling, c.cfg.UnmeteredTransports)
-		if req.owner && (transport == "claude" || transport == "codex") {
-			// The owner's launch is refused only on native proof that the vendor
-			// limit is reached. An absent, unread or stale meter, or the
-			// autonomous governor cap or ceiling, is not proof the route is down.
-			// Autonomous dispatch keeps those guards unchanged.
-			reason = ownerQuotaReason(q, now) // guard:owner-quota
-		}
 		cond := availabilityConditions[reason]
 		if transport == "opencode" {
 			cond = "blocked by capacity"

@@ -9,9 +9,11 @@ is durable, active, and selectable by the running coordinator.
 The feature is optional. Without `owner_native_grant_port`, startup grants and
 ordinary routing retain their existing behavior. With the port configured,
 normal admission and action retry both consult its independent grant snapshot.
-Capacity, subscription readings, provider budgets, reservation receipts, native
-prompt confirmation and completion checks still apply after owner authorization.
-A LIVE grant proves authority; it does not prove a CLI run succeeded.
+For owner-native launches, matrix/catalog membership, subscription readings, provider
+budgets, capacity and declared harness availability are informational. The requested
+CLI is attempted on a configured capable host. Reservation receipts, exact native
+prompt/route confirmation and completion checks still apply. A LIVE grant proves
+authority; it does not prove a CLI run succeeded.
 
 ## Bootstrap and trust
 
@@ -70,6 +72,12 @@ The native route uses `harness`, `provider`, `model`, and `effort`. All four CLI
 are supported. OpenCode `model` is the native CLI-qualified model required by the
 existing override validator. This private CLI route does not change the public
 provider-budget convention, where provider and provider-native model are separate.
+Owner effort strings retain their exact case and value within the bounded brief
+grammar. They need not appear in a matrix or native catalog. Run aliases use the
+underlying Codex/OpenCode grant while preserving their execution mode and effort.
+OpenCode owner launches stage the requested variant directly; autonomous launches
+retain their catalog preflight. Unsupported native inputs are reported after the
+CLI attempt.
 Unknown, duplicate, null, missing required, malformed UTF-8 and oversized fields
 are refused. Frames, issues and private files are bounded to 1 MiB.
 

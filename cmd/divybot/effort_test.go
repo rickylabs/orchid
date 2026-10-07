@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -67,7 +68,7 @@ func TestCodexEffortOverridesDefault(t *testing.T) {
 }
 
 func TestCodexEffortInvalid(t *testing.T) {
-	for _, effort := range []string{"invalid", "HIGH", " high", "high\n", `high"; exit 0`} {
+	for _, effort := range []string{" high", "high\n", "high\x00", "high#comment", strings.Repeat("x", 65)} {
 		kind, args, err := interactiveAgentArgs("codex", Overrides{Effort: effort})
 		if !errors.Is(err, errCodexEffort) || kind != "" || len(args) != 0 {
 			t.Fatal("invalid effort was forwarded")
@@ -77,9 +78,9 @@ func TestCodexEffortInvalid(t *testing.T) {
 			t.Fatal("invalid effort rendered an executable command")
 		}
 	}
-	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "HIGH", "future+effort", `high"; exit 0`} {
 		_, args, err := interactiveAgentArgs("codex", Overrides{Effort: effort})
-		if err != nil || args[len(args)-1] != `model_reasoning_effort="`+effort+`"` {
+		if err != nil || args[len(args)-1] != "model_reasoning_effort="+strconv.Quote(effort) {
 			t.Fatal("matrix effort was refused or normalized")
 		}
 	}
@@ -87,7 +88,7 @@ func TestCodexEffortInvalid(t *testing.T) {
 
 func TestCodexEffortInvalidBeforeWorkspace(t *testing.T) {
 	h, _ := registrationHost(t, "")
-	_, _, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{Effort: "invalid"}, registrationReceipt(t, "codex", Overrides{}))
+	_, _, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{Effort: "invalid\n"}, registrationReceipt(t, "codex", Overrides{}))
 	if err == nil || !strings.Contains(err.Error(), "spawn.command-render") {
 		t.Fatal("render error was not propagated before launch")
 	}
@@ -102,8 +103,8 @@ func TestCodexEffortOtherTransports(t *testing.T) {
 		args []string
 	}{
 		"agy":      {"agy", []string{"--dangerously-skip-permissions", "--model", "fixture-model", "--effort", "fixture-effort"}},
-		"claude":   {"claude", []string{"--dangerously-skip-permissions", "--model", "fixture-model"}},
-		"default":  {"claude", []string{"--dangerously-skip-permissions", "--model", "fixture-model"}},
+		"claude":   {"claude", []string{"--dangerously-skip-permissions", "--model", "fixture-model", "--effort", "fixture-effort"}},
+		"default":  {"claude", []string{"--dangerously-skip-permissions", "--model", "fixture-model", "--effort", "fixture-effort"}},
 		"opencode": {"opencode", []string{"--pure", "--agent", "build", "--model", "fixture-provider/fixture-model"}},
 	}
 	for transport, want := range wants {
@@ -115,10 +116,10 @@ func TestCodexEffortOtherTransports(t *testing.T) {
 }
 
 func TestCodexEffortMatrixValues(t *testing.T) {
-	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "HIGH", "future+effort", `high"; exit 0`} {
 		t.Run(effort, func(t *testing.T) {
 			kind, args, err := interactiveAgentArgs("codex", Overrides{Effort: effort})
-			want := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", `model_reasoning_effort="` + effort + `"`}
+			want := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", "model_reasoning_effort=" + strconv.Quote(effort)}
 			if err != nil || kind != "codex" || !reflect.DeepEqual(args, want) {
 				t.Fatal("matrix effort lost its native config override")
 			}

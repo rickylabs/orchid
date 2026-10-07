@@ -112,9 +112,10 @@ or subscription meter. OpenCode never spends the Codex subscription's admission
 budget. An unbound OpenCode seat conservatively consumes a slot in every provider
 pool. Eligible hosts must permit the `opencode` agent and have free host capacity.
 
-Before seat creation, read-only native catalog and resolved-agent commands on the
-dispatch host must confirm the provider, exact model, and requested variant. A
-missing variant refuses instead of lowering effort. The full TUI receives a
+For autonomous launches, read-only native catalog and resolved-agent commands
+confirm the provider, exact model, and requested variant before seat creation.
+Trusted owner-native launches attempt the requested model and variant directly;
+catalog membership and discovery failures are informational. The full TUI receives a
 process-local model overlay and a private `.divybot-opencode/` state tree with the
 variant seeded explicitly; provider default seeds an empty selection. This avoids
 the native TUI's unavailable-model fallback and inherited variant preferences.
