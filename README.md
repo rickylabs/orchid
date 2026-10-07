@@ -108,11 +108,15 @@ Opt in to provider seats in private dispatcher configuration, for example:
 
 Each provider limit is an integer from 0 through 256; omitted or zero disables
 that pool. This is a concurrency ceiling for registered seats, not a vendor credit
-or subscription meter. OpenCode never spends the Codex subscription's admission
-budget. An unbound OpenCode seat conservatively consumes a slot in every provider
-pool. Eligible hosts must permit the `opencode` agent and have free host capacity.
+or subscription meter. Autonomous `opencode` seats never spend the Codex
+subscription's admission budget. An unbound `opencode` seat conservatively consumes
+a slot in every provider pool. Autonomous hosts must permit the `opencode` agent
+and have free host capacity. Trusted owner-native requests may also select
+`opencode-run` or `codex-run`; these aliases are refused for autonomous briefs.
+Owner-native requests attempt the exact CLI choice regardless of pool or declared
+host capacity.
 
-For autonomous launches, read-only native catalog and resolved-agent commands
+For autonomous `opencode` launches, read-only native catalog and resolved-agent commands
 confirm the provider, exact model, and requested variant before seat creation.
 Trusted owner-native launches attempt the requested model and variant directly;
 catalog membership and discovery failures are informational. The full TUI receives a
@@ -205,7 +209,7 @@ remain native defaults; the dispatcher does not guess a concrete variant.
 
 Each admission tick writes `openCodeProviderPools` alongside the availability
 rows: sorted records `{provider,maxActive,active}` from configured pools and
-managed jobs. Unbound OpenCode jobs count in every pool. An absent list in older
+managed jobs. Unbound `opencode` jobs count in every pool. An absent list in older
 snapshots means unknown per-provider availability; an empty list means no pools.
 These are concurrency seats, without quota, credit or model-readiness claims.
 Upgrade the Harness reader and contracts decoder to **0.32.0 before deploying this

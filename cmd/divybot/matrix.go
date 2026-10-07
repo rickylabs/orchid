@@ -865,7 +865,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	agent := route.Transport
 	if o.Harness != "" && o.Harness != agent {
-		if o.Harness == "codex-run" && agent == "codex" || o.Harness == "opencode-run" && agent == "opencode" {
+		if req.owner && (o.Harness == "codex-run" && agent == "codex" || o.Harness == "opencode-run" && agent == "opencode") {
 			agent = o.Harness
 		} else {
 			return refuse("harness-conflict")
@@ -1138,24 +1138,6 @@ func (c *Coord) quotaAvailability(req *matrixRequest, budget map[string]int, now
 	}
 	c.gov.mu.Unlock()
 	return quotaConditions
-}
-
-// ownerQuotaReason refuses only on a native meter reading that shows a published
-// window at its vendor limit and not yet reset (served as the existing "over
-// ceiling" condition). Absent, unread or stale meters never refuse the owner.
-func ownerQuotaReason(q quota, now time.Time) string {
-	if !q.ok {
-		return ""
-	}
-	for _, w := range []struct {
-		limit  RateLimit
-		reason string
-	}{{q.five, availabilityFiveHourCeiling}, {q.seven, availabilityWeeklyCeiling}} {
-		if w.limit.ResetsAt > now.Unix() && w.limit.UsedPct >= 100 { // guard:owner-vendor-limit
-			return w.reason
-		}
-	}
-	return ""
 }
 
 func transportQuotaCondition(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
