@@ -19,6 +19,9 @@ import (
 )
 
 const providerLimitMaxRows = 1024
+
+// Each scope reserves one blocking/success row and one informational rate row.
+const providerLimitMaxScopes = providerLimitMaxRows / 2
 const providerLimitMaxBytes = 4 * 1024 * 1024
 const providerLimitWarningPercent = 90
 const providerLimitKeyEndpoint = "https://openrouter.ai/api/v1/key"
@@ -414,9 +417,20 @@ func (c *Coord) loadLimitsLocked(now time.Time) error {
 		return errMatrix
 	}
 	if e == nil {
-		if strictJSON(raw, &r.ledger) != nil || r.ledger.SchemaVersion != 1 || r.ledger.Entries == nil || r.ledger.Retired == nil || r.ledger.Meters == nil || len(r.ledger.Meters) > providerLimitMaxRows || r.ledger.Reserved == nil || len(r.ledger.Reserved) > providerLimitMaxRows || len(r.ledger.Entries) > providerLimitMaxRows || len(r.ledger.Retired) > providerLimitMaxRows*4 {
+		if strictJSON(raw, &r.ledger) != nil || r.ledger.SchemaVersion != 1 || r.ledger.Entries == nil || r.ledger.Retired == nil || r.ledger.Meters == nil || len(r.ledger.Meters) > providerLimitMaxRows || r.ledger.Reserved == nil || len(r.ledger.Reserved) > providerLimitMaxScopes || len(r.ledger.Entries) > providerLimitMaxRows || len(r.ledger.Retired) > providerLimitMaxRows*4 {
 			r.failure = true
 			return errMatrix
+		}
+		for key, entry := range r.ledger.Entries {
+			if limitRateObservation(entry.Outcome) && key == limitScope(entry.Outcome) {
+				newKey := limitEntryKey(entry.Outcome)
+				if _, duplicate := r.ledger.Entries[newKey]; duplicate {
+					r.failure = true
+					return errMatrix
+				}
+				r.ledger.Entries[newKey] = entry
+				delete(r.ledger.Entries, key)
+			}
 		}
 		for identity, meter := range r.ledger.Meters {
 			if identity != limitMeterIdentity(meter) || !validLimitMeterIdentity(meter) || len(meter.LaunchModels) != 0 || meter.State != "unknown" {
@@ -431,7 +445,7 @@ func (c *Coord) loadLimitsLocked(now time.Time) error {
 			}
 		}
 		for scope, v := range allLimitEntries(r.ledger) {
-			if scope != limitScope(v.Outcome) || !validLimitOutcome(v.Outcome, now) || v.Sequence == 0 || v.Sequence > r.ledger.Sequence || v.Clock == "" || len(v.Clock) > 256 || v.Event == "" || len(v.Event) > 1024 || v.Outcome.ObservedAt != v.NativeAt || !validLimitPrivateTime(v.NativeAt, now) || !validLimitPrivateTime(v.SeenThrough, now) || v.SeenThrough < v.NativeAt {
+			if scope != limitEntryKey(v.Outcome) || !validLimitOutcome(v.Outcome, now) || v.Sequence == 0 || v.Sequence > r.ledger.Sequence || v.Clock == "" || len(v.Clock) > 256 || v.Event == "" || len(v.Event) > 1024 || v.Outcome.ObservedAt != v.NativeAt || !validLimitPrivateTime(v.NativeAt, now) || !validLimitPrivateTime(v.SeenThrough, now) || v.SeenThrough < v.NativeAt {
 				r.failure = true
 				return errMatrix
 			}
@@ -446,8 +460,8 @@ func (c *Coord) loadLimitsLocked(now time.Time) error {
 		}
 		reserved[k] = true
 	}
-	for k := range r.ledger.Entries {
-		reserved[k] = true
+	for _, v := range r.ledger.Entries {
+		reserved[limitScope(v.Outcome)] = true
 	}
 	for scope := range configuredLimitScopes(cfg) {
 		if _, retired := r.ledger.Retired[scope]; retired && !r.compacting {
@@ -456,7 +470,7 @@ func (c *Coord) loadLimitsLocked(now time.Time) error {
 		}
 		reserved[scope] = true
 	}
-	if !r.compacting && len(reserved) > providerLimitMaxRows {
+	if !r.compacting && len(reserved) > providerLimitMaxScopes {
 		r.failure = true
 		return errMatrix
 	}
@@ -504,11 +518,12 @@ func (c *Coord) recordLimitOutcome(o providerLimitOutcome, clock, event string, 
 		return errMatrix
 	}
 	scope := limitScope(o)
+	entryKey := limitEntryKey(o)
 	if _, retired := r.ledger.Retired[scope]; retired {
 		return errMatrix
 	}
 	if !r.ledger.Reserved[scope] {
-		if len(r.ledger.Reserved) >= providerLimitMaxRows {
+		if len(r.ledger.Reserved) >= providerLimitMaxScopes {
 			r.failure = true
 			return errMatrix
 		}
@@ -516,7 +531,7 @@ func (c *Coord) recordLimitOutcome(o providerLimitOutcome, clock, event string, 
 	}
 
 	nativeAt := o.ObservedAt
-	before, seen := r.ledger.Entries[scope]
+	before, seen := r.ledger.Entries[entryKey]
 	if seen && before.Event == event {
 		return nil
 	}
@@ -534,6 +549,9 @@ func (c *Coord) recordLimitOutcome(o providerLimitOutcome, clock, event string, 
 		}
 	}
 	if seen && o.ObservedAt < before.Outcome.ObservedAt {
+		if limitRateObservation(o) {
+			return nil // Older informational observations cannot fence admission.
+		}
 		r.failure = true
 		return errMatrix
 	}
@@ -543,7 +561,7 @@ func (c *Coord) recordLimitOutcome(o providerLimitOutcome, clock, event string, 
 	if o.Outcome == "succeeded" {
 		for _, e := range r.ledger.Entries {
 			p := e.Outcome
-			if p.Outcome == "refused" && p.Provider == o.Provider && sameLimitString(p.KeyName, o.KeyName) && sameLimitString(p.AccountRef, o.AccountRef) && (p.Model == nil || sameLimitString(p.Model, o.Model)) && (e.Clock != clock || nativeAt <= e.SeenThrough || o.ObservedAt <= p.ObservedAt) {
+			if p.Outcome == "refused" && !limitRateObservation(p) && p.Provider == o.Provider && sameLimitString(p.KeyName, o.KeyName) && sameLimitString(p.AccountRef, o.AccountRef) && (p.Model == nil || sameLimitString(p.Model, o.Model)) && (e.Clock != clock || nativeAt <= e.SeenThrough || o.ObservedAt <= p.ObservedAt) {
 				return nil
 			}
 		}
@@ -561,7 +579,7 @@ func (c *Coord) recordLimitOutcome(o providerLimitOutcome, clock, event string, 
 		return errMatrix
 	}
 	r.ledger.Sequence++
-	r.ledger.Entries[scope] = providerLimitEntry{Outcome: o, Clock: clock, Event: event, Sequence: r.ledger.Sequence, NativeAt: nativeAt, SeenThrough: through}
+	r.ledger.Entries[entryKey] = providerLimitEntry{Outcome: o, Clock: clock, Event: event, Sequence: r.ledger.Sequence, NativeAt: nativeAt, SeenThrough: through}
 	if writeLimitLedger(limitLedgerPath(c.cfg.ProviderLimits), ".provider-limits-ledger-", nil, r.ledger) != nil {
 		r.failure = true
 		return errMatrix
@@ -619,7 +637,7 @@ func (c *Coord) providerLimitLaunchReason(agent string, o Overrides, now time.Ti
 			return "receipt-persistence-failed"
 		}
 		if !r.ledger.Reserved[scope] {
-			if len(r.ledger.Reserved) >= providerLimitMaxRows {
+			if len(r.ledger.Reserved) >= providerLimitMaxScopes {
 				return "receipt-persistence-failed"
 			}
 			r.ledger.Reserved[scope] = true
@@ -630,6 +648,9 @@ func (c *Coord) providerLimitLaunchReason(agent string, o Overrides, now time.Ti
 		}
 	}
 	for _, f := range activeLimitRefusals(r.ledger.Entries) {
+		if limitRateObservation(f) {
+			continue // Owner549: rate observations remain visible but never veto admission.
+		}
 		if f.Provider != provider || f.Model != nil && *f.Model != model {
 			continue
 		}
@@ -705,7 +726,7 @@ func (c *Coord) writeLimitSnapshotLocked(meters []providerLimitMeter, now time.T
 	for _, v := range r.ledger.Entries {
 		snapshot.Outcomes = append(snapshot.Outcomes, v.Outcome)
 	}
-	sort.Slice(snapshot.Outcomes, func(i, j int) bool { return limitScope(snapshot.Outcomes[i]) < limitScope(snapshot.Outcomes[j]) })
+	sort.Slice(snapshot.Outcomes, func(i, j int) bool { return limitEntryKey(snapshot.Outcomes[i]) < limitEntryKey(snapshot.Outcomes[j]) })
 	if !limitSnapshotTimes(snapshot, now) || !limitPublic(snapshot) || len(snapshot.Meters) > providerLimitMaxRows || !privateReceiptRoot(filepath.Dir(cfg.SnapshotFile)) {
 		return errMatrix
 	}
@@ -744,7 +765,9 @@ func compactProviderLimitLedger(cfg *ProviderLimitsConfig, now time.Time) error 
 		delete(r.ledger.Reserved, scope)
 	}
 	for scope := range r.ledger.Reserved {
-		if _, exists := r.ledger.Entries[scope]; !exists && !configuredLimitScopes(cfg)[scope] {
+		_, hardExists := r.ledger.Entries[scope]
+		_, rateExists := r.ledger.Entries[scope+"/rate_limited"]
+		if !hardExists && !rateExists && !configuredLimitScopes(cfg)[scope] {
 			delete(r.ledger.Reserved, scope)
 		}
 	}
@@ -991,4 +1014,16 @@ func unboundLimitMeter(m providerLimitMeter) providerLimitMeter {
 }
 func validLimitMeterIdentity(m providerLimitMeter) bool {
 	return limitPublic(m) && containsString([]string{"5h", "weekly", "daily", "monthly", "total", "unknown"}, m.Window) && m.Model == nil && (m.AccountRef == nil || limitAccountPattern.MatchString(*m.AccountRef)) && (m.LimitID == nil || *m.LimitID == "native") && (m.Scope == "subscription" && containsString(limitProviders, m.Provider) && m.KeyName == nil || m.Scope == "key" && m.Provider == "openrouter" && m.KeyName != nil && limitAliasPattern.MatchString(*m.KeyName))
+}
+
+// Rate observations cannot overwrite a hard refusal or manufacture a successful inference.
+func limitRateObservation(o providerLimitOutcome) bool {
+	return o.Outcome == "refused" && o.Reason != nil && *o.Reason == "rate_limited"
+}
+func limitEntryKey(o providerLimitOutcome) string {
+	scope := limitScope(o)
+	if limitRateObservation(o) {
+		return scope + "/rate_limited"
+	}
+	return scope
 }

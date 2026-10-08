@@ -1,27 +1,43 @@
-# Supervisor source sign-off — Orchid producer/governor dependency for Harness644 (2026-10-08)
+# Supervisor source sign-off — Orchid producer/governor dependency for Harness644, final Owner549 source (2026-10-08)
 
-Verdict: PASS. Independent different-family Meta MuseSpark1.3/xhigh implementation review PASS (attempt2; attempt1 output-exhausted, UNPROVEN). This sign-off is a separate substantive read of cmd/divybot/provider_limits.go, provider_limits_test.go and the diffs of main.go, opencode_transport.go, matrix.go, matrix_config.go, matrix_diagnostics.go, provider_budget.go, transport_availability.go and the updated tests. All 21 product paths in reviewed-product-source.json matched current SHA256 before commit, `git diff --check` clean, run records privacy-screened (no credentials, native session IDs, private operational paths or real addresses; fixtures and source hashes only).
+Verdict: PASS. Supersedes the earlier sign-off recorded at commit 497fa8d. The Owner549 delta (rate_limited/429 informational) was reviewed substantively by this supervisor as a separate read of cmd/divybot/provider_limits.go, provider_limits_test.go and docs/provider-limits.md against 497fa8d; all other product paths are byte-identical to the earlier reviewed set. The same independent Meta MuseSpark1.3/xhigh conversation returned PASS on call3 for these frozen bytes (call1 output-exhausted UNPROVEN, call2 certified prior bytes only, no terminal failures). No product edit followed call3.
 
-## Reviewed invariants
+Verified before commit: all 21 product paths in reviewed-product-source.json and verification-source.json match current SHA256; the final producer, source-trigger and endpoint mutation runners report exact restoration with hashes equal to the shipping bytes; `git diff --check` clean; run records screened for credentials, native session IDs, private operational paths and real addresses (fixtures and source hashes only).
 
-- Native timestamp preservation: parseHostQuota accepts only mtime > 0 and not in the future, pointer percentages that are finite and at most 100, resets_at > 0 and exact 300/10080 minute windows; a missing window is unknown, never zero. sampleQuota stores the reading at the source file mtime with its private source host; governorSample persists Ts from that instant; nativeLimitMeters publishes observedAt from it. Repeated publication keeps the same observedAt while generatedAt advances.
-- Outcome timestamps: refusals carry the native message Completed time (a refusal with no Completed time is a generic provider error and is not recorded); successes carry the completed assistant message time. Ledger entries store NativeAt equal to the public observedAt and load validation rejects any entry where they differ. Receipt time is never written into an outcome.
-- Ordering and replay: identical event ids are idempotent; same-clock events below the per-scope highwater are ignored; equal native instants keep the refusal; a success from a different clock never clears; a success clears a matching refusal (same provider/key/account, model-exact or provider-wide) only when strictly later on the same clock; a delayed older refusal behind a same-clock later success is ignored; a replayed earlier refusal cannot resurrect after a success; an older observation on another clock refuses storage and fences dispatch rather than minting time.
-- One-account selected-host isolation: at most one attested account per provider; the configured source_host is the only host polled for that provider (one script read proven) and a reading from any other host is discarded to unknown rather than blended. Account identity is an explicit operator attestation, never derived from a credential.
-- Exact bindings and advisory meters: routeOutcome proves a scope only through an exact launch_models binding (openrouter) or the attested account; an unbound openrouter route is unproven and neither records nor blocks. providerLimitLaunchReason blocks only an active refusal whose provider, model (exact or provider-wide), key and account all match the current binding; a rebound account keeps the old refusal in history without inheriting it. Gov.decide always returns the physical MaxActive; 90/100 percent readings become warnings only; transportAvailabilityReason keeps only the physical capacity veto; providerBudgetLaunchReason is inert; legacy budget rows are no longer published as availability. spawn and matrixAttempt consult the refusal ledger before budget code and including owner exact picks.
-- Native proof before and after occupant fences: inspectOpenCodeExport retains prompt-digest, route, session, parent and clock checks; Completed is refused if earlier than the last part or in the future; a compact-mode error is bad evidence; only typed UsageLimitError, APIError 402/429, GoUsageLimitError body or the usage-limit message become a typed refusal with optional retry-after reset; only a completed nonempty final stop yields a success event. observeOpenCodeSessionLimits re-reads the pane occupant after the export and discards all evidence if the occupant or StateChangeSeq changed. The compatibility observer never mutates the durable binding (success fields are json:"-"). recordOpenCodeLimit requires a proven route and, for success, equal route and session id.
-- Durable refusals, tombstones and compaction: private 0700 same-UID root, exclusive flock lease on a 0600 lock file, ledger read through the no-follow same-file reader, atomic replacement through writePrivateJSON, a separate ledger that survives snapshot deletion and restart. Any ledger or reservation write failure, unsafe ledger mode, overlap of entries and retired scopes, or configured scope found in the retired archive fences dispatch with receipt-persistence-failed. Capacity is reserved (1024 scopes) before dispatch, including owner picks; a full ledger refuses new scopes and never evicts a refusal. Offline compaction refuses a live lease, archives only inactive model-scoped successes that are not configured and are not the tombstone clearing a retained refusal, and retired scopes are permanent replay fences.
-- Explicit binding retirement: a bounded private identity registry republishes every previously seen meter identity as an unknown row with empty launchModels so a retaining consumer drops the obsolete route binding, while the old account's scoped refusal stays in outcomes and the new account does not inherit it; proven across producer restart and by the paired Cockpit fixture integration.
-- Privacy: fixed HTTPS own-key endpoint with redirects disabled, 15 s per request, 64 KiB body cap, 30 s collection budget; only limit/limit_remaining/usage/limit_reset are read; label and account credit are ignored; non-200 is unknown. Public snapshot and diagnostics carry the key alias only; credential, environment name, host, session, event and clock stay out of the wire and are scanned on every write. Duplicate credentials across aliases reject initialization transiently without retaining any representation.
+## Owner549 delta invariants reviewed
 
-## Observations (non-blocking)
+- Rate observations use a separate private entry key (scope plus rate suffix); hard refusals and successes share the scope key. Reservation, retirement and capacity stay keyed by scope, so one scope holds at most two rows.
+- A later 429 reads and writes only its own key; the older-than-existing check returns without fencing for rate; the success-clearance loop excludes rate rows. A later 429 can neither erase nor shadow quota_exhausted/payment_required, and a stale rate row cannot block a success record. Admission skips rate rows outright.
+- Verified-success clearance is unchanged for hard refusals: strictly later, same clock, matching provider/key/account and exact or provider-wide model.
+- Legacy rate rows keyed by bare scope migrate to the suffixed key before validation and fail closed on duplicate.
+- Compaction archives only inactive model-scoped successes, so rate rows are never retired; rate keys never collide with retired scope keys; the reservation sweep keeps a scope while either row exists.
+- Reserved scopes are bounded at 512 on load, record and launch reservation; every entry's scope is reserved, so entries are at most 1024, the unchanged public row bound accepted by the Harness decoder without outcome dedupe.
+- Same-clock highwater, equal-instant refusal dominance and cross-clock non-clearance are untouched. An older rate observation from any clock is dropped silently and never sets the persistence failure; an older hard refusal on a foreign clock still fences.
+- Native observedAt and retry-after reset are stored verbatim for rate rows and asserted after publication. No wire field, diagnostic, credential, host or activation path was added.
 
-- A refusal observed on a different dispatch clock with an older native instant than the retained entry sets the in-memory persistence failure, which fences all dispatch until restart. This is the documented clock-rollback refusal (drift D3/D6) and is fail-closed; it is a liveness trade-off, not an unsafe launch.
-- OpenRouter collection runs under the limits mutex, so launch admission can wait up to the 30 s collection budget during a sample tick. Liveness only.
-- Provider-wide (model-less) refusals have no automatic producer path in this slice; native OpenCode evidence is always route-scoped. The global scope is reserved and honoured when present.
+## Earlier reviewed invariants, unchanged bytes
 
-## Gate limitations preserved
+Native mtime and message-time preservation with ledger NativeAt equality; one attested account per provider polled only on its source host; exact-binding refusal matching with advisory meters and physical-only concurrency; occupant recheck after export with typed native refusal/success evidence; lease-protected 0600 no-follow ledger with reserved capacity, refusal-preserving compaction and permanent retired fences; explicit unbound identity rows for binding retirement; fixed own-key endpoint with alias-only publication.
 
-- Final exact-source `go test -race ./...` (452.298 s), `go vet`, `go build ./cmd/divybot` exit 0; 41 source-trigger, 7 non-root endpoint and 7 producer mutants compiled assertion-red with exact restoration (validation.md).
-- Configured two-UID kernel gate exit 127 and root owner-endpoint mutants exit 1 are UNPROVEN because sudo is absent on this host; they are not green and the non-root subset does not prove two-UID behavior.
-- Live configuration, process restart, secret-store, package publication, real-provider inference, mobile645 and the canonical parent report are out of scope and unproven.
+## Final gates on these exact bytes (private receipts under the project run directory)
+
+| Gate | Exit |
+| --- | --- |
+| go test -race ./... (561.451 s) | 0 |
+| go vet ./... | 0 |
+| go build ./cmd/divybot | 0 |
+| Source-trigger mutations, 41 compiled assertion-red, restored | 0 |
+| Endpoint non-root mutations, 7 compiled assertion-red, restored | 0 |
+| Producer mutations, 10 compiled assertion-red, restored | 0 |
+| Final affected producer tests | 0 |
+| Configured privileged two-UID kernel | 127, UNPROVEN, sudo absent |
+| Configured privileged root endpoint mutations | 1, UNPROVEN, sudo absent |
+
+Independent paired proof: four actual-producer snapshots (rate-only and hard-plus-later-429 for quota_exhausted and payment_required) against the separately owned renewed Cockpit550 checkout fd059e62944e9cf7d890df3bc87d270337b3ca59 exit 0. Hard refusal stays blocking through every picker configuration and admission despite a later 429; rate-only and verified-success histories launch. Fixture only; no foreign source was changed.
+
+## Limitations preserved
+
+- Root two-UID gates are UNPROVEN and are not called green; non-root subsets do not prove two-UID behavior.
+- Live configuration, process restart, secret stores, package publication, real-provider inference, mobile645 and the canonical parent report are out of scope and unproven.
+- Automatic native outcomes exist only for the bound OpenCode route adapter; unsupported adapters stay unknown. Automatic provider-wide native emission is unproven; provider-wide blocking is fixture-proven.
+- Non-blocking debt: a success whose only matching refusal is a rate row is retained by the clearing-tombstone check; rate rows persist bounded by scope count; collection holds the limits mutex up to 30 s; a foreign-clock older hard refusal fences until restart.

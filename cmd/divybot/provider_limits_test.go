@@ -129,7 +129,7 @@ func TestProviderLimitsExactBindingRebindAndStorageFences(t *testing.T) {
 	a := "aref:v1:codex:" + strings.Repeat("a", 43)
 	b := "aref:v1:codex:" + strings.Repeat("b", 43)
 	cfg.Accounts = []providerLimitAccount{{"codex", a, "fixture-host", []string{"codex/fixture"}}}
-	o := limitOutcome("codex", "fixture", "refused", "rate_limited", at)
+	o := limitOutcome("codex", "fixture", "refused", "quota_exhausted", at)
 	o.AccountRef = &a
 	if c.recordLimitOutcome(o, "clock", "refusal", at) != nil {
 		t.Fatal("account refusal")
@@ -388,12 +388,15 @@ func TestProviderLimitsCapacityNeverEvictsRefusals(t *testing.T) {
 	if c.publishProviderLimits(context.Background(), nil, at) != nil {
 		t.Fatal("initialize")
 	}
-	for i := 0; len(c.limits.ledger.Reserved) < providerLimitMaxRows; i++ {
+	for i := 0; len(c.limits.ledger.Reserved) < providerLimitMaxScopes; i++ {
 		o := limitOutcome("opencode-go", fmt.Sprintf("fixture-%d", i), "refused", "quota_exhausted", at)
 		c.limits.ledger.Sequence++
 		scope := limitScope(o)
 		c.limits.ledger.Reserved[scope] = true
 		c.limits.ledger.Entries[scope] = providerLimitEntry{o, "clock", fmt.Sprintf("event-%d", i), c.limits.ledger.Sequence, o.ObservedAt, o.ObservedAt}
+	}
+	if len(c.limits.ledger.Reserved)*2 > providerLimitMaxRows {
+		t.Fatal("reserved scopes exceed capacity for both rate and blocking evidence")
 	}
 	if writeLimitLedger(limitLedgerPath(c.cfg.ProviderLimits), ".fixture-", nil, c.limits.ledger) != nil {
 		t.Fatal("fixture bounded ledger")
@@ -403,7 +406,7 @@ func TestProviderLimitsCapacityNeverEvictsRefusals(t *testing.T) {
 		t.Fatal("capacity overflow admitted unrecordable work")
 	}
 	after, _ := readLimitPrivate(limitLedgerPath(c.cfg.ProviderLimits))
-	if !bytes.Equal(before, after) || len(activeLimitRefusals(c.limits.ledger.Entries)) != providerLimitMaxRows-6 {
+	if !bytes.Equal(before, after) || len(activeLimitRefusals(c.limits.ledger.Entries)) != providerLimitMaxScopes-6 {
 		t.Fatal("capacity evicted refusal")
 	}
 	c.closeProviderLimits()
@@ -531,5 +534,76 @@ func TestProviderLimitsBindingRemovalSurvivesRestart(t *testing.T) {
 		if os.WriteFile(target+"-before.json", before, 0600) != nil || os.WriteFile(target+"-after.json", after, 0600) != nil {
 			t.Fatal("binding proof")
 		}
+	}
+}
+
+func TestProviderLimitsRateObservationNeverBlocksOrClearsHardRefusal(t *testing.T) {
+	for _, reason := range []string{"quota_exhausted", "payment_required"} {
+		t.Run(reason, func(t *testing.T) {
+			c, at := limitFixture(t)
+			rate := limitOutcome("opencode-go", "fixture", "refused", "rate_limited", at)
+			rate.ResetsAt = limitString(limitInstant(at.Add(time.Hour)))
+			if err := c.recordLimitOutcome(rate, "clock", "rate-only", at); err != nil {
+				t.Fatal(err)
+			}
+			if got := c.providerLimitLaunchReason("opencode", Overrides{Model: "opencode-go/fixture"}, at); got != "" {
+				t.Fatalf("rate observation blocked: %s", got)
+			}
+			hard := limitOutcome("opencode-go", "fixture", "refused", reason, at.Add(time.Second))
+			if err := c.recordLimitOutcome(hard, "clock", "hard", at.Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			rate.ObservedAt = limitInstant(at.Add(2 * time.Second))
+			if err := c.recordLimitOutcome(rate, "clock", "later-rate", at.Add(2*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if got := c.providerLimitLaunchReason("opencode", Overrides{Model: "opencode-go/fixture"}, at.Add(2*time.Second)); got != "quota-unavailable" {
+				t.Fatalf("later 429 erased %s refusal: %s", reason, got)
+			}
+			if err := c.publishProviderLimits(context.Background(), nil, at.Add(3*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := readLimitPrivate(c.cfg.ProviderLimits.SnapshotFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot providerLimitSnapshot
+			if strictJSON(raw, &snapshot) != nil || len(snapshot.Outcomes) != 2 {
+				t.Fatal("hard/rate evidence was discarded")
+			}
+			for _, o := range snapshot.Outcomes {
+				if limitRateObservation(o) && (o.ObservedAt != rate.ObservedAt || !sameLimitString(o.ResetsAt, rate.ResetsAt)) {
+					t.Fatal("rate native time/reset lost")
+				}
+			}
+			c.closeProviderLimits()
+			restart := &Coord{cfg: c.cfg}
+			t.Cleanup(restart.closeProviderLimits)
+			if got := restart.providerLimitLaunchReason("opencode", Overrides{Model: "opencode-go/fixture"}, at.Add(4*time.Second)); got != "quota-unavailable" {
+				t.Fatalf("restart erased hard refusal: %s", got)
+			}
+			success := limitOutcome("opencode-go", "fixture", "succeeded", "", at.Add(5*time.Second))
+			if err := restart.recordLimitOutcome(success, "clock", "success", at.Add(5*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if got := restart.providerLimitLaunchReason("opencode", Overrides{Model: "opencode-go/fixture"}, at.Add(5*time.Second)); got != "" {
+				t.Fatalf("verified success did not clear: %s", got)
+			}
+			// A new rate observation remains informational after clearance and restart.
+			rate.ObservedAt = limitInstant(at.Add(6 * time.Second))
+			if err := restart.recordLimitOutcome(rate, "clock", "fresh-rate", at.Add(6*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if got := restart.providerLimitLaunchReason("opencode", Overrides{Model: "opencode-go/fixture"}, at.Add(6*time.Second)); got != "" {
+				t.Fatalf("new rate observation blocked: %s", got)
+			}
+			rate.ObservedAt = limitInstant(at.Add(4 * time.Second))
+			if err := restart.recordLimitOutcome(rate, "foreign-clock", "older-rate", at.Add(7*time.Second)); err != nil {
+				t.Fatal("older informational observation fenced dispatch")
+			}
+			if got := restart.providerLimitLaunchReason("opencode", Overrides{Model: "opencode-go/fixture"}, at.Add(7*time.Second)); got != "" {
+				t.Fatal("older 429 fenced admission")
+			}
+		})
 	}
 }

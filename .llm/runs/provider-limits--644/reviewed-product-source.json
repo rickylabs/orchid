@@ -9,8 +9,8 @@
   "cmd/divybot/opencode_transport.go": "34df81f1383fd8fa78e9bcbda874b243ac9cef39a2264a6a45db0050d2b42ba5",
   "cmd/divybot/provider_budget.go": "de021b0b639db41cf1640c04e3a92257c8dcab4b55716c2acd4204b03b87a78e",
   "cmd/divybot/provider_budget_test.go": "b3f2892b010e7d38e038f2e266f2ed93525033804ca93178743a7f93963cad35",
-  "cmd/divybot/provider_limits.go": "59cb304e09727e86c8f37ea4be4dc70e65da2ad8eaf315fcce5aa24fc7a626f1",
-  "cmd/divybot/provider_limits_test.go": "4b1539e7b89f33187e2bda2f0c436df29eb1432b7012af219dbb4678bfa079df",
+  "cmd/divybot/provider_limits.go": "ba043454f8e878654ca62422ea4b923ba5d11861a2a274db47a5cc3b8df155f6",
+  "cmd/divybot/provider_limits_test.go": "f3c1a035cd089d23ceecb82c6a1df14225193ff1210d8d70796379ffe38c6b43",
   "cmd/divybot/quota_gate_test.go": "4f09407d21046c4cefd3766b0de85f6c3a2f8328ca2c6a16c4ef94f16fdb34d7",
   "cmd/divybot/quota_pin_refusal_test.go": "cceafe43a58d7c0ee9f4665664e21620d2025895ee5f6d00c15b4e3a2b0e13d5",
   "cmd/divybot/rc_resume_quota_test.go": "22f5b088f8f990f99b7a75d86cf62b9c62249e90e7f9e9a32ab434f2c83f425c",
@@ -18,6 +18,6 @@
   "cmd/divybot/transport_availability_test.go": "fa320291240a3bff5d39f41644331f76b754d2e6096ca43a057f9a4e38676381",
   "cmd/divybot/unmetered_transport_test.go": "18d0b11225aded1b540f5c9b368073492b3e4ee2e504eff8213e117b19ba8910",
   "docs/provider-budgets.md": "90a186c214064a55e60ae9ca5283b8b05f8c524b349bb0ea471d2075aab2c0db",
-  "docs/provider-limits.md": "2eb2ee0b9da165b1bb88942e61061ed9ee575a353770d5a9cff3fe0b72306911",
+  "docs/provider-limits.md": "2bc506946c10bb975d60c9b7edc0a21e40c02293d974b73d63e37391711082c9",
   "docs/throttling.md": "af40c0230b2d310a4e1f9eca85a727120248b2b5adb14bb9a3d567233e8f4abb"
 }
