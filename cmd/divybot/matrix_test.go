@@ -251,7 +251,7 @@ func TestCommonMatrixAttempt(t *testing.T) {
 			if name == "qualified-host" && (len(refusals) != 1 || refusals[0].ReasonCode != "host-unavailable" || containsString(events, "persist")) {
 				t.Fatal("address-shaped placement reached durable evidence")
 			}
-			success := name == "success" || name == "dry-run" || name == "valid-native-budget" || name == "absent-native-budget" || name == "route-default-budget" || name == "override-route-budget" || name == "zero-override-budget"
+			success := name == "no-quota" || name == "stale-quota" || name == "expired-bucket" || name == "success" || name == "dry-run" || name == "valid-native-budget" || name == "absent-native-budget" || name == "route-default-budget" || name == "override-route-budget" || name == "zero-override-budget"
 			if strings.HasPrefix(name, "evaluator-") {
 				if !reflect.DeepEqual(refusals, []matrixRefusal{evaluatorRefusal()}) {
 					t.Fatal("evaluator refusal became a silent skip")

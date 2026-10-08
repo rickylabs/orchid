@@ -56,6 +56,7 @@ type Config struct {
 	Targets                 []Target                 `json:"targets"`
 	Governor                Gov                      `json:"governor"`
 	OpenCode                OpenCodeConfig           `json:"opencode,omitempty"`
+	ProviderLimits          *ProviderLimitsConfig    `json:"provider_limits,omitempty"`
 	ProviderBudgets         *ProviderBudgetConfig    `json:"provider_budgets,omitempty"`
 	UnmeteredTransports     UnmeteredTransportLimits `json:"unmetered_transports,omitempty"`
 	Memory                  Mem                      `json:"memory"`
@@ -158,17 +159,14 @@ type Target struct {
 	MirrorAssignments bool `json:"mirror_assignments"`
 }
 
-// Gov holds the quota-pacing knobs (the governor — paces against the Max
-// subscription / codex plan so the swarm spends the budget evenly instead of
-// blowing the window early). It reads each account's REAL rate-limit meter
-// (claude's statusline rate_limits / codex's rollout token_count) and runs a
-// burn-rate adaptive cap PER ACCOUNT, so claude and codex pace independently.
+// Gov retains native sampling and physical concurrency settings. Percentages,
+// ceilings and legacy burn controls are advisory, never admission authority.
 type Gov struct {
 	Enabled       bool    `json:"enabled"`
-	WeeklyCeiling float64 `json:"weekly_ceiling_pct"` // hard-pause new work at/above this used% (default 92)
-	Slack         float64 `json:"slack_pct"`          // floor the cap to MinActive within this of the ceiling (default 8)
-	MaxActive     int     `json:"max_active"`         // ceiling for the adaptive per-account cap (default 16)
-	MinActive     int     `json:"min_active"`         // never fully stall while under budget (default 1)
+	WeeklyCeiling float64 `json:"weekly_ceiling_pct"` // legacy advisory setting; warning threshold is90
+	Slack         float64 `json:"slack_pct"`          // legacy estimator setting, no admission effect
+	MaxActive     int     `json:"max_active"`         // physical per-account concurrency ceiling (default16)
+	MinActive     int     `json:"min_active"`         // legacy estimator setting, no admission effect
 	// Burn-rate estimator windows + sampling cadence (mirrors the old orchid
 	// governor). RateWindow is the weekly-bucket burn lookback, FiveRateWindow
 	// the 5h-bucket lookback, SampleInterval how often the live meter is read.
@@ -269,6 +267,12 @@ func loadConfig(path string) (*Config, error) {
 		c.ProviderBudgets, err = decodeProviderBudgetConfig(block)
 		if err != nil {
 			return nil, fmt.Errorf("provider_budgets invalid")
+		}
+	}
+	if block, present := fields["provider_limits"]; present {
+		c.ProviderLimits, err = decodeProviderLimitsConfig(block)
+		if err != nil {
+			return nil, fmt.Errorf("provider_limits invalid")
 		}
 	}
 	c.withDefaults()
@@ -1807,10 +1811,11 @@ type RateLimit struct {
 
 // quota is one account's freshest live meter reading (both windows).
 type quota struct {
-	five  RateLimit
-	seven RateLimit
-	ok    bool
-	at    time.Time
+	sourceHost string // Private sampler identity; never emitted.
+	five       RateLimit
+	seven      RateLimit
+	ok         bool
+	at         time.Time
 }
 
 // QuotaSample is one persisted reading of both buckets at a wall instant — the
@@ -1917,6 +1922,9 @@ func parseHostQuota(account, out string) (five, seven RateLimit, mtime int64, ok
 		return
 	}
 	mtime, _ = strconv.ParseInt(out[:sp], 10, 64)
+	if mtime <= 0 || mtime > time.Now().Unix() {
+		return
+	}
 	line := strings.TrimSpace(out[sp+1:])
 	if account == "codex" {
 		var e struct {
@@ -1924,35 +1932,35 @@ func parseHostQuota(account, out string) (five, seven RateLimit, mtime int64, ok
 				Type       string `json:"type"`
 				RateLimits *struct {
 					Primary *struct {
-						UsedPercent   float64 `json:"used_percent"`
-						WindowMinutes int     `json:"window_minutes"`
-						ResetsAt      int64   `json:"resets_at"`
+						UsedPercent   *float64 `json:"used_percent"`
+						WindowMinutes int      `json:"window_minutes"`
+						ResetsAt      int64    `json:"resets_at"`
 					} `json:"primary"`
 					Secondary *struct {
-						UsedPercent   float64 `json:"used_percent"`
-						WindowMinutes int     `json:"window_minutes"`
-						ResetsAt      int64   `json:"resets_at"`
+						UsedPercent   *float64 `json:"used_percent"`
+						WindowMinutes int      `json:"window_minutes"`
+						ResetsAt      int64    `json:"resets_at"`
 					} `json:"secondary"`
 				} `json:"rate_limits"`
 			} `json:"payload"`
 		}
-		if json.Unmarshal([]byte(line), &e) != nil || e.Payload.RateLimits == nil {
+		if decodeNativeJSON([]byte(line), &e) != nil || e.Payload.RateLimits == nil {
 			return
 		}
 		rl := e.Payload.RateLimits
-		if w := rl.Primary; w != nil && w.ResetsAt != 0 {
-			r := RateLimit{UsedPct: w.UsedPercent, ResetsAt: w.ResetsAt}
-			if w.WindowMinutes <= 600 {
+		if w := rl.Primary; w != nil && w.UsedPercent != nil && finiteLimit(*w.UsedPercent) && *w.UsedPercent <= 100 && w.ResetsAt > 0 {
+			r := RateLimit{UsedPct: *w.UsedPercent, ResetsAt: w.ResetsAt}
+			if w.WindowMinutes == 300 {
 				five = r
-			} else {
+			} else if w.WindowMinutes == 10080 {
 				seven = r
 			}
 		}
-		if w := rl.Secondary; w != nil && w.ResetsAt != 0 {
-			r := RateLimit{UsedPct: w.UsedPercent, ResetsAt: w.ResetsAt}
-			if w.WindowMinutes <= 600 {
+		if w := rl.Secondary; w != nil && w.UsedPercent != nil && finiteLimit(*w.UsedPercent) && *w.UsedPercent <= 100 && w.ResetsAt > 0 {
+			r := RateLimit{UsedPct: *w.UsedPercent, ResetsAt: w.ResetsAt}
+			if w.WindowMinutes == 300 {
 				five = r
-			} else {
+			} else if w.WindowMinutes == 10080 {
 				seven = r
 			}
 		}
@@ -1960,20 +1968,24 @@ func parseHostQuota(account, out string) (five, seven RateLimit, mtime int64, ok
 		var e struct {
 			RateLimits struct {
 				FiveHour struct {
-					UsedPct  float64 `json:"used_percentage"`
-					ResetsAt int64   `json:"resets_at"`
+					UsedPct  *float64 `json:"used_percentage"`
+					ResetsAt int64    `json:"resets_at"`
 				} `json:"five_hour"`
 				SevenDay struct {
-					UsedPct  float64 `json:"used_percentage"`
-					ResetsAt int64   `json:"resets_at"`
+					UsedPct  *float64 `json:"used_percentage"`
+					ResetsAt int64    `json:"resets_at"`
 				} `json:"seven_day"`
 			} `json:"rate_limits"`
 		}
-		if json.Unmarshal([]byte(line), &e) != nil {
+		if decodeNativeJSON([]byte(line), &e) != nil {
 			return
 		}
-		five = RateLimit{UsedPct: e.RateLimits.FiveHour.UsedPct, ResetsAt: e.RateLimits.FiveHour.ResetsAt}
-		seven = RateLimit{UsedPct: e.RateLimits.SevenDay.UsedPct, ResetsAt: e.RateLimits.SevenDay.ResetsAt}
+		if w := e.RateLimits.FiveHour; w.UsedPct != nil && finiteLimit(*w.UsedPct) && *w.UsedPct <= 100 && w.ResetsAt > 0 {
+			five = RateLimit{UsedPct: *w.UsedPct, ResetsAt: w.ResetsAt}
+		}
+		if w := e.RateLimits.SevenDay; w.UsedPct != nil && finiteLimit(*w.UsedPct) && *w.UsedPct <= 100 && w.ResetsAt > 0 {
+			seven = RateLimit{UsedPct: *w.UsedPct, ResetsAt: w.ResetsAt}
+		}
 	}
 	if five.ResetsAt == 0 && seven.ResetsAt == 0 {
 		return // empty meter
@@ -1990,11 +2002,30 @@ func parseHostQuota(account, out string) (five, seven RateLimit, mtime int64, ok
 func (c *Coord) sampleQuota(ctx context.Context) map[string]quota {
 	out := map[string]quota{}
 	best := map[string]int64{} // account => freshest mtime seen
-	for _, acct := range c.cfg.accounts() {
+	samplingAccounts := c.cfg.accounts()
+	if c.cfg.ProviderLimits != nil {
+		for _, a := range c.cfg.ProviderLimits.Accounts {
+			if !containsString(samplingAccounts, a.Provider) {
+				samplingAccounts = append(samplingAccounts, a.Provider)
+			}
+		}
+	}
+	for _, acct := range samplingAccounts {
 		if acct != "claude" && acct != "codex" {
 			continue // AGY is explicitly unmetered; OpenCode uses provider seats.
 		}
 		for _, h := range c.cfg.Hosts {
+			selected := true
+			if c.cfg.ProviderLimits != nil {
+				for _, a := range c.cfg.ProviderLimits.Accounts {
+					if a.Provider == acct && a.SourceHost != h.SSH {
+						selected = false
+					}
+				}
+			}
+			if !selected {
+				continue
+			}
 			var script string
 			if acct == "codex" {
 				script = h.codexQuotaScript()
@@ -2013,7 +2044,7 @@ func (c *Coord) sampleQuota(ctx context.Context) map[string]quota {
 			}
 			if cur, seen := best[acct]; !seen || mtime >= cur {
 				best[acct] = mtime
-				out[acct] = quota{five: five, seven: seven, ok: true, at: time.Now()}
+				out[acct] = quota{five: five, seven: seven, ok: true, at: time.Unix(mtime, 0), sourceHost: h.SSH}
 			}
 		}
 	}
@@ -2135,93 +2166,27 @@ func controlBucketCap(burn, target float64, active, prevCap, minActive, maxActiv
 	return c
 }
 
-// decide runs the per-account burn-rate controller. It fails open (cap =
-// MaxActive) when the governor is off, the meter is unread, or both buckets are
-// thin-data — so a missing/early meter never starves an account. A hard gate
-// pauses (cap 0) at/above the ceiling as the binary safety floor.
+// decide retains configured physical concurrency; percentages and burn estimates are advisory.
 func (g Gov) decide(now time.Time, q quota, samples []QuotaSample, active, prevCap int) govDecision {
-	if !g.Enabled || !q.ok {
-		return govDecision{cap: g.MaxActive}
+	d := govDecision{cap: g.MaxActive, projectedEnd: q.seven.UsedPct}
+	if q.ok && q.seven.ResetsAt != 0 && q.seven.UsedPct >= providerLimitWarningPercent {
+		d.binding = "weekly"
+		d.overPace = true
 	}
-	// Hard safety floor: at/above the ceiling on either window, pause new work.
-	if q.seven.ResetsAt != 0 && q.seven.UsedPct >= g.WeeklyCeiling {
-		return govDecision{cap: 0, binding: "weekly", overPace: true, projectedEnd: q.seven.UsedPct}
-	}
-	if q.five.ResetsAt != 0 && q.five.UsedPct >= g.WeeklyCeiling {
-		return govDecision{cap: 0, binding: "5h", overPace: true, projectedEnd: q.seven.UsedPct}
-	}
-	if prevCap <= 0 || prevCap >= g.MaxActive {
-		prevCap = g.MaxActive // sane slew anchor on first tick / restart
-	}
-	min, max, ceil := g.MinActive, g.MaxActive, g.WeeklyCeiling
-
-	d := govDecision{cap: math.MaxInt, projectedEnd: q.seven.UsedPct}
-	consider := func(window string, rl RateLimit, w time.Duration, pct func(QuotaSample) float64, reset func(QuotaSample) int64) (burn, target float64, used bool) {
-		if rl.ResetsAt == 0 {
-			return
-		}
-		inBand := rl.UsedPct >= ceil-g.Slack // within slack of the ceiling
-		burn, ok := burnRatePerHour(samples, now, w, pct, reset, rl.ResetsAt)
-		// Act when we have a usable burn estimate OR we're already in the slack
-		// band (the static floor below protects a hot window immediately, before
-		// enough samples accumulate to estimate burn — e.g. right after start).
-		if !ok && !inBand {
-			return
-		}
-		cap := max
-		if ok {
-			target = targetRatePerHour(now, rl.ResetsAt, rl.UsedPct, ceil)
-			if !relaxBucket(rl.UsedPct) {
-				cap = controlBucketCap(burn, target, active, prevCap, min, max)
-			}
-		}
-		// Static slack-band floor (the old binary gate): inside the band, hold the
-		// cap at MinActive regardless of burn confidence.
-		if inBand && cap > min {
-			cap = min
-		}
-		if cap < d.cap {
-			d.cap, d.binding = cap, window
-		}
-		return burn, target, ok
-	}
-
-	if b, t, used := consider("weekly", q.seven, g.rateWindowDur(),
-		func(s QuotaSample) float64 { return s.SevenPct },
-		func(s QuotaSample) int64 { return s.SevenReset }); used {
-		d.burnWeekly, d.targetWeekly = b, t
-		rem := time.Unix(q.seven.ResetsAt, 0).Sub(now)
-		if rem < 0 {
-			rem = 0
-		}
-		d.projectedEnd = q.seven.UsedPct + b*govHours(rem)
-	}
-	if b, t, used := consider("5h", q.five, g.fiveRateWindowDur(),
-		func(s QuotaSample) float64 { return s.FivePct },
-		func(s QuotaSample) int64 { return s.FiveReset }); used {
-		d.burnFive, d.targetFive = b, t
-	}
-
-	if d.cap == math.MaxInt {
-		return govDecision{cap: g.MaxActive, projectedEnd: q.seven.UsedPct} // both buckets thin => fail open
-	}
-	switch d.binding {
-	case "weekly":
-		d.overPace = d.burnWeekly > d.targetWeekly
-	case "5h":
-		d.overPace = d.burnFive > d.targetFive
+	if q.ok && q.five.ResetsAt != 0 && q.five.UsedPct >= providerLimitWarningPercent {
+		d.binding = "5h"
+		d.overPace = true
 	}
 	return d
 }
 
-// relaxBucket: below the engage floor the proactive governor reads quantization
-// noise as burn, so leave the cap uncapped — the hard gate still backstops the
-// real ceiling and the fast 5h bucket engages on any genuine burst.
+// Legacy estimator utility, retained for historical diagnostics; never used for admission.
 func relaxBucket(used float64) bool { return used < govEngageFloorPct }
 
 // ============================ coordinator ============================
 
 type Coord struct {
+	limits      providerLimitRuntime
 	finalCalls  finalPublicationCalls
 	finalMu     sync.Mutex
 	ownerGrants *ownerNativeGrantStore
@@ -2306,7 +2271,7 @@ func (c *Coord) run(ctx context.Context) {
 	}
 	go c.authSyncLoop(ctx)
 	primed := false
-	if c.cfg.Governor.Enabled {
+	if c.cfg.Governor.Enabled || c.cfg.ProviderLimits != nil {
 		c.governorSample(ctx) // guard:quota-primed
 		primed = true
 	}
@@ -2418,7 +2383,7 @@ func (c *Coord) memoryLoop(ctx context.Context) {
 }
 
 func (c *Coord) governorLoop(ctx context.Context, primed bool) {
-	if !c.cfg.Governor.Enabled {
+	if !c.cfg.Governor.Enabled && c.cfg.ProviderLimits == nil {
 		return
 	}
 	t := time.NewTicker(c.cfg.Governor.sampleIntervalDur())
@@ -2441,6 +2406,9 @@ func (c *Coord) governorLoop(ctx context.Context, primed bool) {
 func (c *Coord) governorSample(ctx context.Context) {
 	qs := c.sampleQuota(ctx)
 	now := time.Now()
+	if c.publishProviderLimits(ctx, qs, now) != nil {
+		log.Printf("provider limits unavailable")
+	}
 	if len(qs) > 0 {
 		c.gov.mu.Lock()
 		c.gov.q = qs
@@ -2455,7 +2423,7 @@ func (c *Coord) governorSample(ctx context.Context) {
 				continue
 			}
 			ring := append(c.st.QuotaSamples[a], QuotaSample{
-				Account: a, Ts: now.Unix(),
+				Account: a, Ts: q.at.Unix(),
 				FivePct: q.five.UsedPct, FiveReset: q.five.ResetsAt,
 				SevenPct: q.seven.UsedPct, SevenReset: q.seven.ResetsAt,
 			})
@@ -3284,6 +3252,9 @@ func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, 
 func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
 	attempt := receipt.launchAttempt()
 	attempt.enter(stagePreparation)
+	if reason := c.providerLimitLaunchReason(agent, ovr, time.Now()); reason != "" {
+		return matrixReason(reason)
+	}
 	ownerChoice := receipt != nil && receipt.dispatch != nil && receipt.dispatch.MatrixSource == ownerNativeSource
 	if !ownerChoice {
 		if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
@@ -3550,6 +3521,9 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 			}
 			deliveryErr = host.injectGoal(gctx, target, inject, opencodeClass)
 		}
+		if agent == "opencode" {
+			c.recordOpenCodeLimit(j, deliveryErr, nil, time.Now())
+		}
 		if deliveryErr != nil {
 			attempt.contextEnded(gctx)
 			c.blockGoalDelivery(n, j)
@@ -3664,7 +3638,8 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 			if !known {
 				return // no route/output proof: never supervise a PR or close as complete
 			}
-			confirmed, completed, observationErr := host.observeOpenCode(ctx, j)
+			confirmed, completed, observationErr, success := host.observeOpenCodeLimits(ctx, j)
+			c.recordOpenCodeLimit(j, observationErr, success, time.Now())
 			deadlineExpired := !j.Deadline.IsZero() && !time.Now().Before(j.Deadline)
 			if observationErr == matrixReason("opencode-output-unconfirmed") && ref.Status != "idle" && ref.Status != "done" && !deadlineExpired {
 				return // an in-flight state change is uncertainty, not provider failure
@@ -4438,6 +4413,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "provider-limits" {
+		os.Exit(providerLimitsCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "owner-native-grant" {
 		os.Exit(ownerNativeGrantCLI(os.Args[2:], os.Stdout))
 	}

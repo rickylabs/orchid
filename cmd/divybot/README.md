@@ -163,3 +163,5 @@ allow path: reported exhaustion yields `budget-reached`; missing authoritative
 allowance or an enforceable full-run bound yields `budget-unavailable`. See
 [provider budgets](../../docs/provider-budgets.md) for the strict config fields,
 source scope, published six-field decisions and required reservation gate.
+
+Provider limits: [configuration and contributor guide](../../docs/provider-limits.md).

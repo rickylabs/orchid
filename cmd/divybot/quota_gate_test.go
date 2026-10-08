@@ -146,8 +146,14 @@ func TestMatrixQuotaRefusalAttribution(t *testing.T) {
 			}
 
 			_, ok := c.matrixAttempt(context.Background(), 1, is, Target{Repo: "example/project"}, budget, deps)
+			if tc.name != "no budget" {
+				if !ok || len(refusals) != 0 {
+					t.Fatalf("advisory meter condition vetoed route: %+v", refusals)
+				}
+				return
+			}
 			if ok {
-				t.Fatal("dispatch was admitted despite quota failure mode")
+				t.Fatal("physical capacity zero admitted")
 			}
 			if len(refusals) != 1 {
 				t.Fatalf("expected 1 refusal, got %d", len(refusals))
@@ -194,8 +200,8 @@ func TestMatrixQuotaMultiTransportAttribution(t *testing.T) {
 		// codex not in map (never metered)
 	}
 	budget := map[string]int{
-		"claude": 1,
-		"codex":  1,
+		"claude": 0,
+		"codex":  0,
 		"agy":    0,
 	}
 
@@ -234,7 +240,7 @@ func TestMatrixQuotaMultiTransportAttribution(t *testing.T) {
 	if r.ReasonCode != "quota-unavailable" {
 		t.Fatalf("expected ReasonCode quota-unavailable, got %q", r.ReasonCode)
 	}
-	expected := "claude: over ceiling, codex: absent, agy: blocked by capacity"
+	expected := "claude: blocked by capacity, codex: blocked by capacity, agy: blocked by capacity"
 	if r.Detail != expected {
 		t.Fatalf("expected Detail %q, got %q", expected, r.Detail)
 	}

@@ -55,7 +55,7 @@ var matrixReasons = map[string]struct{ field, hint string }{
 	"retry-pins-unavailable":       {"matrix", "The original dispatch pins no longer resolve exactly; start a new issue for a changed route."},
 	"routing-invalid":              {"issue.tier/role", "Specify a workload tier and a role allowed by the selected profile."},
 	"resolution-failed":            {"matrix", "Verify Deno, the pinned source contract and matrix CLI; resolution could not complete."},
-	"quota-unavailable":            {"governor", "Native transports require fresh quota, headroom and capacity; OpenCode requires explicit free provider capacity and native discovery."},
+	"quota-unavailable":            {"governor", "Physical capacity and authentication remain required; quota percentages are advisory. A verified provider refusal requires a later matching successful inference."},
 	"harness-conflict":             {"issue.harness", "The requested harness conflicts with the selected matrix transport."},
 	"router-unsupported":           {"issue.router", "Router substitution has no supported adapter."},
 	"host-unavailable":             {"hosts", "No eligible host has capacity for the selected transport and target."},

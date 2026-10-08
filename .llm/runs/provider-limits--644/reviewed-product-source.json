@@ -1,0 +1,23 @@
+{
+  "cmd/divybot/README.md": "93ce6ff34a59530cca179a45e33351c08566496c1689d88bcdf9e547b7de17dd",
+  "cmd/divybot/governor_test.go": "0b7a4f0fde26c371a25e6b74e6b29603182aecba8c35e2c61efc78913373b8ff",
+  "cmd/divybot/main.go": "c98703f8b861e5231529ef6c6af4bad863d0e30823e6e1873eec5f015763f8f1",
+  "cmd/divybot/matrix.go": "3314321aef625a1bec4cd434e2fdc440fceb207f671440036c95296867b4271d",
+  "cmd/divybot/matrix_config.go": "b67a1b8c61f048e806cbae94b8e07e883f1e315918d664825ce9bb1194cd1d8b",
+  "cmd/divybot/matrix_diagnostics.go": "3b2e0fc16c475d8be4bcb99d33da98a25011fa4153b6930049c595aed2bd7c2e",
+  "cmd/divybot/matrix_test.go": "e0fe7a99ea9450997aca64ab45f5378a73d741852af98a73ab0e83a58aa2cd96",
+  "cmd/divybot/opencode_transport.go": "34df81f1383fd8fa78e9bcbda874b243ac9cef39a2264a6a45db0050d2b42ba5",
+  "cmd/divybot/provider_budget.go": "de021b0b639db41cf1640c04e3a92257c8dcab4b55716c2acd4204b03b87a78e",
+  "cmd/divybot/provider_budget_test.go": "b3f2892b010e7d38e038f2e266f2ed93525033804ca93178743a7f93963cad35",
+  "cmd/divybot/provider_limits.go": "59cb304e09727e86c8f37ea4be4dc70e65da2ad8eaf315fcce5aa24fc7a626f1",
+  "cmd/divybot/provider_limits_test.go": "4b1539e7b89f33187e2bda2f0c436df29eb1432b7012af219dbb4678bfa079df",
+  "cmd/divybot/quota_gate_test.go": "4f09407d21046c4cefd3766b0de85f6c3a2f8328ca2c6a16c4ef94f16fdb34d7",
+  "cmd/divybot/quota_pin_refusal_test.go": "cceafe43a58d7c0ee9f4665664e21620d2025895ee5f6d00c15b4e3a2b0e13d5",
+  "cmd/divybot/rc_resume_quota_test.go": "22f5b088f8f990f99b7a75d86cf62b9c62249e90e7f9e9a32ab434f2c83f425c",
+  "cmd/divybot/transport_availability.go": "e8999020d1b72a9c12d32d20ae14329244fd95f9de1d6298159c59278a3998ea",
+  "cmd/divybot/transport_availability_test.go": "fa320291240a3bff5d39f41644331f76b754d2e6096ca43a057f9a4e38676381",
+  "cmd/divybot/unmetered_transport_test.go": "18d0b11225aded1b540f5c9b368073492b3e4ee2e504eff8213e117b19ba8910",
+  "docs/provider-budgets.md": "90a186c214064a55e60ae9ca5283b8b05f8c524b349bb0ea471d2075aab2c0db",
+  "docs/provider-limits.md": "2eb2ee0b9da165b1bb88942e61061ed9ee575a353770d5a9cff3fe0b72306911",
+  "docs/throttling.md": "af40c0230b2d310a4e1f9eca85a727120248b2b5adb14bb9a3d567233e8f4abb"
+}

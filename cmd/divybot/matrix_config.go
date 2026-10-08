@@ -81,6 +81,12 @@ func readMatrixConfigFile(name string) (*Config, map[string]json.RawMessage, []m
 			return nil, nil, configProblem("provider_budgets", "invalid-budget-policy")
 		}
 	}
+	if block, ok := raw["provider_limits"]; ok {
+		cfg.ProviderLimits, err = decodeProviderLimitsConfig(block)
+		if err != nil {
+			return nil, nil, configProblem("provider_limits", "invalid-limits-source")
+		}
+	}
 	cfg.withDefaults()
 	return &cfg, raw, nil
 }

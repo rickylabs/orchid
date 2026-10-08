@@ -360,8 +360,8 @@ func TestProviderBudgetSourceAndDecision(t *testing.T) {
 			}
 			c := &Coord{cfg: &Config{ProviderBudgets: cfg}}
 			o := Overrides{Model: cfg.Models[0].Provider + "/" + cfg.Models[0].Model}
-			if c.providerBudgetLaunchReason("opencode", o, now) != want {
-				t.Fatal("launch disagrees with snapshot")
+			if c.providerBudgetLaunchReason("opencode", o, now) != "" {
+				t.Fatal("legacy budget evidence vetoed launch")
 			}
 		})
 	}
@@ -375,16 +375,16 @@ func TestProviderBudgetScopeAndPublicRows(t *testing.T) {
 			t.Fatal("native/legacy quota changed")
 		}
 	}
-	if c.providerBudgetLaunchReason("opencode-run", Overrides{Model: "github-copilot/vendor/native-model"}, now) != "budget-reached" {
+	if c.providerBudgetLaunchReason("opencode-run", Overrides{Model: "github-copilot/vendor/native-model"}, now) != "" {
 		t.Fatal("legacy OpenCode alias bypassed paid policy")
 	}
 	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "fixture-free/cheap-model"}, now) != "" {
 		t.Fatal("unrelated cheap route inherited expensive policy")
 	}
-	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "github-copilot/unlisted"}, now) != "budget-unavailable" {
+	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "github-copilot/unlisted"}, now) != "" {
 		t.Fatal("covered provider bypassed missing model policy")
 	}
-	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "invalid"}, now) != "budget-unavailable" {
+	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "invalid"}, now) != "" {
 		t.Fatal("unresolved identity bypassed policy")
 	}
 	cfg.Models[0].Limit = budgetString("3")
@@ -431,7 +431,7 @@ func TestProviderBudgetScopeAndPublicRows(t *testing.T) {
 	if rows, err := buildProviderBudgetDecisions(cfg, now, now.Add(time.Minute).Format(transportAvailabilityTime)); err == nil || rows != nil {
 		t.Fatal("invalid policy published")
 	}
-	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "fixture-free/cheap-model"}, now) != "budget-unavailable" {
+	if c.providerBudgetLaunchReason("opencode", Overrides{Model: "fixture-free/cheap-model"}, now) != "" {
 		t.Fatal("invalid policy opened admission")
 	}
 	if rows, err := buildProviderBudgetDecisions(nil, now, ""); err != nil || rows != nil {
@@ -451,10 +451,10 @@ func TestProviderBudgetTickAndRefusals(t *testing.T) {
 	pools := openCodeProviderPools(c.cfg.OpenCode, c.st.Jobs)
 	c.publishTransportAvailability(map[string]int{"codex": 1, "opencode": 0}, now, pools)
 	var s transportAvailabilitySnapshot
-	if err := readPrivateActionJSON(transportAvailabilityPath(root), &s); err != nil || len(s.ProviderBudgets) != 1 {
-		t.Fatal("tick dropped model decisions")
+	if err := readPrivateActionJSON(transportAvailabilityPath(root), &s); err != nil || len(s.ProviderBudgets) != 0 {
+		t.Fatal("tick emitted obsolete budget availability decisions")
 	}
-	if s.ProviderBudgets[0].ObservedAt != s.ObservedAt || s.ProviderBudgets[0].ValidUntil != s.ValidUntil || !reflect.DeepEqual(s.OpenCodeProviderPools, pools) || s.Transports[3].Available {
+	if !reflect.DeepEqual(s.OpenCodeProviderPools, pools) || s.Transports[3].Available {
 		t.Fatal("clocks/capacity/copilot disable changed")
 	}
 	for _, reason := range []string{"budget-reached", "budget-unavailable"} {
@@ -469,8 +469,8 @@ func TestProviderBudgetTickAndRefusals(t *testing.T) {
 	}
 	cfg.Models[0].Model = "github-copilot/duplicate"
 	c.publishTransportAvailability(nil, now, pools)
-	if _, e := os.Stat(transportAvailabilityPath(root)); !errors.Is(e, os.ErrNotExist) {
-		t.Fatal("invalid policy retained a snapshot")
+	if _, e := os.Stat(transportAvailabilityPath(root)); e != nil {
+		t.Fatal("invalid unused budget evidence vetoed physical capacity snapshot")
 	}
 }
 
@@ -479,8 +479,8 @@ func TestProviderBudgetBeforeSpawnEffects(t *testing.T) {
 	_ = now
 	c := &Coord{cfg: &Config{ProviderBudgets: cfg}}
 	err := c.spawn(context.Background(), 7, Issue{}, Host{}, "opencode", Overrides{Model: "github-copilot/vendor/native-model"}, nil)
-	if err == nil || refusalFor(err).ReasonCode != "budget-unavailable" {
-		t.Fatal("spawn reached effects before budget refusal")
+	if err == nil || refusalFor(err).ReasonCode == "budget-unavailable" || refusalFor(err).ReasonCode == "budget-reached" {
+		t.Fatal("quota budget veto remains before physical launch validation")
 	}
 }
 
@@ -520,13 +520,10 @@ func TestProviderBudgetMatrixBeforeEffects(t *testing.T) {
 				d.preflight = true
 			}
 			_, launched := c.matrixAttempt(context.Background(), 7, is, Target{Repo: "example/project"}, map[string]int{"opencode": 1, "opencode:github-copilot": 1}, d)
-			want := "budget-unavailable"
-			if mode == "reached" {
-				want = "budget-reached"
+			if effects < 1 || refused.ReasonCode == "budget-unavailable" || refused.ReasonCode == "budget-reached" {
+				t.Fatalf("budget veto retained: launched=%v effects=%d reason=%s", launched, effects, refused.ReasonCode)
 			}
-			if launched || effects != 0 || refused.ReasonCode != want {
-				t.Fatalf("budget refusal missed: launched=%v effects=%d reason=%s", launched, effects, refused.ReasonCode)
-			}
+
 		})
 	}
 }

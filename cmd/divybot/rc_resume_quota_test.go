@@ -88,9 +88,9 @@ func TestMatrixOwnerLaunchNotRefusedOnMissingMeter(t *testing.T) {
 		{"owner-governor-cap", true, map[string]quota{}, 0, true},
 		{"owner-over-pacing-ceiling", true, freshAt(95), 1, true},
 		{"owner-vendor-limit", true, freshAt(100), 1, true},
-		{"autonomous-absent-meter", false, map[string]quota{}, 1, false},
-		{"autonomous-stale-meter", false, map[string]quota{"claude": {ok: true, at: time.Now().Add(-time.Hour), seven: RateLimit{UsedPct: 10, ResetsAt: time.Now().Add(time.Hour).Unix()}}}, 1, false},
-		{"autonomous-over-pacing-ceiling", false, freshAt(95), 1, false},
+		{"autonomous-absent-meter", false, map[string]quota{}, 1, true},
+		{"autonomous-stale-meter", false, map[string]quota{"claude": {ok: true, at: time.Now().Add(-time.Hour), seven: RateLimit{UsedPct: 10, ResetsAt: time.Now().Add(time.Hour).Unix()}}}, 1, true},
+		{"autonomous-over-pacing-ceiling", false, freshAt(95), 1, true},
 		{"autonomous-governor-cap", false, freshAt(10), 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,7 +173,7 @@ func TestRunPrimesGovernorBeforeFirstTick(t *testing.T) {
 		switch x := stmt.(type) {
 		case *ast.IfStmt:
 			text = types.ExprString(x.Cond)
-			if text == "c.cfg.Governor.Enabled" && len(x.Body.List) > 0 {
+			if text == "c.cfg.Governor.Enabled || c.cfg.ProviderLimits != nil" && len(x.Body.List) > 0 {
 				if e, ok := x.Body.List[0].(*ast.ExprStmt); ok && types.ExprString(e.X) == "c.governorSample(ctx)" {
 					sample = i
 				}

@@ -898,6 +898,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		o.MaxTokens, o.MaxTokensPresent = "", false
 	}
 	o.Model, o.Effort, o.Harness, o.Tier, o.Role = route.Model, route.Effort, agent, route.Tier, route.Role
+	if reason := c.providerLimitLaunchReason(agent, o, now); reason != "" {
+		return refuse(reason)
+	}
 	if req.NativeOverride != nil && o.Effort == "provider_default" {
 		o.Effort = "" // Native default is an omitted flag, not a Harness effort substitution.
 	}
@@ -1092,17 +1095,12 @@ func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
 	return quotaHeadroomCondition(q, now, ceiling) == ""
 }
 
+// Quota freshness and percentages inform warnings, never transport admission.
 func transportAvailabilityReason(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
 	if budget <= 0 {
 		return availabilityNoCapacity
 	}
-	if !q.ok {
-		return availabilityMeterUnread
-	}
-	if q.at.After(now) || now.Sub(q.at) > 3*sampleInterval {
-		return availabilityMeterStale
-	}
-	return quotaHeadroomReason(q, now, ceiling)
+	return ""
 }
 
 // quotaAvailability fills req.Available with the transports admission offers and

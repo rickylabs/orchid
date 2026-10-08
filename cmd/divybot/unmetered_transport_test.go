@@ -50,12 +50,12 @@ func TestAGYCapNeverConsumesClaudeMeter(t *testing.T) {
 	c.gov.q = map[string]quota{"claude": native, "codex": native, "agy": native}
 	original := c.gov.q["claude"]
 	caps := c.curCaps()
-	if caps["agy"] != 1 || caps["claude"] != 0 || caps["codex"] != 0 {
+	if caps["agy"] != 1 || caps["claude"] != 4 || caps["codex"] != 4 {
 		t.Fatal("static AGY cap borrowed quota or weakened native meters", caps)
 	}
 	st.Jobs[7] = &Job{Issue: 7, Agent: "agy"}
 	budget := c.admissionBudget(nil)
-	if budget["agy"] != 0 || budget["claude"] != 0 || c.gov.q["claude"] != original || len(st.QuotaSamples["agy"]) != 0 {
+	if budget["agy"] != 0 || budget["claude"] != 4 || c.gov.q["claude"] != original || len(st.QuotaSamples["agy"]) != 0 {
 		t.Fatal("AGY launch changed Claude meter or quota ring")
 	}
 	delete(st.Jobs, 7)

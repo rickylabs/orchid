@@ -191,6 +191,8 @@ func openCodeFirstPrompt(goal string) string {
 // ExpectedPromptDigest binds the exact rendered first prompt; records without
 // it cannot confirm legacy pointer delivery and are never automatically replayed.
 type openCodeRun struct {
+	LimitSuccessAt       int64         `json:"-"`
+	LimitSuccessEvent    string        `json:"-"`
 	ExpectedPromptDigest string        `json:"expectedPromptDigest,omitempty"`
 	Route                openCodeRoute `json:"route"`
 	Cwd                  string        `json:"cwd"`
@@ -329,6 +331,9 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 	latestUser := ""
 	first := true
 	seen := map[string]bool{}
+	var providerErr error
+	run.LimitSuccessAt = 0
+	run.LimitSuccessEvent = ""
 	for _, message := range record.Messages {
 		info := message.Info
 		compact, summaryErr := openCodeSummary(info.Role, info.Summary)
@@ -365,6 +370,9 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 		switch info.Role {
 		case "user":
 			confirmed, completed = false, false
+			providerErr = nil
+			run.LimitSuccessAt = 0
+			run.LimitSuccessEvent = ""
 			if info.Model.ProviderID != run.Route.Provider || info.Model.ModelID != run.Route.Model || info.Model.Variant != run.Route.Variant {
 				return false, false, matrixReason("opencode-route-mismatch")
 			}
@@ -378,9 +386,22 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 			if !users[info.ParentID] || info.ParentID != latestUser || info.ProviderID != run.Route.Provider || info.ModelID != run.Route.Model || info.Variant != run.Route.Variant {
 				return false, false, matrixReason("opencode-route-mismatch")
 			}
-			if len(info.Error) > 0 && string(info.Error) != "null" {
-				return false, false, matrixReason("opencode-provider-error")
+			if info.Time.Completed > 0 && (info.Time.Completed < lastPart || info.Time.Completed > time.Now().UnixMilli()) {
+				return false, false, bad
 			}
+			if len(info.Error) > 0 && string(info.Error) != "null" {
+				if compact {
+					return false, false, bad
+				}
+				confirmed, completed = false, false
+				providerErr = nativeLimitError(info.Error, info.Time.Completed, run.SessionID+"/"+info.ID)
+				run.LimitSuccessAt = 0
+				run.LimitSuccessEvent = ""
+				continue
+			}
+			providerErr = nil
+			run.LimitSuccessAt = 0
+			run.LimitSuccessEvent = ""
 			confirmed = true
 			completed = false // An earlier assistant cannot complete a later streaming response.
 			if compact {
@@ -394,12 +415,14 @@ func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, comple
 					return false, false, matrixReason("opencode-empty-answer")
 				}
 				completed = true
+				run.LimitSuccessAt = info.Time.Completed
+				run.LimitSuccessEvent = run.SessionID + "/" + info.ID
 			}
 		default:
 			return false, false, bad
 		}
 	}
-	return confirmed, completed, nil
+	return confirmed, completed, providerErr
 }
 
 type openCodeObservationCalls struct {
@@ -408,36 +431,47 @@ type openCodeObservationCalls struct {
 	export   func(context.Context, *openCodeRun, string) ([]byte, error)
 }
 
+func (h Host) openCodeCalls() openCodeObservationCalls {
+	return openCodeObservationCalls{agent: h.agentInfoOf, sessions: h.openCodeSessions, export: func(ctx context.Context, run *openCodeRun, id string) ([]byte, error) {
+		env, err := openCodeEnvironment(run.Cwd, run.Route)
+		if err != nil {
+			return nil, err
+		}
+		return h.openCodeRead(ctx, run.Cwd, env, "export", id)
+	}}
+}
 func (h Host) observeOpenCode(ctx context.Context, j *Job) (bool, bool, error) {
-	return observeOpenCodeSession(ctx, j, openCodeObservationCalls{
-		agent:    h.agentInfoOf,
-		sessions: h.openCodeSessions,
-		export: func(ctx context.Context, run *openCodeRun, id string) ([]byte, error) {
-			env, err := openCodeEnvironment(run.Cwd, run.Route)
-			if err != nil {
-				return nil, err
-			}
-			return h.openCodeRead(ctx, run.Cwd, env, "export", id)
-		},
-	})
+	return observeOpenCodeSession(ctx, j, h.openCodeCalls())
+}
+func (h Host) observeOpenCodeLimits(ctx context.Context, j *Job) (bool, bool, error, *openCodeRun) {
+	return observeOpenCodeSessionLimits(ctx, j, h.openCodeCalls())
 }
 
+// Compatibility observers never mutate the durable binding with transient inference evidence.
 func observeOpenCodeSession(ctx context.Context, j *Job, calls openCodeObservationCalls) (bool, bool, error) {
+	confirmed, completed, err, _ := observeOpenCodeSessionLimits(ctx, j, calls)
+	return confirmed, completed, err
+}
+func observeOpenCodeSessionLimits(ctx context.Context, j *Job, calls openCodeObservationCalls) (bool, bool, error, *openCodeRun) {
 	run := j.OpenCode
+	if run != nil {
+		run.LimitSuccessAt = 0
+		run.LimitSuccessEvent = ""
+	}
 	if ctx.Err() != nil || run == nil || run.Failure != "" {
-		return false, false, matrixReason("opencode-output-unconfirmed")
+		return false, false, matrixReason("opencode-output-unconfirmed"), nil
 	}
 	before, err := calls.agent(ctx, j.Pane)
 	if err != nil || !openCodeOccupant(before, j, run) {
-		return false, false, matrixReason("opencode-output-unconfirmed")
+		return false, false, matrixReason("opencode-output-unconfirmed"), nil
 	}
 	sessions, err := calls.sessions(ctx, run)
 	if err != nil {
-		return false, false, err
+		return false, false, err, nil
 	}
 	id, err := selectOpenCodeSession(sessions, run)
 	if err != nil || id == "" {
-		return false, false, err
+		return false, false, err, nil
 	}
 	copy := *run
 	copy.SessionID = id
@@ -447,22 +481,25 @@ func observeOpenCodeSession(ctx context.Context, j *Job, calls openCodeObservati
 		}
 	}
 	if run.CreatedAt != 0 && run.CreatedAt != copy.CreatedAt {
-		return false, false, matrixReason("opencode-output-unconfirmed")
+		return false, false, matrixReason("opencode-output-unconfirmed"), nil
 	}
 	raw, err := calls.export(ctx, run, id)
 	if err != nil {
-		return false, false, matrixReason("opencode-output-unconfirmed")
+		return false, false, matrixReason("opencode-output-unconfirmed"), nil
 	}
 	confirmed, completed, observationErr := inspectOpenCodeExport(raw, &copy)
 	after, err := calls.agent(ctx, j.Pane)
 	if err != nil || ctx.Err() != nil || !openCodeOccupant(after, j, run) || before.StateChangeSeq != after.StateChangeSeq {
-		return false, false, matrixReason("opencode-output-unconfirmed")
+		return false, false, matrixReason("opencode-output-unconfirmed"), nil
 	}
 	if observationErr == nil && confirmed {
 		run.SessionID = id
 		run.CreatedAt = copy.CreatedAt
 	}
-	return confirmed, completed, observationErr
+	if observationErr == nil && confirmed && completed {
+		return confirmed, completed, observationErr, &copy
+	}
+	return confirmed, completed, observationErr, nil
 }
 
 func openCodeOccupant(a AgentInfo, j *Job, run *openCodeRun) bool {
