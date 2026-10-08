@@ -1,0 +1,2 @@
+# Context
+Producer dependency for Harness644, Harness PR649. See supervisor for paths and Harness run plan.md for independent plan. New private producer config, reuse native sampler, own-key collector, durable exact-scope ledger and strongly bound native outcomes. No production activation authorized. Full root/two-UID local gate needs sudo, which is absent; record unproven honestly, do not claim deployment.
