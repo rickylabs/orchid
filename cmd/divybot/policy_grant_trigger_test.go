@@ -433,6 +433,10 @@ func TestSourceLegacyRefusalReopensOnlyForAMissingGrant(t *testing.T) {
 			c.sourceTick(context.Background())
 			c.st.mu.Lock()
 			b := c.st.SourceBindings[3100000111]
+			if b == nil {
+				c.st.mu.Unlock()
+				t.Fatal("the ungranted owner comment was not refused")
+			}
 			b.Refusal, b.Author, b.Outbox = "", 0, nil
 			switch name {
 			case "delivered":
