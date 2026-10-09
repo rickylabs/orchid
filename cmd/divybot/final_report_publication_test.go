@@ -536,7 +536,7 @@ func TestCompletionClaudeFinalReportRetiresRun(t *testing.T) {
 }
 
 func TestCompletionTimeoutRetiresWithLiveChildReason(t *testing.T) {
-	for _, name := range []string{"live-children", "no-children", "unreadable"} {
+	for _, name := range []string{"live-children", "no-children", "unreadable", "source-binding"} {
 		t.Run(name, func(t *testing.T) {
 			ghLog, _ := completionSupervisionCommands(t)
 			c, j, _, _, _ := claudeCoordinatorFixture(t)
@@ -550,7 +550,7 @@ func TestCompletionTimeoutRetiresWithLiveChildReason(t *testing.T) {
 					return &actionStopProcess{SchemaVersion: 1, GroupID: 301, RootPID: 301, Members: []actionProcessIdentity{{PID: 301, Start: 9}}}, nil
 				}
 				switch name {
-				case "live-children":
+				case "live-children", "source-binding":
 					return &actionStopProcess{SchemaVersion: 1, GroupID: 40, RootPID: 41, Members: []actionProcessIdentity{{PID: 41, Start: 1}, {PID: 42, Start: 2}, {PID: 43, Start: 3}}}, nil
 				case "no-children":
 					return &actionStopProcess{SchemaVersion: 1, GroupID: 40, RootPID: 41, Members: []actionProcessIdentity{{PID: 41, Start: 1}}}, nil
@@ -559,6 +559,9 @@ func TestCompletionTimeoutRetiresWithLiveChildReason(t *testing.T) {
 			}
 			j.Overrides.Timeout = time.Minute
 			j.Deadline = time.Now().Add(-time.Second)
+			if name == "source-binding" { // the owner's source issue is never closed; the reason goes in its reply
+				c.st.SourceBindings = map[int]*sourceBinding{7: {Repo: "fixture/project", Issue: 70, Comment: 71}}
+			}
 			var logs bytes.Buffer
 			oldLog := log.Writer()
 			log.SetOutput(&logs)
@@ -566,10 +569,16 @@ func TestCompletionTimeoutRetiresWithLiveChildReason(t *testing.T) {
 			ref := completionRef(j)
 			c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
 			calls, _ := os.ReadFile(ghLog)
+			if b, ok := c.sourceBinding(7); ok {
+				for _, r := range b.Outbox {
+					calls = append(calls, r.Body+"\nissue close 7\n"...)
+				}
+			}
 			want := map[string]string{
-				"live-children": "exceeded; stopping 2 live child processes",
-				"no-children":   "exceeded — ",
-				"unreadable":    "exceeded; live child processes unknown",
+				"source-binding": "exceeded; stopping 2 live child processes",
+				"live-children":  "exceeded; stopping 2 live child processes",
+				"no-children":    "exceeded — ",
+				"unreadable":     "exceeded; live child processes unknown",
 			}[name]
 			if !strings.Contains(logs.String(), "operator timeout (1m0s) "+want) || !strings.Contains(string(calls), want) {
 				t.Fatalf("timeout reason not recorded in log and on the issue: %s %s", logs.String(), calls)
