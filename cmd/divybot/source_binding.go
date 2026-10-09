@@ -23,12 +23,15 @@ import (
 // number, so a call site that still addresses the inbox fails on a missing issue
 // instead of touching another one. Every reply goes to the source issue.
 //
-// A comment launches only when it matches a comment grant the owner installed
-// through the owner endpoint before posting it (owner rule, 2026-10-05). The
-// author ID only filters the feed: Orchid, the Cockpit and agents share it.
+// A comment launches only when it matches a comment grant the Cockpit installed
+// over the private grant socket (owner rule, 2026-10-05). The owner's grant is
+// installed before the owner posts the comment. A policy grant (owner rule,
+// 2026-10-09) is installed after a member posted it and names that exact comment
+// and author under a saved launch policy revision. A comment no grant names is
+// never a trigger, whoever wrote it: on a public repository anyone can comment.
 
-// ownerGitHubID is the only author whose comment can be a trigger. Checked by
-// numeric ID, never by login.
+// ownerGitHubID is the author whose comments an owner grant (one that names no
+// comment) can match. Checked by numeric ID, never by login.
 const ownerGitHubID int64 = 129366361
 
 const (
@@ -59,6 +62,7 @@ type sourceBinding struct {
 	Repo      string          `json:"repo"`
 	Issue     int             `json:"issue"`
 	Comment   int64           `json:"comment"`
+	Author    int64           `json:"author,omitempty"`   // the comment's author; absent on bindings made when only the owner could trigger
 	IssueID   string          `json:"issue_id,omitempty"` // the source issue's node ID
 	Title     string          `json:"title,omitempty"`
 	Body      string          `json:"body,omitempty"` // the trigger comment, LF only
@@ -90,6 +94,8 @@ type sourceScan struct {
 type issueSource struct {
 	Repo   string
 	Number int
+	// Author is the trigger comment's author, checked again at admission.
+	Author int64
 }
 
 type sourceComment struct {
@@ -123,6 +129,8 @@ type sourceGitHub interface {
 	comments(ctx context.Context, repo, since string, page int, etag string) ([]sourceComment, sourceMeta, error)
 	issue(ctx context.Context, repo string, n int, etag string) (sourceIssueView, sourceMeta, error)
 	comment(ctx context.Context, repo string, id int64, etag string) (bool, sourceMeta, error)
+	// current reads one comment as it is now; ok=false when it is gone.
+	current(ctx context.Context, repo string, id int64) (sourceComment, bool, sourceMeta, error)
 	reply(ctx context.Context, repo string, n int, body string) error
 }
 
@@ -243,6 +251,28 @@ func (ghSource) comment(ctx context.Context, repo string, id int64, etag string)
 	return meta.NotModified || status != 404, meta, nil
 }
 
+func (ghSource) current(ctx context.Context, repo string, id int64) (sourceComment, bool, sourceMeta, error) {
+	status, body, meta, err := ghConditional(ctx, fmt.Sprintf("repos/%s/issues/comments/%d", repo, id), "")
+	if err != nil || status == 404 {
+		return sourceComment{}, false, meta, err
+	}
+	var r struct {
+		ID        int64     `json:"id"`
+		Body      string    `json:"body"`
+		HTMLURL   string    `json:"html_url"`
+		IssueURL  string    `json:"issue_url"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		User      struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
+	}
+	if status != 200 || json.Unmarshal(body, &r) != nil || r.ID != id {
+		return sourceComment{}, false, meta, errSourceRead
+	}
+	return sourceComment{ID: r.ID, Body: r.Body, HTMLURL: r.HTMLURL, IssueURL: r.IssueURL, AuthorID: r.User.ID, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}, true, meta, nil
+}
+
 func (ghSource) reply(ctx context.Context, repo string, n int, body string) error {
 	f, err := os.CreateTemp("", "source-reply-*.md")
 	if err != nil {
@@ -273,8 +303,9 @@ type sourceMemory struct {
 	pages       map[string]sourcePageSummary
 	issues      map[string]sourceIssueView
 	open        map[int]bool
-	ignored     map[int64]bool // /swarm comments already logged as ignored, bounded
-	ignoredFull bool           // the bound was reached; the saturation line was logged
+	ignored     map[int64]bool          // /swarm comments already logged as ignored, bounded
+	ignoredFull bool                    // the bound was reached; the saturation line was logged
+	pending     map[int64]sourcePending // fresh non-owner /swarm comments awaiting a grant, bounded
 	repoTurn    int
 	checkTurn   int
 	replyTurn   int
@@ -450,6 +481,7 @@ func (c *Coord) sourceTick(ctx context.Context) {
 	turn := mem.repoTurn
 	mem.mu.Unlock()
 	budget, scanned := sourceListRequestsPerTick, 0
+	budget = c.recheckSourceGrants(ctx, now, budget)
 	for i := range repos {
 		if budget <= 0 {
 			break
@@ -619,8 +651,11 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 	if !trigger {
 		return true // conversation, not a /swarm comment
 	}
-	if cm.AuthorID != ownerGitHubID { // guard:source-owner
-		c.ignoreSource(repo, cm, "not written by the owner")
+	if cm.AuthorID != ownerGitHubID && !c.sourceGrantNamed(repo, cm.ID, cm.AuthorID) { // guard:source-owner
+		// A policy grant for a member's comment may arrive after this read, so the
+		// comment is re-checked against new grants while it is fresh.
+		c.ignoreSource(repo, cm, "not written by the owner and no grant names this comment")
+		c.awaitSourceGrant(repo, cm, now)
 		return true
 	}
 	// A pull request's conversation shares the feed. Only a Cockpit launch there
@@ -658,7 +693,7 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 		c.ignoreSource(repo, cm, "a pull request comment without the Cockpit launch marker")
 		return true
 	}
-	b := &sourceBinding{Repo: repo, Issue: n, Comment: cm.ID, IssueID: view.NodeID, Title: view.Title, Body: body, URL: cm.HTMLURL, CreatedAt: cm.CreatedAt}
+	b := &sourceBinding{Repo: repo, Issue: n, Comment: cm.ID, Author: cm.AuthorID, IssueID: view.NodeID, Title: view.Title, Body: body, URL: cm.HTMLURL, CreatedAt: cm.CreatedAt}
 	refusal := ""
 	switch {
 	case !encodingOK:
@@ -672,7 +707,7 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 			refusal = "source-repo-invalid"
 		} else if o.Repo != "" && !strings.EqualFold(o.Repo, repo) { // guard:source-repo-match
 			refusal = "source-repo-mismatch"
-		} else if !c.sourceGrantReady(repo, n, view.NodeID, body, key) { // guard:source-grant-required
+		} else if !c.sourceGrantReady(repo, n, view.NodeID, body, key, cm.AuthorID) { // guard:source-grant-required
 			refusal = "source-grant-missing"
 		}
 	}
@@ -712,14 +747,105 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 
 // sourceGrantReady is true when an installed comment grant matches this exact
 // comment and no other comment has claimed it.
-func (c *Coord) sourceGrantReady(repo string, n int, issueID, body string, key int) bool {
+func (c *Coord) sourceGrantReady(repo string, n int, issueID, body string, key int, author int64) bool {
 	if c.sourceGrant != nil {
-		return c.sourceGrant(repo, n, issueID, body, key)
+		return author == ownerGitHubID && c.sourceGrant(repo, n, issueID, body, key) // the test hook models owner grants only
 	}
 	if c.ownerGrants == nil {
 		return false
 	}
-	return c.ownerGrants.commentGrantReady(repo, n, issueID, shaText([]byte(body)), key)
+	return c.ownerGrants.commentGrantReady(repo, n, issueID, shaText([]byte(body)), key, author)
+}
+
+// sourceGrantNamed is true when an installed grant names this exact comment and
+// author. It makes no GitHub read.
+func (c *Coord) sourceGrantNamed(repo string, comment, author int64) bool {
+	if c.sourceNamed != nil {
+		return c.sourceNamed(repo, comment, author)
+	}
+	if c.ownerGrants == nil {
+		return false
+	}
+	return c.ownerGrants.commentGrantNamed(repo, comment, author)
+}
+
+// sourcePendingLimit bounds the fresh non-owner /swarm comments kept for a grant.
+const sourcePendingLimit = 256
+
+type sourcePending struct {
+	repo string
+	cm   sourceComment
+}
+
+// awaitSourceGrant keeps a fresh non-owner /swarm comment so a grant installed
+// after the listing moved past it is still seen. Bounded; a restart forgets it.
+func (c *Coord) awaitSourceGrant(repo string, cm sourceComment, now time.Time) {
+	if now.Sub(cm.CreatedAt) > sourceTriggerFreshness || !cm.UpdatedAt.Equal(cm.CreatedAt) {
+		return
+	}
+	mem := c.sourceMem()
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	if mem.pending == nil {
+		mem.pending = map[int64]sourcePending{}
+	}
+	if _, ok := mem.pending[cm.ID]; ok || len(mem.pending) >= sourcePendingLimit { // guard:source-pending-bounded
+		return
+	}
+	mem.pending[cm.ID] = sourcePending{repo: repo, cm: cm}
+}
+
+// recheckSourceGrants considers again each kept comment a grant now names. Each
+// issue read spends the tick's budget; a comment past freshness is dropped.
+func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget int) int {
+	api, mem := c.sourceAPI(), c.sourceMem()
+	mem.mu.Lock()
+	var ready []sourcePending
+	for id, p := range mem.pending {
+		if now.Sub(p.cm.CreatedAt) > sourceTriggerFreshness {
+			delete(mem.pending, id)
+		} else if c.sourceGrantNamed(p.repo, p.cm.ID, p.cm.AuthorID) {
+			ready = append(ready, p)
+		}
+	}
+	mem.mu.Unlock()
+	for _, p := range ready {
+		c.st.mu.Lock()
+		start, ok := c.st.SourceStarts[p.repo]
+		c.st.mu.Unlock()
+		if !ok || budget <= 0 {
+			continue
+		}
+		// The kept copy may be stale: the comment is read again as it is now, so
+		// an edit made before the grant arrived is seen (guard:source-recheck-current).
+		budget--
+		cm, exists, meta, err := api.current(ctx, p.repo, p.cm.ID)
+		mem.noteRate(meta, now)
+		if err != nil {
+			continue
+		}
+		if !exists || cm.ID != p.cm.ID {
+			mem.mu.Lock()
+			delete(mem.pending, p.cm.ID)
+			mem.mu.Unlock()
+			continue
+		}
+		lookup := func(n int) (sourceIssueView, error) {
+			if budget <= 0 {
+				return sourceIssueView{}, errSourceRead
+			}
+			budget--
+			v, meta, err := api.issue(ctx, p.repo, n, "")
+			mem.noteRate(meta, now)
+			return v, err
+		}
+		if c.considerSourceComment(ctx, lookup, p.repo, cm, now, start) {
+			mem.mu.Lock()
+			delete(mem.pending, p.cm.ID)
+			mem.mu.Unlock()
+		}
+	}
+	return budget
 }
 
 // sourceMarker is the first line of every reply, read back by the Cockpit.
@@ -950,8 +1076,17 @@ func jobHome(inbox string, j *Job) dispatchIssue {
 	return dispatchIssue{Repo: inbox, Number: j.Issue}
 }
 
+// author is the trigger's author. A binding saved before policy grants existed
+// has none, and then only the owner's comments could be bound.
+func (b sourceBinding) author() int64 {
+	if b.Author == 0 {
+		return ownerGitHubID
+	}
+	return b.Author
+}
+
 func (b sourceBinding) issue(c *Coord) Issue {
-	is := Issue{ID: b.IssueID, Number: int(b.Comment), Title: b.Title, Body: b.Body, Source: &issueSource{Repo: b.Repo, Number: b.Issue}}
+	is := Issue{ID: b.IssueID, Number: int(b.Comment), Title: b.Title, Body: b.Body, Source: &issueSource{Repo: b.Repo, Number: b.Issue, Author: b.author()}}
 	for _, t := range c.cfg.Targets {
 		if strings.EqualFold(t.Repo, b.Repo) {
 			is.Labels = []string{t.Label}

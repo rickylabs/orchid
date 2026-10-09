@@ -118,6 +118,18 @@ func (f *fakeSource) comment(_ context.Context, _ string, id int64, etag string)
 	return true, meta, nil
 }
 
+func (f *fakeSource) current(_ context.Context, repo string, id int64) (sourceComment, bool, sourceMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads++
+	for _, c := range f.feed[repo] {
+		if c.ID == id && !f.deleted[id] {
+			return c, true, sourceMeta{Remaining: f.remaining}, nil
+		}
+	}
+	return sourceComment{}, false, sourceMeta{Remaining: f.remaining}, nil
+}
+
 func (f *fakeSource) reply(_ context.Context, repo string, n int, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -804,7 +816,7 @@ func TestOwnerNativeCommentGrant(t *testing.T) {
 		return Issue{ID: is.ID, Number: key, Title: is.Title, Body: b, Labels: []string{"fixture-target"}, Source: &issueSource{Repo: "example/project", Number: 7}}
 	}
 	// Before installation nothing launches.
-	if s.commentGrantReady("example/project", 7, is.ID, r.ExpectedBriefDigest, 3100000060) {
+	if s.commentGrantReady("example/project", 7, is.ID, r.ExpectedBriefDigest, 3100000060, ownerGitHubID) {
 		t.Fatal("a grant was ready before installation")
 	}
 	if _, err := s.matrixForIssue(binding(3100000060, body), "example/project"); err == nil || err.Error() != "source-grant-missing" {
@@ -817,10 +829,10 @@ func TestOwnerNativeCommentGrant(t *testing.T) {
 	if s.readStatus(context.Background(), r.OperationID).State != "LIVE" {
 		t.Fatal("comment grant status not LIVE")
 	}
-	if !s.commentGrantReady("example/project", 7, is.ID, r.ExpectedBriefDigest, 3100000060) {
+	if !s.commentGrantReady("example/project", 7, is.ID, r.ExpectedBriefDigest, 3100000060, ownerGitHubID) {
 		t.Fatal("an installed grant was not ready")
 	}
-	if s.commentGrantReady("example/project", 7, is.ID, shaText([]byte(body+"x")), 3100000060) || s.commentGrantReady("example/project", 7, "another", r.ExpectedBriefDigest, 3100000060) {
+	if s.commentGrantReady("example/project", 7, is.ID, shaText([]byte(body+"x")), 3100000060, ownerGitHubID) || s.commentGrantReady("example/project", 7, "another", r.ExpectedBriefDigest, 3100000060, ownerGitHubID) {
 		t.Fatal("a grant matched another body or issue")
 	}
 	cfg, err := s.matrixForIssue(binding(3100000060, body), "example/project")
@@ -834,7 +846,7 @@ func TestOwnerNativeCommentGrant(t *testing.T) {
 	if _, err := s.matrixForIssue(binding(3100000060, body), "example/project"); err != nil {
 		t.Fatal("the same binding lost its claim")
 	}
-	if s.commentGrantReady("example/project", 7, is.ID, r.ExpectedBriefDigest, 3100000061) {
+	if s.commentGrantReady("example/project", 7, is.ID, r.ExpectedBriefDigest, 3100000061, ownerGitHubID) {
 		t.Fatal("a claimed grant was ready for another comment")
 	}
 	if _, err := s.matrixForIssue(binding(3100000061, body), "example/project"); err == nil {

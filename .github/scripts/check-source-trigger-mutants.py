@@ -10,7 +10,12 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 # (label, file, exact anchor, mutated text)
 mutants = [
-    ('owner-id', 'source_binding.go', 'if cm.AuthorID != ownerGitHubID { // guard:source-owner', 'if false && cm.AuthorID != ownerGitHubID { // guard:source-owner'),
+    ('owner-id', 'source_binding.go', 'if cm.AuthorID != ownerGitHubID && !c.sourceGrantNamed(repo, cm.ID, cm.AuthorID) { // guard:source-owner', 'if false && cm.AuthorID != ownerGitHubID { // guard:source-owner'),
+    ('grant-names-author', 'owner_native_grant_store.go', 'return r.CommentID == comment && r.AuthorID == author', 'return r.CommentID == comment'),
+    ('owner-grant-owner-only', 'owner_native_grant_store.go', '\treturn author == ownerGitHubID\n}', '\treturn true\n}'),
+    ('admission-comment-author', 'owner_native_grant_store.go', 'commentGrantNames(history.Request, int64(is.Number), sourceAuthor(is))', 'true'),
+    ('policy-member-is-author', 'owner_native_grant_store.go', 'p.Member == r.AuthorID && ', ''),
+    ('recheck-reads-current', 'source_binding.go', 'c.considerSourceComment(ctx, lookup, p.repo, cm, now, start)', 'c.considerSourceComment(ctx, lookup, p.repo, p.cm, now, start)'),
     ('first-line-exact', 'source_binding.go', 'if first != "/swarm" { // guard:source-first-line', 'if strings.TrimSpace(first) != "/swarm" { // guard:source-first-line'),
     ('bind-once', 'source_binding.go', 'if bound { // guard:source-once', 'if false && bound { // guard:source-once'),
     ('first-start', 'source_binding.go', 'if !started { // guard:source-first-start', 'if false && !started { // guard:source-first-start'),
@@ -18,7 +23,7 @@ mutants = [
     ('after-start', 'source_binding.go', 'if cm.CreatedAt.Before(start) { // guard:source-after-start', 'if false && cm.CreatedAt.Before(start) { // guard:source-after-start'),
     ('fresh', 'source_binding.go', 'if now.Sub(cm.CreatedAt) > sourceTriggerFreshness { // guard:source-fresh', 'if false && now.Sub(cm.CreatedAt) > sourceTriggerFreshness { // guard:source-fresh'),
     ('repo-match', 'source_binding.go', '} else if o.Repo != "" && !strings.EqualFold(o.Repo, repo) { // guard:source-repo-match', '} else if false { // guard:source-repo-match'),
-    ('grant-required-at-bind', 'source_binding.go', '} else if !c.sourceGrantReady(repo, n, view.NodeID, body, key) { // guard:source-grant-required', '} else if false && !c.sourceGrantReady(repo, n, view.NodeID, body, key) { // guard:source-grant-required'),
+    ('grant-required-at-bind', 'source_binding.go', '} else if !c.sourceGrantReady(repo, n, view.NodeID, body, key, cm.AuthorID) { // guard:source-grant-required', '} else if false && !c.sourceGrantReady(repo, n, view.NodeID, body, key, cm.AuthorID) { // guard:source-grant-required'),
     ('grant-required-at-admission', 'owner_native_grant_store.go', 'if matches == 0 && subject.comment { // guard:source-grant-admission', 'if false && matches == 0 && subject.comment { // guard:source-grant-admission'),
     ('still-open', 'source_binding.go', 'if live || !known { // guard:source-still-open', 'if true || live || !known { // guard:source-still-open'),
     ('cursor-past-newest', 'source_binding.go', 'next := scan.Newest.Add(-time.Second) // exclusive since', 'next := scan.Newest.Add(time.Second) // exclusive since'),
@@ -52,7 +57,7 @@ mutants = [
     ('grant-target-exact', 'owner_native_grant_store.go', 'return reason == "" && !tgt.Disabled && tgt.Repo == repo // guard:grant-target-resolves', 'return reason == "" && !tgt.Disabled // guard:grant-target-resolves'),
     ('grant-target-enabled', 'owner_native_grant_store.go', 'return reason == "" && !tgt.Disabled && tgt.Repo == repo // guard:grant-target-resolves', 'return reason == "" && tgt.Repo == repo // guard:grant-target-resolves'),
 ]
-tests = '^Test(Source|OwnerNativeCommentGrant|CockpitLaunchMarker|OwnerNative(InboxGrant|RepoLess|RepoKey|NoTargetLabel|TargetMatches))'
+tests = '^Test(Source|Policy|OwnerGrantNever|OwnerNativeCommentGrant|CockpitLaunchMarker|OwnerNative(InboxGrant|RepoLess|RepoKey|NoTargetLabel|TargetMatches))'
 files = sorted({m[1] for m in mutants})
 paths = {name: root / 'cmd/divybot' / name for name in files}
 originals = {name: path.read_bytes() for name, path in paths.items()}

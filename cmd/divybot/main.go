@@ -2233,6 +2233,7 @@ type Coord struct {
 	source      sourceGitHub                                                 // injected only by source-binding tests; nil uses gh
 	srcMem      *sourceMemory                                                // source-binding read state; lazily created
 	sourceGrant func(repo string, n int, issueID, body string, key int) bool // test-only grant check; nil uses ownerGrants
+	sourceNamed func(repo string, comment, author int64) bool                // test-only named-grant check; nil uses ownerGrants
 	shadow      *nativeEvidenceShadow                                        // private observation-only; never consulted
 	claudeLinks *claudeLinkStore                                             // Claude session links from the bound native record
 	instance    string                                                       // this process; matches launch progress and heartbeat
