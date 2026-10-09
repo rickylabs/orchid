@@ -116,12 +116,12 @@ func TestDecideFailsOpenWithoutMeter(t *testing.T) {
 	}
 }
 
-func TestDecideHardGateAtCeiling(t *testing.T) {
+func TestDecideCeilingRemainsAdvisory(t *testing.T) {
 	now := time.Now()
 	q := quota{ok: true, seven: RateLimit{UsedPct: 92, ResetsAt: now.Add(48 * time.Hour).Unix()}}
 	d := govCfg().decide(now, q, nil, 5, 8)
-	if d.cap != 0 {
-		t.Fatalf("at ceiling cap should be 0, got %d", d.cap)
+	if d.cap != 16 {
+		t.Fatalf("ceiling must retain physical MaxActive, got %d", d.cap)
 	}
 }
 
@@ -140,14 +140,13 @@ func TestDecideRelaxesDeepUnderBudget(t *testing.T) {
 	}
 }
 
-// At 90% (within the 84-92 slack band) with NO burn samples yet, the static
-// floor must clamp to MinActive immediately — the post-start protection gap.
+// At90 percent the warning never lowers the physical concurrency ceiling.
 func TestDecideSlackBandFloorWithoutSamples(t *testing.T) {
 	now := time.Now()
 	q := quota{ok: true, seven: RateLimit{UsedPct: 90, ResetsAt: now.Add(48 * time.Hour).Unix()}}
 	d := govCfg().decide(now, q, nil, 8, 16)
-	if d.cap != 1 {
-		t.Fatalf("in slack band w/o samples should floor to MinActive(1), got %d", d.cap)
+	if d.cap != 16 {
+		t.Fatalf("slack must retain physical MaxActive, got %d", d.cap)
 	}
 	if d.binding != "weekly" {
 		t.Fatalf("binding = %q", d.binding)
@@ -164,7 +163,7 @@ func TestDecideBelowBandNoSamplesFailsOpen(t *testing.T) {
 	}
 }
 
-// Over-pace: high used% near reset with rising burn => cap brakes below prevCap.
+// High burn estimates remain observations, never reduce admission capacity.
 func TestDecideBrakesWhenOverPace(t *testing.T) {
 	now := time.Now()
 	reset := now.Add(24 * time.Hour).Unix()
@@ -176,10 +175,7 @@ func TestDecideBrakesWhenOverPace(t *testing.T) {
 		samples = append(samples, QuotaSample{Ts: ts, SevenPct: 70 + float64(i)*1.6, SevenReset: reset})
 	}
 	d := govCfg().decide(now, q, samples, 8, 8)
-	if d.cap >= 8 {
-		t.Fatalf("over pace should brake below prevCap(8), got %d (burn %.2f target %.2f)", d.cap, d.burnWeekly, d.targetWeekly)
-	}
-	if !d.overPace {
-		t.Fatal("expected overPace true")
+	if d.cap != 16 {
+		t.Fatalf("burn samples must never reduce physical concurrency, got %d", d.cap)
 	}
 }

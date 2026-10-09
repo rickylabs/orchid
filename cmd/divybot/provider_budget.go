@@ -327,31 +327,7 @@ func buildProviderBudgetDecisions(cfg *ProviderBudgetConfig, now time.Time, vali
 	return rows, nil
 }
 
+// Legacy billing policy remains parseable, but quota/budget observations cannot veto a route.
 func (c *Coord) providerBudgetLaunchReason(agent string, o Overrides, now time.Time) string {
-	if (agent != "opencode" && agent != "opencode-run") || c.cfg.ProviderBudgets == nil {
-		return ""
-	}
-	cfg := c.cfg.ProviderBudgets
-	if !cfg.valid() {
-		return "budget-unavailable"
-	}
-	route, err := resolveOpenCodeRoute(o)
-	if err != nil {
-		return "budget-unavailable"
-	}
-	covered := false
-	for _, p := range cfg.Models {
-		if p.Provider != route.Provider {
-			continue
-		}
-		covered = true
-		if p.Model == route.Model {
-			doc, err := readBudgetCheckpoint(cfg)
-			return evaluateProviderBudget(p, cfg, doc, err == nil, now)
-		}
-	}
-	if covered {
-		return "budget-unavailable"
-	}
 	return ""
 }

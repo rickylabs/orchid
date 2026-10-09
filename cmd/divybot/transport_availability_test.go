@@ -33,16 +33,16 @@ func TestTransportAvailabilityReasons(t *testing.T) {
 	}{
 		{"available", 1, fresh(under, under), 92, "", ""},
 		{"no capacity wins over everything", 0, quota{}, 0, "no-capacity", "blocked by capacity"},
-		{"meter never read", 1, quota{}, 92, "meter-unread", "absent"},
-		{"meter published no window", 1, fresh(RateLimit{}, RateLimit{}), 92, "meter-unread", "absent"},
-		{"meter older than three samples", 1, quota{ok: true, at: now.Add(-4 * sample), five: under, seven: under}, 92, "meter-stale", "stale"},
-		{"meter from the future", 1, quota{ok: true, at: now.Add(time.Minute), five: under, seven: under}, 92, "meter-stale", "stale"},
-		{"ceiling misconfigured", 1, fresh(under, under), 0, "ceiling-misconfigured", "over ceiling"},
-		{"window reset passed", 1, fresh(RateLimit{UsedPct: 10, ResetsAt: now.Unix()}, under), 92, "window-expired", "expired"},
-		{"5h window over the ceiling", 1, fresh(over, under), 92, "5h-ceiling", "over ceiling"},
-		{"weekly window over the ceiling", 1, fresh(under, over), 92, "weekly-ceiling", "over ceiling"},
-		{"weekly only published, over", 1, fresh(RateLimit{}, over), 92, "weekly-ceiling", "over ceiling"},
-		{"both over: the 5h window is checked first", 1, fresh(over, over), 92, "5h-ceiling", "over ceiling"},
+		{"meter never read", 1, quota{}, 92, "", ""},
+		{"meter published no window", 1, fresh(RateLimit{}, RateLimit{}), 92, "", ""},
+		{"meter older than three samples", 1, quota{ok: true, at: now.Add(-4 * sample), five: under, seven: under}, 92, "", ""},
+		{"meter from the future", 1, quota{ok: true, at: now.Add(time.Minute), five: under, seven: under}, 92, "", ""},
+		{"ceiling misconfigured", 1, fresh(under, under), 0, "", ""},
+		{"window reset passed", 1, fresh(RateLimit{UsedPct: 10, ResetsAt: now.Unix()}, under), 92, "", ""},
+		{"5h window over the ceiling", 1, fresh(over, under), 92, "", ""},
+		{"weekly window over the ceiling", 1, fresh(under, over), 92, "", ""},
+		{"weekly only published, over", 1, fresh(RateLimit{}, over), 92, "", ""},
+		{"both over: the 5h window is checked first", 1, fresh(over, over), 92, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := transportAvailabilityReason(tc.budget, tc.q, now, sample, tc.ceiling); got != tc.reason {
@@ -68,7 +68,7 @@ func TestTransportAvailabilitySnapshotMatchesAdmission(t *testing.T) {
 	if snapshot.SchemaVersion != 1 || snapshot.ObservedAt != "2026-09-30T12:00:00.123Z" || snapshot.ValidUntil != "2026-09-30T12:01:00.123Z" {
 		t.Fatalf("snapshot header %+v", snapshot)
 	}
-	want := map[string]string{"claude": "weekly-ceiling", "codex": "", "agy": "no-capacity", "opencode": "no-capacity"}
+	want := map[string]string{"claude": "", "codex": "", "agy": "no-capacity", "opencode": "no-capacity"}
 	var order []string
 	for _, row := range snapshot.Transports {
 		order = append(order, row.Transport)

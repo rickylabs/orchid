@@ -93,7 +93,7 @@ func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Tim
 		// Valid for two poll intervals: one missed tick does not blank it.
 		snapshot := buildTransportAvailability(budget, quotas, now, c.cfg.Governor.sampleIntervalDur(),
 			c.cfg.Governor.WeeklyCeiling, 2*durOr(c.cfg.PollInterval, 30*time.Second), c.cfg.UnmeteredTransports, pools)
-		snapshot.ProviderBudgets, err = buildProviderBudgetDecisions(c.cfg.ProviderBudgets, now, snapshot.ValidUntil)
+		// Legacy budget decisions are not emitted as availability evidence.
 		if err == nil {
 			err = publishTransportAvailability(root, owner, snapshot)
 		}

@@ -1,0 +1,15 @@
+PASS
+Frozen Owner549 source correct; final race/vet/build + guard mutants RUNNING (not green), root kernel127/root-mutant1 UNPROVEN (no sudo). Sign-off/push/ready must wait exits.
+
+Producer: `cmd/divybot/provider_limits.go:limitRateObservation/limitEntryKey/recordLimitOutcome/providerLimitLaunchReason/loadLimitsLocked/compactProviderLimitLedger`
+- 429 `rate_limited` separate private key `scope+"/rate_limited"`, same public `providerLimitOutcome` shape, no enum/field/type change. `activeLimitRefusals` retained but launch skips `limitRateObservation`; hard `quota_exhausted/payment_required` still `quota-unavailable` until strictly-later same-clock verified success. `recordLimitOutcome` per-key `SeenThrough`, `NativeAt==ObservedAt`, older rate `return nil` no fence, older hard fences, cross-clock success ignored, equal-time refusal wins. `ResetsAt`/native time preserved, validated by new `TestProviderLimitsRateObservationNeverBlocksOrClearsHardRefusal` (rate-only allow, later-429 cannot erase hard, 2-row publish, restart, success clears, fresh/older rate informational).
+- Reservation `providerLimitMaxScopes=512`, `Reserved[limitScope]` pre-dispatch in `loadLimitsLocked`+`providerLimitLaunchReason`, `len(Entries)<=1024`, retired 4096 fences, legacy rate `scope->scope/rate_limited` migrate before validation with duplicate fence. Compaction only `succeeded Model!=nil` inactive, keeps `rateExists` in sweep; file `Reserved` rebuilt from `Entries` on next load so rate scope self-heals — note as debt, not veto bypass.
+- Native proof/privacy/durable unchanged: `nativeLimitError`, `recordOpenCodeLimit`, fixed own-key endpoint, `limitPublic`, 0600/nofollow/lease, restart/deletion/replay/binding tests unchanged (rebind test moved to `quota_exhausted` since rate no longer blocks — correct).
+
+Harness: `packages/contracts/src/provider-limits.ts:readProviderLimitSnapshot`, `packages/telemetry/src/provider-limits.ts:readProviderLimitsFile`, `provider-limits-cli.ts` unchanged, closed decoder allows both hard+rate rows (no outcome dedup), 100%-meter, binding, accessor, 0600/symlink/fixed-diagnostic preserved.
+
+Needed: terminal `go test -race ./...`, `go vet`, `go build`, Harness wrappers 0; 10 mutants incl `underreserve-rate-evidence/rate-observation-veto/rate-overwrites-hard-refusal` red with exact SHA restore; Cockpit549/550 consumer preserve hard through later-429 separately owned.
+
+Provenance: SAME independent Meta MuseSpark1.3/xhigh producer644 conversation, call3/maximum5, no terminal failure verdicts. Call1 output-exhaust UNPROVEN; call2PASS prior source; call3PASS finalOwner549 bytes. At review time configured gates were pending; source PASS did not certify them. They are now terminal as recorded in validation.md: all nonprivileged gates0, privileged127/1 UNPROVEN. No source edit after this review.
+
+Final completion receipt: unchanged reviewed product manifests verified after all mutations restored; renewed separately owned Cockpit550 fd059e6 actual-produced four-fixture catalog/admission proof0. This record does not turn privileged127/1 into passing gates.

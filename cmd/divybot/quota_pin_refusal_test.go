@@ -58,7 +58,10 @@ func TestQuotaBlockedPinReportsQuota(t *testing.T) {
 			if tc.codexQuota {
 				c.gov.q["codex"] = q
 			}
-			budget := map[string]int{"claude": 1, "codex": 1, "agy": 1}
+			budget := map[string]int{"claude": 1, "codex": 0, "agy": 1}
+			if tc.codexQuota {
+				budget["codex"] = 1
+			}
 			is := Issue{ID: "synthetic-node", Number: 1, Title: "Synthetic", Body: "/swarm\ntier: feature\nrole: implementation\n\nSynthetic task"}
 			refusals := []matrixRefusal{}
 			resolves := 0
@@ -83,7 +86,7 @@ func TestQuotaBlockedPinReportsQuota(t *testing.T) {
 			if len(refusals) != 1 || refusals[0].ReasonCode != tc.want || !validMatrixRefusal(refusals[0]) {
 				t.Fatalf("want one valid %s refusal, got %+v", tc.want, refusals)
 			}
-			if tc.want == "quota-unavailable" && !strings.Contains(refusals[0].Detail, "codex: absent") {
+			if tc.want == "quota-unavailable" && !strings.Contains(refusals[0].Detail, "codex: blocked by capacity") {
 				t.Fatalf("quota refusal does not name the blocked transport: %q", refusals[0].Detail)
 			}
 			if resolves != tc.resolves {
