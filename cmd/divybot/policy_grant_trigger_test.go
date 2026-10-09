@@ -52,7 +52,13 @@ func TestPolicyGrantMatchesOnlyItsCommentAndMember(t *testing.T) {
 		}
 	}
 	binding := func(key int) Issue {
-		return Issue{ID: is.ID, Number: key, Title: is.Title, Body: policyBody, Labels: []string{"fixture-target"}, Source: &issueSource{Repo: "example/project", Number: 7}}
+		return Issue{ID: is.ID, Number: key, Title: is.Title, Body: policyBody, Labels: []string{"fixture-target"}, Source: &issueSource{Repo: "example/project", Number: 7, Author: policyMember}}
+	}
+	// Admission is the twin fence: another author on the granted comment is refused.
+	owner := binding(3100000070)
+	owner.Source.Author = ownerGitHubID
+	if _, err := s.matrixForIssue(owner, "example/project"); err == nil {
+		t.Fatal("admission accepted a policy grant for another author")
 	}
 	// Admission is the twin fence: another comment with the same body is refused.
 	if _, err := s.matrixForIssue(binding(3100000071), "example/project"); err == nil {
@@ -190,5 +196,46 @@ func TestSourcePolicyGrantRefusesAnotherBody(t *testing.T) {
 	c.sourceTick(context.Background())
 	if b := c.st.SourceBindings[3100000090]; b == nil || b.Closed != "refused" {
 		t.Fatalf("a comment whose body differs from its grant was not refused: %+v", b)
+	}
+}
+
+// The member edits the comment after Orchid kept it and before the grant for
+// its first body arrives: the edited comment is read again and never launched.
+func TestSourcePolicyRecheckReadsTheCurrentComment(t *testing.T) {
+	s, r, is := policyGrantFixture(t, 3100000095, policyBody)
+	c := &Coord{cfg: s.cfg, st: loadState(filepath.Join(t.TempDir(), "state.json")), ownerGrants: s}
+	f := newFakeSource()
+	c.source = f
+	f.issues["example/project#7"] = sourceIssueView{NodeID: is.ID, Title: is.Title, State: "OPEN"}
+	c.sourceTick(context.Background())
+	at := c.st.SourceCursors["example/project"].Add(time.Second)
+	f.post("example/project", 7, 3100000095, policyMember, policyBody, at)
+	c.sourceTick(context.Background())
+	f.mu.Lock()
+	edited := f.feed["example/project"][0]
+	edited.Body, edited.UpdatedAt = policyBody+"\nEdited.", at.Add(time.Minute)
+	f.feed["example/project"][0] = edited
+	f.mu.Unlock()
+	if ack := s.install(context.Background(), r); ack.State != "LIVE" {
+		t.Fatalf("policy grant not LIVE: %s %s", ack.State, ack.Reason)
+	}
+	c.sourceTick(context.Background())
+	c.sourceTick(context.Background())
+	if b := c.st.SourceBindings[3100000095]; b != nil && b.Closed == "" {
+		t.Fatal("an edited comment was bound for launch from its kept copy")
+	}
+}
+
+// The test hook models owner grants: it never approves a member's comment, even
+// when a policy grant names that comment for another body.
+func TestSourceGrantHookNeverCombinesAuthorities(t *testing.T) {
+	c := &Coord{}
+	c.sourceGrant = func(string, int, string, string, int) bool { return true }
+	c.sourceNamed = func(string, int64, int64) bool { return true }
+	if c.sourceGrantReady("example/project", 7, "node", policyBody, 3100000096, policyMember) {
+		t.Fatal("an owner grant and a policy grant combined to approve a member comment")
+	}
+	if !c.sourceGrantReady("example/project", 7, "node", policyBody, 3100000096, ownerGitHubID) {
+		t.Fatal("the owner path changed")
 	}
 }

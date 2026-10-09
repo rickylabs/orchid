@@ -118,6 +118,18 @@ func (f *fakeSource) comment(_ context.Context, _ string, id int64, etag string)
 	return true, meta, nil
 }
 
+func (f *fakeSource) current(_ context.Context, repo string, id int64) (sourceComment, bool, sourceMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads++
+	for _, c := range f.feed[repo] {
+		if c.ID == id && !f.deleted[id] {
+			return c, true, sourceMeta{Remaining: f.remaining}, nil
+		}
+	}
+	return sourceComment{}, false, sourceMeta{Remaining: f.remaining}, nil
+}
+
 func (f *fakeSource) reply(_ context.Context, repo string, n int, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

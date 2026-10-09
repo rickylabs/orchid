@@ -917,7 +917,7 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 			return MatrixConfig{}, matrixReason("override-invalid")
 		}
 		if history.Grant.IssueID == is.ID && history.Grant.Repo == repo && history.Grant.BriefDigest == briefDigest(is) && s.targetMatches(is, is.Labels, repo) &&
-			(history.Request.CommentID == 0 || (subject.comment && history.Request.CommentID == int64(is.Number))) { // guard:grant-admission-comment-id
+			(!subject.comment || commentGrantNames(history.Request, int64(is.Number), sourceAuthor(is))) && (subject.comment || history.Request.CommentID == 0) { // guard:grant-admission-comment-id
 			record, _, e := s.readRecordLocked(intent.OperationID)
 			if e != nil || !reflect.DeepEqual(s.active[intent.OperationID], record) {
 				return MatrixConfig{}, matrixReason("override-invalid")
@@ -1011,6 +1011,15 @@ func (s *ownerNativeGrantStore) commentGrantNamed(repo string, comment, author i
 		}
 	}
 	return false
+}
+
+// sourceAuthor is a comment binding's author; none means a binding made when
+// only the owner's comments could be bound.
+func sourceAuthor(is Issue) int64 {
+	if is.Source == nil || is.Source.Author == 0 {
+		return ownerGitHubID
+	}
+	return is.Source.Author
 }
 
 type ownerNativeClaim struct {
