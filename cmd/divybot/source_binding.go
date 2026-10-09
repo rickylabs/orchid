@@ -68,7 +68,9 @@ type sourceBinding struct {
 	Body      string          `json:"body,omitempty"` // the trigger comment, LF only
 	URL       string          `json:"url,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
-	Closed    string          `json:"closed,omitempty"` // terminal decision; "" while open
+	Closed    string          `json:"closed,omitempty"`    // terminal decision; "" while open
+	Refusal   string          `json:"refusal,omitempty"`   // the reason, when Closed is "refused"
+	Regranted bool            `json:"regranted,omitempty"` // reconsidered once for a late policy grant
 	Launched  bool            `json:"launched,omitempty"`
 	Replies   map[string]bool `json:"replies,omitempty"` // delivered
 	Outbox    []sourceReply   `json:"outbox,omitempty"`  // decided, not yet delivered
@@ -642,8 +644,13 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 	}
 	key := int(cm.ID)
 	c.st.mu.Lock()
-	_, bound := c.st.SourceBindings[key]
+	prior, bound := c.st.SourceBindings[key]
+	reopen := bound && prior.regrantable(cm.AuthorID)
 	c.st.mu.Unlock()
+	// A comment refused only because no grant named it yet, the owner's included,
+	// is considered once more when a policy grant names it, by every check below.
+	reopen = reopen && c.sourceGrantNamed(repo, cm.ID, cm.AuthorID) // guard:source-regrant-named
+	bound = bound && !reopen
 	if bound { // guard:source-once
 		return true // edits and re-reads never relaunch
 	}
@@ -712,18 +719,38 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 		}
 	}
 	if refusal != "" {
-		// The decision and its reply are persisted together, then delivered.
-		b.Closed = "refused"
-		b.Outbox = []sourceReply{sourceReplyFor(b, "refused", refusal, "", fmt.Sprintf("divybot: launch refused. Reason: `%s`. %s Nothing was launched. Post a new /swarm comment to try again.", refusal, matrixReasons[refusal].hint))}
+		b.Closed, b.Refusal = "refused", refusal
 	}
 	c.st.mu.Lock()
 	if c.st.SourceBindings == nil {
 		c.st.SourceBindings = map[int]*sourceBinding{}
 	}
+	if reopen {
+		if c.st.SourceBindings[key] != prior {
+			c.st.mu.Unlock()
+			return true // decided meanwhile
+		}
+		// The replies already decided for the refusal are kept, never repeated.
+		b.Regranted, b.Replies, b.Outbox = true, prior.Replies, append([]sourceReply(nil), prior.Outbox...)
+	}
+	if refusal != "" {
+		// The decision and its reply are persisted together, then delivered.
+		if r := sourceReplyFor(b, "refused", refusal, "", fmt.Sprintf("divybot: launch refused. Reason: `%s`. %s Nothing was launched. Post a new /swarm comment to try again.", refusal, matrixReasons[refusal].hint)); !b.Replies[r.ID] && !sourceQueued(b, r.ID) {
+			b.Outbox = append(b.Outbox, r)
+		}
+	}
 	c.st.SourceBindings[key] = b
 	err = c.st.saveLocked()
+	var saved stateSaveError
+	if err != nil && errors.As(err, &saved) && saved.afterRename { // guard:source-bind-after-rename
+		err = nil // the decision reached the state file; memory keeps it too
+	}
 	if err != nil {
-		delete(c.st.SourceBindings, key)
+		if reopen {
+			c.st.SourceBindings[key] = prior
+		} else {
+			delete(c.st.SourceBindings, key)
+		}
 	}
 	c.st.mu.Unlock()
 	if err != nil {
@@ -737,12 +764,42 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 		mem.mu.Unlock()
 	}
 	if refusal != "" {
-		// Logged once, after the decision is saved; the binding is never reconsidered.
+		// Logged after the decision is saved; only a late policy grant reconsiders it, once.
 		log.Printf("source triggers: %s#%d comment %d refused (%s): %s", repo, n, cm.ID, refusal, matrixReasons[refusal].hint) // guard:source-refusal-log
 	} else {
 		log.Printf("source triggers: bound %s#%d comment %d", repo, n, cm.ID)
 	}
 	return true
+}
+
+// regrantable is true for a binding refused only because no grant named its
+// comment, by this author, never launched and never reconsidered.
+func (b *sourceBinding) regrantable(author int64) bool {
+	return b.Closed == "refused" && b.refusal() == "source-grant-missing" && !b.Launched && !b.Regranted && b.author() == author
+}
+
+// refusal is the reason a binding was refused. A binding saved before the
+// reason was recorded carries it only in its one refusal reply.
+func (b *sourceBinding) refusal() string {
+	if b.Refusal != "" || b.Closed != "refused" {
+		return b.Refusal
+	}
+	var ids []string
+	for id := range b.Replies {
+		ids = append(ids, id)
+	}
+	for _, r := range b.Outbox {
+		ids = append(ids, r.ID)
+	}
+	if len(ids) != 1 { // guard:source-legacy-refusal-exact
+		return "" // ambiguous: stays terminal
+	}
+	state, rest, _ := strings.Cut(ids[0], "\x00")
+	reason, pr, _ := strings.Cut(rest, "\x00")
+	if state != "refused" || pr != "" {
+		return ""
+	}
+	return reason
 }
 
 // sourceGrantReady is true when an installed comment grant matches this exact
@@ -769,7 +826,7 @@ func (c *Coord) sourceGrantNamed(repo string, comment, author int64) bool {
 	return c.ownerGrants.commentGrantNamed(repo, comment, author)
 }
 
-// sourcePendingLimit bounds the fresh non-owner /swarm comments kept for a grant.
+// sourcePendingLimit bounds the fresh /swarm comments kept for a late grant.
 const sourcePendingLimit = 256
 
 type sourcePending struct {
@@ -777,7 +834,8 @@ type sourcePending struct {
 	cm   sourceComment
 }
 
-// awaitSourceGrant keeps a fresh non-owner /swarm comment so a grant installed
+// awaitSourceGrant keeps a fresh /swarm comment no grant names yet (a non-owner
+// comment, or one refused for want of a grant) so a grant installed
 // after the listing moved past it is still seen. Bounded; a restart forgets it.
 func (c *Coord) awaitSourceGrant(repo string, cm sourceComment, now time.Time) {
 	if now.Sub(cm.CreatedAt) > sourceTriggerFreshness || !cm.UpdatedAt.Equal(cm.CreatedAt) {
@@ -795,9 +853,38 @@ func (c *Coord) awaitSourceGrant(repo string, cm sourceComment, now time.Time) {
 	mem.pending[cm.ID] = sourcePending{repo: repo, cm: cm}
 }
 
+// restoreSourceAwaits keeps each fresh saved refusal a late policy grant may
+// still reopen, a restart between the refusal and the grant included.
+// The comment is read as it is now before it is reconsidered.
+func (c *Coord) restoreSourceAwaits(now time.Time) {
+	var kept []sourcePending
+	c.st.mu.Lock()
+	for key, b := range c.st.SourceBindings {
+		if b.regrantable(b.author()) && now.Sub(b.CreatedAt) <= sourceTriggerFreshness {
+			kept = append(kept, sourcePending{repo: b.Repo, cm: sourceComment{ID: int64(key), AuthorID: b.author(), CreatedAt: b.CreatedAt, UpdatedAt: b.CreatedAt}})
+		}
+	}
+	c.st.mu.Unlock()
+	for _, p := range kept {
+		c.awaitSourceGrant(p.repo, p.cm, now) // guard:source-restore-awaits
+	}
+}
+
+// spendSourceRegrant ends a refusal's one reconsideration when its comment was
+// deleted or failed a check before it was bound, so it is never read again.
+func (c *Coord) spendSourceRegrant(key int) {
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	if b := c.st.SourceBindings[key]; b != nil && b.regrantable(b.author()) {
+		b.Regranted = true // guard:source-regrant-spent
+		_ = c.st.saveLocked()
+	}
+}
+
 // recheckSourceGrants considers again each kept comment a grant now names. Each
 // issue read spends the tick's budget; a comment past freshness is dropped.
 func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget int) int {
+	c.restoreSourceAwaits(now)
 	api, mem := c.sourceAPI(), c.sourceMem()
 	mem.mu.Lock()
 	var ready []sourcePending
@@ -828,6 +915,7 @@ func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget i
 			mem.mu.Lock()
 			delete(mem.pending, p.cm.ID)
 			mem.mu.Unlock()
+			c.spendSourceRegrant(int(p.cm.ID))
 			continue
 		}
 		lookup := func(n int) (sourceIssueView, error) {
@@ -843,6 +931,7 @@ func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget i
 			mem.mu.Lock()
 			delete(mem.pending, p.cm.ID)
 			mem.mu.Unlock()
+			c.spendSourceRegrant(int(p.cm.ID))
 		}
 	}
 	return budget
