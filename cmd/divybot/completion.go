@@ -263,6 +263,9 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if j == nil {
 		return fenced
 	}
+	if fenced && fence.PublicationUnconfirmed && (fence.Phase == "retiring" || fence.Phase == "close-failed") {
+		return c.releaseLegacyFailureFence(n, fence) // guard:legacy-failure-fence
+	}
 	if j.Agent != "codex" && j.Agent != "claude" && j.Agent != "opencode" && j.Agent != "agy" {
 		return fenced // other native adapters own their completion evidence
 	}
@@ -463,6 +466,24 @@ func (c *Coord) openCodeCompletionWithObserver(ctx context.Context, j *Job, nati
 		return false, matrixReason("opencode-output-unconfirmed")
 	}
 	return true, nil
+}
+
+// A fence left by the removed failure grace was decided on an ended turn alone,
+// so it authorizes no close. Before its close was delivered it is released and
+// supervision resumes; a delivered close keeps its absence bookkeeping.
+func (c *Coord) releaseLegacyFailureFence(n int, fence completedRun) bool {
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	if current, ok := c.st.CompletedRuns[n]; !ok || current != fence {
+		return true
+	}
+	delete(c.st.CompletedRuns, n)
+	if c.st.saveLocked() != nil {
+		c.st.CompletedRuns[n] = fence
+		return true
+	}
+	log.Printf("issue #%d: legacy failure fence released; supervision resumes", n)
+	return false
 }
 
 // A run torn down as a failure states the live lanes it stops, from the native

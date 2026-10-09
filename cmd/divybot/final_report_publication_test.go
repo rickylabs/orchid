@@ -505,7 +505,7 @@ func TestCompletionEndedClaudeTurnWithLiveChildIsNeverRetired(t *testing.T) {
 		if c.retireCompleted(context.Background(), 7, j, ref, true) {
 			t.Fatal("an ended turn retired the run")
 		}
-		j.FinalDoneAt, j.FinalDoneSeq = time.Now().Add(-time.Hour), ref.StateChangeSeq // legacy grace state grants nothing
+		j.FinalDoneAt, j.FinalDoneSeq = time.Now().Add(-time.Hour), 42 // the seat's own state: legacy grace grants nothing
 	}
 	if *closes != 0 || c.st.Jobs[7] != j || len(c.st.CompletedRuns) != 0 {
 		t.Fatal("waiting coordinator was torn down or fenced")
@@ -515,6 +515,31 @@ func TestCompletionEndedClaudeTurnWithLiveChildIsNeverRetired(t *testing.T) {
 	}
 	if c.admissionBudget(map[int]agentRef{7: ref})["claude"] != 0 {
 		t.Fatal("seat idle between turns released capacity")
+	}
+}
+
+func TestCompletionLegacyFailureFenceAuthorizesNoClose(t *testing.T) {
+	for _, phase := range []string{"retiring", "close-failed", "close-sent"} {
+		t.Run(phase, func(t *testing.T) {
+			c, j, _, _, closes := claudeCoordinatorFixture(t)
+			c.actions.completed = nil
+			fence := completedRun{DispatchKey: j.DispatchKey, NativeSessionID: "thread-fixture", StateChangeSeq: 42, Phase: phase, PublicationUnconfirmed: true}
+			c.st.CompletedRuns = map[int]completedRun{7: fence}
+			c.st.save()
+			c.st = loadState(c.st.path) // as restored after the deploy
+			j = c.st.Jobs[7]
+			retired := c.retireCompleted(context.Background(), 7, j, completionRef(j), true)
+			_, kept := loadState(c.st.path).CompletedRuns[7]
+			if phase == "close-sent" {
+				if !retired || !kept {
+					t.Fatal("a delivered close lost its absence bookkeeping")
+				}
+				return
+			}
+			if retired || kept || *closes != 0 || c.st.Jobs[7] == nil {
+				t.Fatal("a legacy failure fence closed a waiting coordinator")
+			}
+		})
 	}
 }
 
