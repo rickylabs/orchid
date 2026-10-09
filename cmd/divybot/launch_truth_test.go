@@ -103,3 +103,11 @@ func TestDoneOccupantReleasesAdmissionOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeSeatIdleBetweenTurnsHoldsAdmission(t *testing.T) {
+	j := &Job{Agent: "claude", Host: "h1", Pane: "w1:p1", Workspace: "w1"}
+	ref := agentRef{Agent: "claude", Host: "h1", Pane: "w1:p1", Workspace: "w1", Status: "done"}
+	if !occupiesAdmissionSlot(j, ref, true) {
+		t.Fatal("a Claude seat between turns released its slot")
+	}
+}

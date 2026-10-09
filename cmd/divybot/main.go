@@ -307,8 +307,8 @@ type Job struct {
 	RemoteStopOperation   string            `json:"remote_stop_operation,omitempty"`
 	RemoteControl         *remoteControlRun `json:"remote_control,omitempty"`
 	FinalReportManaged    bool              `json:"final_report_managed,omitempty"`
-	FinalDoneAt           time.Time         `json:"final_done_at,omitempty"`
-	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"`
+	FinalDoneAt           time.Time         `json:"final_done_at,omitempty"`  // legacy, unread: an ended turn starts no failure grace
+	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"` // legacy, unread
 	OwnerMismatchNotice   string            `json:"owner_mismatch_notice,omitempty"`
 	CompletionUnprovenSeq *uint64           `json:"completion_unproven_seq,omitempty"`
 	GoalDelivery          string            `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
@@ -2830,6 +2830,9 @@ func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
 	if j != nil && j.RemoteControl != nil {
 		return true
 	} // released only after native and paired absence proof
+	if j != nil && accountKey(j.Agent) == "claude" {
+		return true // guard:claude-idle-capacity; an ended Claude turn is not the end of its run
+	}
 	if !known || j == nil || j.Pane == "" || j.Workspace == "" {
 		return true
 	}
@@ -3708,15 +3711,16 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 			return
 		}
 		c.transitionGoal(ctx, j, "paused")
-		log.Printf("issue #%d: operator timeout (%s) exceeded — tearing down", n, j.Overrides.Timeout)
+		lanes := c.liveChildLanes(ctx, host, j)
+		log.Printf("issue #%d: operator timeout (%s) exceeded%s — tearing down", n, j.Overrides.Timeout, lanes)
 		cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
 		if _, binding := c.sourceBinding(n); binding {
 			// Never close the owner's source issue; end the binding instead.
-			c.replySource(cctx, n, "stopped", "operator-timeout", "", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded; agent torn down. To retry, post a new /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
+			c.replySource(cctx, n, "stopped", "operator-timeout", "", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded%s; agent torn down. To retry, post a new /swarm comment with a longer `timeout:`.", j.Overrides.Timeout, lanes))
 			c.closeSource(n, "stopped")
 		} else {
 			_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
-				"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout))
+				"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded%s — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout, lanes))
 		}
 		ccancel()
 		cleaned := c.teardown(ctx, n, j, "operator-timeout")

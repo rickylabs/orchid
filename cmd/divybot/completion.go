@@ -308,23 +308,20 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			return false
 		}
 		complete, err := c.completionEvidence(check, host, j, native)
-		publicationUnconfirmed := false
 		if err != nil || !complete {
+			// An ended turn is never completion: a coordinator ends its turn to
+			// wait on background lanes. Only the run's own final report or native
+			// goal, an explicit stop or its timeout ends it; the seat keeps its
+			// capacity and supervision continues without continuation input.
 			c.noteCompletionUnproven(j, first.StateChangeSeq)
-			// A file/publication request is not native terminal proof. A stable
-			// done Claude seat may instead be retired as an explicit failure,
-			// after a bounded grace, without claiming assignment success.
-			if !c.finalPublicationFailureDue(j, first.StateChangeSeq) || check.Err() != nil {
-				return false // supervision continues without continuation input
-			}
-			publicationUnconfirmed = true
+			return false // guard:ended-turn-not-completion
 		}
 		agents, err = c.actionList(check, host)
 		second, valid := completionOccupant(agents, j, native)
 		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq || !c.checkRemoteHook(check, host, j) || check.Err() != nil {
 			return false
 		}
-		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring", PublicationUnconfirmed: publicationUnconfirmed}
+		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring"}
 		c.st.mu.Lock()
 		if c.st.CompletedRuns == nil {
 			c.st.CompletedRuns = map[int]completedRun{}
@@ -468,22 +465,20 @@ func (c *Coord) openCodeCompletionWithObserver(ctx context.Context, j *Job, nati
 	return true, nil
 }
 
-// This is failure cleanup, not a new definition of native completion. Codex
-// active-goal ownership and the other adapters' terminal guards stay intact.
-func (c *Coord) finalPublicationFailureDue(j *Job, seq uint64) bool {
-	if !j.FinalReportManaged || j.Agent != "claude" {
-		return false
+// A run torn down as a failure states the live lanes it stops, from the native
+// process tree only. An unreadable tree is reported as unknown, never as empty.
+func (c *Coord) liveChildLanes(ctx context.Context, h Host, j *Job) string {
+	if j.Pane == "" {
+		return ""
 	}
-	c.st.mu.Lock()
-	defer c.st.mu.Unlock()
-	now := time.Now()
-	if j.FinalDoneAt.IsZero() || j.FinalDoneSeq != seq {
-		priorAt, priorSeq := j.FinalDoneAt, j.FinalDoneSeq
-		j.FinalDoneAt, j.FinalDoneSeq = now, seq
-		if c.st.saveLocked() != nil {
-			j.FinalDoneAt, j.FinalDoneSeq = priorAt, priorSeq
-		}
-		return false
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	p, err := c.actionStopProcess(pctx, h, j.Pane, j.Agent)
+	if err != nil {
+		return "; live child processes unknown (native process tree unreadable)"
 	}
-	return !j.FinalDoneAt.After(now) && now.Sub(j.FinalDoneAt) >= 2*time.Minute
+	if live := len(p.Members) - 1; live > 0 { // guard:timeout-live-children
+		return fmt.Sprintf("; stopping %d live child processes", live)
+	}
+	return ""
 }
