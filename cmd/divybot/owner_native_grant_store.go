@@ -43,6 +43,21 @@ type ownerNativeInstallRequest struct {
 	// and ExpectedBriefDigest the sha256 of the exact comment body. Absent = an
 	// inbox issue, unchanged.
 	Trigger string `json:"trigger,omitempty"`
+	// CommentID and AuthorID bind a comment grant to one /swarm comment that
+	// already exists, and to its author. Policy is the authority of a grant the
+	// Cockpit installs under a saved launch policy instead of an owner approval;
+	// its member is the comment author. Absent = the owner's comment to come.
+	CommentID int64                       `json:"comment_id,omitempty"`
+	AuthorID  int64                       `json:"author_id,omitempty"`
+	Policy    *ownerNativePolicyAuthority `json:"policy,omitempty"`
+}
+
+// ownerNativePolicyAuthority names the saved launch policy revision that allows
+// a member's comment, so every launch it grants is traceable to that revision.
+type ownerNativePolicyAuthority struct {
+	PolicyID string `json:"policy_id"`
+	Revision string `json:"revision"`
+	Member   int64  `json:"member"`
 }
 
 type ownerNativeApproval struct {
@@ -215,7 +230,32 @@ func newOwnerNativeGrantStore(ctx context.Context, cfg *Config, options ownerNat
 func ownerNativeRequestValid(r ownerNativeInstallRequest) bool {
 	return r.SchemaVersion == 1 && actionIDPattern.MatchString(r.OperationID) && ownerNativeApprovalRef.MatchString(r.ApprovalRef) && r.IssueNumber > 0 && cleanText(r.ExpectedIssueID) && len(r.ExpectedIssueID) <= 256 &&
 		repositoryName.MatchString(r.Target) && digestPattern.MatchString(r.ExpectedBriefDigest) && budgetTierPattern.MatchString(r.Tier) &&
-		profileStem.MatchString(strings.ReplaceAll(r.Role, "_", "-")) && profileStem.MatchString(r.Profile) && validOwnerNativeOverride(r.NativeOverride) && (r.Trigger == "" || r.Trigger == ownerNativeCommentTrigger)
+		profileStem.MatchString(strings.ReplaceAll(r.Role, "_", "-")) && profileStem.MatchString(r.Profile) && validOwnerNativeOverride(r.NativeOverride) && (r.Trigger == "" || r.Trigger == ownerNativeCommentTrigger) && ownerNativeCommentBindingValid(r)
+}
+
+// ownerNativeCommentBindingValid: a comment ID and its author come together and
+// only on a comment trigger; a policy grant always names both, and its member
+// is that author.
+func ownerNativeCommentBindingValid(r ownerNativeInstallRequest) bool {
+	if (r.CommentID == 0) != (r.AuthorID == 0) || r.CommentID < 0 || r.AuthorID < 0 {
+		return false
+	}
+	if r.CommentID != 0 && r.Trigger != ownerNativeCommentTrigger {
+		return false
+	}
+	if p := r.Policy; p != nil { // guard:policy-grant-binds-comment
+		return r.CommentID > 0 && p.Member == r.AuthorID && cleanText(p.PolicyID) && len(p.PolicyID) <= 128 && cleanText(p.Revision) && len(p.Revision) <= 128
+	}
+	return true
+}
+
+// ownerNativeAuthorizer is the approval's authority: the owner, or a saved
+// launch policy. The two never share an approval digest.
+func ownerNativeAuthorizer(r ownerNativeInstallRequest) string {
+	if r.Policy != nil {
+		return "policy"
+	}
+	return "eric"
 }
 
 func (s *ownerNativeGrantStore) issueKey(n int) string {
@@ -315,7 +355,7 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 		if !sourceRevision.MatchString(s.cfg.Matrix.Revision) || !sourceRevision.MatchString(target) {
 			return "", ownerNativeWhy("the matrix or target revision is not pinned")
 		}
-		raw, err := json.Marshal(ownerNativeApproval{SchemaVersion: 1, Authorizer: "eric", Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: target, Request: r})
+		raw, err := json.Marshal(ownerNativeApproval{SchemaVersion: 1, Authorizer: ownerNativeAuthorizer(r), Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: target, Request: r})
 		if err != nil {
 			return "", errMatrix
 		}
@@ -323,7 +363,7 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 	}
 	raw, err := ownerNativePrivateRead(path, *s.options.OperatorUID)
 	var a ownerNativeApproval
-	if err != nil || ownerNativeStrictJSON(raw, &a) != nil || a.SchemaVersion != 1 || a.Authorizer != "eric" || a.Inbox != s.cfg.Inbox ||
+	if err != nil || ownerNativeStrictJSON(raw, &a) != nil || a.SchemaVersion != 1 || a.Authorizer != ownerNativeAuthorizer(r) || a.Inbox != s.cfg.Inbox ||
 		!sourceRevision.MatchString(a.MatrixRevision) || a.MatrixRevision != s.cfg.Matrix.Revision ||
 		!sourceRevision.MatchString(a.TargetRevision) || a.TargetRevision != s.cfg.Matrix.TargetRevisions[r.Target] || !reflect.DeepEqual(a.Request, r) {
 		return "", ownerNativeWhy("an operator approval file exists for this launch and does not match it")
@@ -876,7 +916,8 @@ func (s *ownerNativeGrantStore) matrixForIssueLocked(ctx context.Context, is Iss
 		if e != nil || ownerNativeStrictJSON(recordRaw, &history) != nil || shaText(recordRaw) != intent.RecordChecksum || history.Request.OperationID != intent.OperationID || s.requestSubject(history.Request) != subject {
 			return MatrixConfig{}, matrixReason("override-invalid")
 		}
-		if history.Grant.IssueID == is.ID && history.Grant.Repo == repo && history.Grant.BriefDigest == briefDigest(is) && s.targetMatches(is, is.Labels, repo) {
+		if history.Grant.IssueID == is.ID && history.Grant.Repo == repo && history.Grant.BriefDigest == briefDigest(is) && s.targetMatches(is, is.Labels, repo) &&
+			(history.Request.CommentID == 0 || (subject.comment && history.Request.CommentID == int64(is.Number))) { // guard:grant-admission-comment-id
 			record, _, e := s.readRecordLocked(intent.OperationID)
 			if e != nil || !reflect.DeepEqual(s.active[intent.OperationID], record) {
 				return MatrixConfig{}, matrixReason("override-invalid")
@@ -918,8 +959,10 @@ func (s *ownerNativeGrantStore) subjectIssue(subject ownerNativeSubject, is Issu
 }
 
 // commentGrantReady is true when exactly one active comment grant matches the
-// source issue and the comment body digest, unclaimed or claimed by this binding.
-func (s *ownerNativeGrantStore) commentGrantReady(repo string, number int, issueID, digest string, binding int) bool {
+// source issue and the comment body digest, unclaimed or claimed by this binding,
+// and the comment's author: a grant naming a comment matches only that comment
+// and its author; a grant naming none matches only the owner's comment.
+func (s *ownerNativeGrantStore) commentGrantReady(repo string, number int, issueID, digest string, binding int, author int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.healthy() {
@@ -931,6 +974,9 @@ func (s *ownerNativeGrantStore) commentGrantReady(repo string, number int, issue
 		if s.requestSubject(record.Request) != subject || record.Grant.IssueID != issueID || record.Grant.Repo != repo || record.Grant.BriefDigest != digest {
 			continue
 		}
+		if !commentGrantNames(record.Request, int64(binding), author) { // guard:source-grant-author
+			continue
+		}
 		var claim ownerNativeClaim
 		raw, err := ownerNativePrivateRead(filepath.Join(s.options.StoreRoot, "claims", ownerNativeOperationKey(operation)+".json"), os.Getuid())
 		if err == nil && (ownerNativeStrictJSON(raw, &claim) != nil || claim.Binding != binding) {
@@ -939,6 +985,32 @@ func (s *ownerNativeGrantStore) commentGrantReady(repo string, number int, issue
 		matches++
 	}
 	return matches == 1
+}
+
+// commentGrantNames: a grant bound to a comment names exactly that comment and
+// author; an unbound grant is the owner's and names only the owner's comments.
+func commentGrantNames(r ownerNativeInstallRequest, comment, author int64) bool {
+	if r.CommentID != 0 {
+		return r.CommentID == comment && r.AuthorID == author
+	}
+	return author == ownerGitHubID
+}
+
+// commentGrantNamed is true when an active grant names this comment and author
+// in this repository. It reads nothing; the full match is commentGrantReady.
+func (s *ownerNativeGrantStore) commentGrantNamed(repo string, comment, author int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.healthy() {
+		return false
+	}
+	for _, record := range s.active {
+		r := record.Request
+		if r.Trigger == ownerNativeCommentTrigger && r.CommentID != 0 && strings.EqualFold(r.Target, repo) && commentGrantNames(r, comment, author) {
+			return true
+		}
+	}
+	return false
 }
 
 type ownerNativeClaim struct {
