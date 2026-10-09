@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -466,7 +468,10 @@ func TestFinalReportMatchedUnfencedConfirmedOnly(t *testing.T) {
 	}
 }
 
-func TestFinalReportMissingClaudeFinalReapsAsFailureWithoutSuccessOrReplay(t *testing.T) {
+// claudeCoordinatorFixture is a Claude run whose turn has ended (seat done)
+// while its process tree still holds a live background lane.
+func claudeCoordinatorFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int) {
+	t.Helper()
 	c, j, seatGone, processGone, closes := completionFixture(t)
 	j.Agent, j.Label = "claude", "claude-fixture"
 	j.FinalReportManaged = true
@@ -484,54 +489,131 @@ func TestFinalReportMissingClaudeFinalReapsAsFailureWithoutSuccessOrReplay(t *te
 		a.AgentSession = json.RawMessage(`{"source":"herdr:claude","agent":"claude","kind":"id","value":"thread-fixture"}`)
 		return []AgentInfo{a}, nil
 	}
-	c.actions.completed = nil
-	ref := completionRef(j)
-	if c.retireCompleted(context.Background(), 7, j, ref, true) || *closes != 0 || j.FinalDoneAt.IsZero() {
-		t.Fatal("missing final did not get bounded grace")
-	}
-	j.FinalDoneAt = time.Now().Add(-3 * time.Minute)
-	if !c.retireCompleted(context.Background(), 7, j, ref, true) || *closes != 1 || !c.st.CompletedRuns[7].PublicationUnconfirmed {
-		t.Fatal("unproven final retained done process or claimed success")
-	}
-	*seatGone, *processGone = true, true
-	c.retireCompleted(context.Background(), 7, j, ref, true)
-	if c.st.Jobs[7] != nil || c.st.CompletedRuns[7].Phase != "observed" || !c.st.CompletedRuns[7].PublicationUnconfirmed || c.st.reserveLaunch(7) {
-		t.Fatal("failure reaping did not retain no-replay fence")
-	}
 	c.cfg.Targets = []Target{{Agent: "claude"}}
-	c.cfg.Governor.MaxActive = 1
-	if c.admissionBudget(map[int]agentRef{})["claude"] != 1 {
-		t.Fatal("failure cleanup leaked capacity")
+	return c, j, seatGone, processGone, closes
+}
+
+func TestCompletionEndedClaudeTurnWithLiveChildIsNeverRetired(t *testing.T) {
+	c, j, _, _, closes := claudeCoordinatorFixture(t)
+	c.actions.completed = nil // no final report, no goal: the turn merely ended
+	ref := completionRef(j)
+	var logs bytes.Buffer
+	oldLog := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(oldLog)
+	for i := 0; i < 3; i++ {
+		if c.retireCompleted(context.Background(), 7, j, ref, true) {
+			t.Fatal("an ended turn retired the run")
+		}
+		j.FinalDoneAt, j.FinalDoneSeq = time.Now().Add(-time.Hour), 42 // the seat's own state: legacy grace grants nothing
+	}
+	if *closes != 0 || c.st.Jobs[7] != j || len(c.st.CompletedRuns) != 0 {
+		t.Fatal("waiting coordinator was torn down or fenced")
+	}
+	if strings.Contains(logs.String(), "publication unconfirmed") {
+		t.Fatal("ended turn reported as a failed publication")
+	}
+	if c.admissionBudget(map[int]agentRef{7: ref})["claude"] != 0 {
+		t.Fatal("seat idle between turns released capacity")
 	}
 }
 
-func TestFinalReportFailureCleanupKeepsPRAndGoalOwnership(t *testing.T) {
-	for _, name := range []string{"open-pr", "codex-active-goal", "changed-sequence", "future-clock", "legacy"} {
-		t.Run(name, func(t *testing.T) {
-			c, j, _, _, closes := completionFixture(t)
-			j.FinalReportManaged = true
-			j.FinalDoneAt = time.Now().Add(-3 * time.Minute)
-			j.FinalDoneSeq = 42
-			if name == "open-pr" {
-				c.actions.completionPR = func(context.Context, *Job) (bool, error) { return true, nil }
+func TestCompletionLegacyFailureFenceAuthorizesNoClose(t *testing.T) {
+	for _, phase := range []string{"retiring", "close-failed", "close-sent"} {
+		t.Run(phase, func(t *testing.T) {
+			c, j, _, _, closes := claudeCoordinatorFixture(t)
+			c.actions.completed = nil
+			fence := completedRun{DispatchKey: j.DispatchKey, NativeSessionID: "thread-fixture", StateChangeSeq: 42, Phase: phase, PublicationUnconfirmed: true}
+			c.st.CompletedRuns = map[int]completedRun{7: fence}
+			c.st.save()
+			c.st = loadState(c.st.path) // as restored after the deploy
+			j = c.st.Jobs[7]
+			retired := c.retireCompleted(context.Background(), 7, j, completionRef(j), true)
+			_, kept := loadState(c.st.path).CompletedRuns[7]
+			if phase == "close-sent" {
+				if !retired || !kept {
+					t.Fatal("a delivered close lost its absence bookkeeping")
+				}
+				return
 			}
-			if name == "legacy" {
-				j.FinalReportManaged = false
-			}
-			if name == "future-clock" {
-				j.FinalDoneAt = time.Now().Add(time.Hour)
-			}
-			if name == "changed-sequence" {
-				j.FinalDoneSeq = 43
-			}
-			c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { return false, nil }
-			if c.retireCompleted(context.Background(), 7, j, completionRef(j), true) || *closes != 0 {
-				t.Fatal("publication failure bypassed PR/native-goal/legacy ownership")
+			if retired || kept || *closes != 0 || c.st.Jobs[7] == nil {
+				t.Fatal("a legacy failure fence closed a waiting coordinator")
 			}
 		})
 	}
 }
 
+func TestCompletionClaudeFinalReportRetiresRun(t *testing.T) {
+	c, j, seatGone, processGone, closes := claudeCoordinatorFixture(t)
+	c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { return true, nil }
+	ref := completionRef(j)
+	if !c.retireCompleted(context.Background(), 7, j, ref, true) || *closes != 1 || c.st.CompletedRuns[7].PublicationUnconfirmed {
+		t.Fatal("final report did not retire the run as completed")
+	}
+	*seatGone, *processGone = true, true
+	c.retireCompleted(context.Background(), 7, j, ref, true)
+	if c.st.Jobs[7] != nil || c.st.CompletedRuns[7].Phase != "observed" || c.st.reserveLaunch(7) {
+		t.Fatal("completed run kept its job or lost its no-replay fence")
+	}
+	if c.admissionBudget(map[int]agentRef{})["claude"] != 1 {
+		t.Fatal("completed run leaked capacity")
+	}
+}
+
+func TestCompletionTimeoutRetiresWithLiveChildReason(t *testing.T) {
+	for _, name := range []string{"live-children", "no-children", "unreadable", "source-binding"} {
+		t.Run(name, func(t *testing.T) {
+			ghLog, _ := completionSupervisionCommands(t)
+			c, j, _, _, _ := claudeCoordinatorFixture(t)
+			h := c.hosts[j.Host]
+			h.SSH = "fixture-host"
+			c.hosts[j.Host] = h
+			c.actions.completed = nil
+			reads := 0
+			c.actions.stopProcess = func(context.Context, Host, string, string) (*actionStopProcess, error) {
+				if reads++; reads > 1 { // the teardown's own anchor, as teardownFixture records it
+					return &actionStopProcess{SchemaVersion: 1, GroupID: 301, RootPID: 301, Members: []actionProcessIdentity{{PID: 301, Start: 9}}}, nil
+				}
+				switch name {
+				case "live-children", "source-binding":
+					return &actionStopProcess{SchemaVersion: 1, GroupID: 40, RootPID: 41, Members: []actionProcessIdentity{{PID: 41, Start: 1}, {PID: 42, Start: 2}, {PID: 43, Start: 3}}}, nil
+				case "no-children":
+					return &actionStopProcess{SchemaVersion: 1, GroupID: 40, RootPID: 41, Members: []actionProcessIdentity{{PID: 41, Start: 1}}}, nil
+				}
+				return nil, errors.New("native_process_unavailable")
+			}
+			j.Overrides.Timeout = time.Minute
+			j.Deadline = time.Now().Add(-time.Second)
+			if name == "source-binding" { // the owner's source issue is never closed; the reason goes in its reply
+				c.st.SourceBindings = map[int]*sourceBinding{7: {Repo: "fixture/project", Issue: 70, Comment: 71}}
+			}
+			var logs bytes.Buffer
+			oldLog := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(oldLog)
+			ref := completionRef(j)
+			c.supervise(context.Background(), 7, j, map[int]agentRef{7: ref}, Issue{Number: 7})
+			calls, _ := os.ReadFile(ghLog)
+			if b, ok := c.sourceBinding(7); ok {
+				for _, r := range b.Outbox {
+					calls = append(calls, r.Body+"\nissue close 7\n"...)
+				}
+			}
+			want := map[string]string{
+				"source-binding": "exceeded; stopping 2 live child processes",
+				"live-children":  "exceeded; stopping 2 live child processes",
+				"no-children":    "exceeded — ",
+				"unreadable":     "exceeded; live child processes unknown",
+			}[name]
+			if !strings.Contains(logs.String(), "operator timeout (1m0s) "+want) || !strings.Contains(string(calls), want) {
+				t.Fatalf("timeout reason not recorded in log and on the issue: %s %s", logs.String(), calls)
+			}
+			if !strings.Contains(string(calls), "issue close 7") || c.st.Jobs[7] != nil {
+				t.Fatal("timeout did not retire the run")
+			}
+		})
+	}
+}
 func TestFinalReportCompletionFallbackNeedsProducerReceipt(t *testing.T) {
 	c, j, _, _, _ := finalPublicationFixture(t)
 	j.Agent = "claude"
@@ -550,41 +632,6 @@ func TestFinalReportCompletionFallbackNeedsProducerReceipt(t *testing.T) {
 	j.FinalReportManaged = false
 	if complete, err := c.completionEvidence(context.Background(), c.hosts[j.Host], j, "thread-fixture"); !complete || err != nil {
 		t.Fatal("legacy control did not accept the model-owned marked comment", err)
-	}
-}
-
-func TestFinalReportFailureGraceRequiresStableClaudeAndDurableClock(t *testing.T) {
-	for _, name := range []string{"recent", "changed", "future", "legacy", "codex", "save-error", "expired"} {
-		t.Run(name, func(t *testing.T) {
-			c, j, _, _, _ := completionFixture(t)
-			j.Agent = "claude"
-			j.FinalReportManaged = true
-			j.FinalDoneSeq = 42
-			j.FinalDoneAt = time.Now().Add(-3 * time.Minute)
-			switch name {
-			case "recent":
-				j.FinalDoneAt = time.Now().Add(-time.Minute)
-			case "changed":
-				j.FinalDoneSeq = 43
-			case "future":
-				j.FinalDoneAt = time.Now().Add(time.Hour)
-			case "legacy":
-				j.FinalReportManaged = false
-			case "codex":
-				j.Agent = "codex"
-			case "save-error":
-				j.FinalDoneAt = time.Time{}
-				c.st.path = filepath.Dir(c.st.path)
-			}
-			before := j.FinalDoneAt
-			due := c.finalPublicationFailureDue(j, 42)
-			if due != (name == "expired") {
-				t.Fatal("failure grace lost clock/native-source fence")
-			}
-			if name == "save-error" && j.FinalDoneAt != before {
-				t.Fatal("failed clock persistence granted cleanup authority")
-			}
-		})
 	}
 }
 
