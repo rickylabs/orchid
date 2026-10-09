@@ -449,7 +449,7 @@ func TestProviderBudgetTickAndRefusals(t *testing.T) {
 	c := &Coord{cfg: &Config{ProviderBudgets: cfg, Matrix: MatrixConfig{ReceiptRoot: root}, OpenCode: OpenCodeConfig{Providers: map[string]OpenCodeProvider{"github-copilot": {0}}}}, st: &State{Jobs: map[int]*Job{}}}
 	c.gov.q = map[string]quota{}
 	pools := openCodeProviderPools(c.cfg.OpenCode, c.st.Jobs)
-	c.publishTransportAvailability(map[string]int{"codex": 1, "opencode": 0}, now, pools)
+	c.publishTransportAvailability(map[string]int{"codex": 1, "opencode": 0}, transportSeats{}, now, pools)
 	var s transportAvailabilitySnapshot
 	if err := readPrivateActionJSON(transportAvailabilityPath(root), &s); err != nil || len(s.ProviderBudgets) != 1 {
 		t.Fatal("tick dropped model decisions")
@@ -468,7 +468,7 @@ func TestProviderBudgetTickAndRefusals(t *testing.T) {
 		}
 	}
 	cfg.Models[0].Model = "github-copilot/duplicate"
-	c.publishTransportAvailability(nil, now, pools)
+	c.publishTransportAvailability(nil, transportSeats{}, now, pools)
 	if _, e := os.Stat(transportAvailabilityPath(root)); !errors.Is(e, os.ErrNotExist) {
 		t.Fatal("invalid policy retained a snapshot")
 	}

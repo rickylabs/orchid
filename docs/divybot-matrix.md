@@ -114,6 +114,8 @@ unsupported transports refuse. Admission requires fresh, nonexpired readings for
 subscription windows plus governor capacity. Unknown entitlement is unavailable; selecting a
 sibling model cannot refill an exhausted subscription. Agy currently has no qualifying meter
 in this dispatcher, so this change does not claim Agy admission works.
+[Transport capacity](transport-capacity.md) separates physical seats from quota pacing in the
+published availability snapshot.
 
 The read-only `matrix evaluator-preflight` command checks the pinned Harness evaluator against
 this host's OpenCode catalog and names a missing selected ID. It copies no model table and does

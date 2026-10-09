@@ -2822,7 +2822,7 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 	}
 	pools := openCodeProviderPools(c.cfg.OpenCode, c.st.Jobs)
 	c.st.mu.Unlock()
-	c.publishTransportAvailability(budget, time.Now(), pools)
+	c.publishTransportAvailability(budget, transportSeats{caps: caps, running: running}, time.Now(), pools)
 	return budget
 }
 
