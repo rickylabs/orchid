@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -389,9 +390,93 @@ func TestSourceRefusalReopensOnlyForItsOwnPolicyGrant(t *testing.T) {
 			if name != "edited" && reconsidered(c, f, 3100000102, again...) {
 				t.Fatalf("a listing reconsidered a refusal %s", name)
 			}
-			if b := c.st.SourceBindings[3100000102]; b == nil || b.Closed != "refused" {
+			b := c.st.SourceBindings[3100000102]
+			if b == nil || b.Closed != "refused" {
 				t.Fatalf("a refusal was reopened by %s: %+v", name, b)
 			}
+			if name == "edited" && !b.Regranted {
+				t.Fatal("an edited comment's reconsideration was not spent; it would be read every tick")
+			}
 		})
+	}
+}
+
+// A restart between the refusal and the late policy grant forgets the kept
+// comment; the saved refusal is kept again, so the grant still launches it.
+func TestSourceLatePolicyGrantSurvivesARestart(t *testing.T) {
+	c, f, s, r, at := ownerPolicyGrant(t, 3100000110)
+	f.post("example/project", 7, 3100000110, ownerGitHubID, policyBody, at)
+	c.sourceTick(context.Background())
+	restarted := &Coord{cfg: c.cfg, st: loadState(c.st.path), ownerGrants: s, source: f}
+	restarted.sourceTick(context.Background()) // the listing reads the refused comment again before any grant
+	if ack := s.install(context.Background(), r); ack.State != "LIVE" {
+		t.Fatalf("policy grant not LIVE: %s %s", ack.State, ack.Reason)
+	}
+	restarted.sourceTick(context.Background())
+	restarted.sourceTick(context.Background())
+	if b := restarted.st.SourceBindings[3100000110]; b == nil || b.Closed != "" || !b.Regranted {
+		t.Fatalf("the late grant was lost across a restart: %+v", b)
+	}
+	if refusedMarkers(f) != 1 {
+		t.Fatalf("the refusal was posted again: %v", f.markers())
+	}
+}
+
+// A refusal saved before its reason was recorded is read from its one refusal
+// reply, delivered or queued; any other or ambiguous refusal stays terminal.
+func TestSourceLegacyRefusalReopensOnlyForAMissingGrant(t *testing.T) {
+	missing := "refused\x00source-grant-missing\x00"
+	for name, want := range map[string]bool{"delivered": true, "queued": true, "closed-issue": false, "not-a-refusal": false, "two-replies": false} {
+		t.Run(name, func(t *testing.T) {
+			c, f, s, r, at := ownerPolicyGrant(t, 3100000111)
+			f.post("example/project", 7, 3100000111, ownerGitHubID, policyBody, at)
+			c.sourceTick(context.Background())
+			c.st.mu.Lock()
+			b := c.st.SourceBindings[3100000111]
+			b.Refusal, b.Author, b.Outbox = "", 0, nil
+			switch name {
+			case "delivered":
+				b.Replies = map[string]bool{missing: true}
+			case "queued":
+				b.Replies, b.Outbox = nil, []sourceReply{{ID: missing, Body: "x"}}
+			case "closed-issue":
+				b.Replies = map[string]bool{"refused\x00source-issue-closed\x00": true}
+			case "not-a-refusal":
+				b.Replies = map[string]bool{"stopped\x00source-grant-missing\x00": true}
+			case "two-replies":
+				b.Replies, b.Outbox = map[string]bool{missing: true}, []sourceReply{{ID: "stopped\x00source-closed\x00", Body: "x"}}
+			}
+			_ = c.st.saveLocked()
+			c.st.mu.Unlock()
+			restarted := &Coord{cfg: c.cfg, st: loadState(c.st.path), ownerGrants: s, source: f}
+			if ack := s.install(context.Background(), r); ack.State != "LIVE" {
+				t.Fatalf("policy grant not LIVE: %s %s", ack.State, ack.Reason)
+			}
+			restarted.sourceTick(context.Background())
+			restarted.sourceTick(context.Background())
+			if got := restarted.st.SourceBindings[3100000111]; (got != nil && got.Closed == "") != want {
+				t.Fatalf("legacy refusal %s: reopened=%v, want %v: %+v", name, got != nil && got.Closed == "", want, got)
+			}
+		})
+	}
+}
+
+// The reconsideration is saved, but the directory sync after the rename fails:
+// memory keeps what the state file holds, so the refusal is not reopened again.
+func TestSourceRegrantKeptWhenTheSaveFailsAfterRename(t *testing.T) {
+	c, f, s, r, at := ownerPolicyGrant(t, 3100000112)
+	f.post("example/project", 7, 3100000112, ownerGitHubID, policyBody+"\nAnother.", at)
+	c.sourceTick(context.Background())
+	if ack := s.install(context.Background(), r); ack.State != "LIVE" {
+		t.Fatalf("policy grant not LIVE: %s %s", ack.State, ack.Reason)
+	}
+	c.st.fs = &stateFS{syncDir: func(*os.File) error { return errors.New("injected") }}
+	c.sourceTick(context.Background())
+	c.st.fs = nil
+	if b := c.st.SourceBindings[3100000112]; b == nil || !b.Regranted {
+		t.Fatalf("memory rewound a reconsideration the state file holds: %+v", b)
+	}
+	if reconsidered(c, f, 3100000112) {
+		t.Fatal("a refusal was reconsidered a second time after a save failed past its rename")
 	}
 }

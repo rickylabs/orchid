@@ -741,6 +741,10 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 	}
 	c.st.SourceBindings[key] = b
 	err = c.st.saveLocked()
+	var saved stateSaveError
+	if err != nil && errors.As(err, &saved) && saved.afterRename { // guard:source-bind-after-rename
+		err = nil // the decision reached the state file; memory keeps it too
+	}
 	if err != nil {
 		if reopen {
 			c.st.SourceBindings[key] = prior
@@ -751,10 +755,6 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 	c.st.mu.Unlock()
 	if err != nil {
 		return false
-	}
-	if b.regrantable(cm.AuthorID) {
-		// A policy grant naming this comment may still arrive after the refusal.
-		c.awaitSourceGrant(repo, cm, now) // guard:source-await-regrant
 	}
 	if refusal == "" {
 		// The comment was just listed and its issue just read: confirmed live.
@@ -775,11 +775,31 @@ func (c *Coord) considerSourceComment(ctx context.Context, lookup func(int) (sou
 // regrantable is true for a binding refused only because no grant named its
 // comment, by this author, never launched and never reconsidered.
 func (b *sourceBinding) regrantable(author int64) bool {
-	by := b.Author
-	if by == 0 {
-		by = ownerGitHubID // made when only the owner's comments could be bound
+	return b.Closed == "refused" && b.refusal() == "source-grant-missing" && !b.Launched && !b.Regranted && b.author() == author
+}
+
+// refusal is the reason a binding was refused. A binding saved before the
+// reason was recorded carries it only in its one refusal reply.
+func (b *sourceBinding) refusal() string {
+	if b.Refusal != "" || b.Closed != "refused" {
+		return b.Refusal
 	}
-	return b.Closed == "refused" && b.Refusal == "source-grant-missing" && !b.Launched && !b.Regranted && by == author
+	var ids []string
+	for id := range b.Replies {
+		ids = append(ids, id)
+	}
+	for _, r := range b.Outbox {
+		ids = append(ids, r.ID)
+	}
+	if len(ids) != 1 { // guard:source-legacy-refusal-exact
+		return "" // ambiguous: stays terminal
+	}
+	state, rest, _ := strings.Cut(ids[0], "\x00")
+	reason, pr, _ := strings.Cut(rest, "\x00")
+	if state != "refused" || pr != "" {
+		return ""
+	}
+	return reason
 }
 
 // sourceGrantReady is true when an installed comment grant matches this exact
@@ -833,9 +853,38 @@ func (c *Coord) awaitSourceGrant(repo string, cm sourceComment, now time.Time) {
 	mem.pending[cm.ID] = sourcePending{repo: repo, cm: cm}
 }
 
+// restoreSourceAwaits keeps each fresh saved refusal a late policy grant may
+// still reopen, a restart between the refusal and the grant included.
+// The comment is read as it is now before it is reconsidered.
+func (c *Coord) restoreSourceAwaits(now time.Time) {
+	var kept []sourcePending
+	c.st.mu.Lock()
+	for key, b := range c.st.SourceBindings {
+		if b.regrantable(b.author()) && now.Sub(b.CreatedAt) <= sourceTriggerFreshness {
+			kept = append(kept, sourcePending{repo: b.Repo, cm: sourceComment{ID: int64(key), AuthorID: b.author(), CreatedAt: b.CreatedAt, UpdatedAt: b.CreatedAt}})
+		}
+	}
+	c.st.mu.Unlock()
+	for _, p := range kept {
+		c.awaitSourceGrant(p.repo, p.cm, now) // guard:source-restore-awaits
+	}
+}
+
+// spendSourceRegrant ends a refusal's one reconsideration when its comment was
+// deleted or failed a check before it was bound, so it is never read again.
+func (c *Coord) spendSourceRegrant(key int) {
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	if b := c.st.SourceBindings[key]; b != nil && b.regrantable(b.author()) {
+		b.Regranted = true // guard:source-regrant-spent
+		_ = c.st.saveLocked()
+	}
+}
+
 // recheckSourceGrants considers again each kept comment a grant now names. Each
 // issue read spends the tick's budget; a comment past freshness is dropped.
 func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget int) int {
+	c.restoreSourceAwaits(now)
 	api, mem := c.sourceAPI(), c.sourceMem()
 	mem.mu.Lock()
 	var ready []sourcePending
@@ -866,6 +915,7 @@ func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget i
 			mem.mu.Lock()
 			delete(mem.pending, p.cm.ID)
 			mem.mu.Unlock()
+			c.spendSourceRegrant(int(p.cm.ID))
 			continue
 		}
 		lookup := func(n int) (sourceIssueView, error) {
@@ -881,6 +931,7 @@ func (c *Coord) recheckSourceGrants(ctx context.Context, now time.Time, budget i
 			mem.mu.Lock()
 			delete(mem.pending, p.cm.ID)
 			mem.mu.Unlock()
+			c.spendSourceRegrant(int(p.cm.ID))
 		}
 	}
 	return budget
