@@ -229,7 +229,7 @@ func TestTransportCapacityAgreesWithAvailability(t *testing.T) {
 // A negative governor max_active passes configuration (only zero is defaulted) and
 // decide returns it as the cap. The published seat counts stay whole numbers:
 // disabled, zero seats, a computed cap of zero.
-func TestNegativeGovernorCapPublishesZero(t *testing.T) {
+func TestTransportCapacityNegativeGovernorCapPublishesZero(t *testing.T) {
 	root := privateTestRoot(t)
 	cfg := &Config{Matrix: MatrixConfig{ReceiptRoot: root, TransportCapacity: true},
 		Governor: Gov{MaxActive: -1, WeeklyCeiling: 92, SampleInterval: "90s"},
