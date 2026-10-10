@@ -29,7 +29,7 @@ explicit `null`, never omitted.
 | `capacityReason` | `null` when `free` or `full`; otherwise `seats-not-configured`, `seat-budget-missing` or `seats-config-invalid` |
 | `maxActive` | Configured seats; `null` when unknown, and for OpenCode |
 | `active` | Seats this dispatcher counts as occupied; `null` for OpenCode |
-| `admissionCap` | Seats the governor lets admission use now; `null` when no seat budget was computed, and for OpenCode |
+| `admissionCap` | Seats the governor lets admission use now, as computed (a disabled pool with a computed cap publishes `0`); `null` only when no seat budget was computed, and for OpenCode |
 | `pacing` | `clear`, `limited`, `unknown`, `unmetered` |
 | `pacingReason` | `null` when `clear` or `unmetered`; `governor-pacing`, `5h-ceiling` or `weekly-ceiling` when `limited`; `meter-unread`, `meter-stale`, `window-expired` or `ceiling-misconfigured` when `unknown` |
 

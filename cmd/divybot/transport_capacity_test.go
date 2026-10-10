@@ -59,6 +59,8 @@ func TestTransportCapacitySeparatesSeatsFromPacing(t *testing.T) {
 		{"no target names the transport", "codex", map[string]int{"claude": 2}, map[string]int{"codex": 1}, quota{}, nil,
 			"unknown", "seat-budget-missing", -1, 1, -1, "unknown", "meter-unread"},
 		{"agy without configured seats", "agy", map[string]int{"agy": 0}, map[string]int{}, quota{}, nil,
+			"disabled", "seats-not-configured", 0, 0, 0, "unmetered", ""},
+		{"agy without seats or a target", "agy", map[string]int{}, map[string]int{}, quota{}, nil,
 			"disabled", "seats-not-configured", 0, 0, -1, "unmetered", ""},
 		{"agy seat occupied", "agy", map[string]int{"agy": 1}, map[string]int{"agy": 1}, quota{},
 			UnmeteredTransportLimits{"agy": {MaxActive: 1}}, "full", "", 1, 1, 1, "unmetered", ""},
@@ -118,7 +120,7 @@ func TestAdmissionBudgetPublishesCapacityBesideAvailability(t *testing.T) {
 	now := time.Now()
 	cfg := &Config{Matrix: MatrixConfig{ReceiptRoot: root, TransportCapacity: true},
 		Governor: Gov{Enabled: true, MaxActive: 1, WeeklyCeiling: 92, SampleInterval: "90s"},
-		Targets:  []Target{{Label: "fixture", Repo: "example/fixture", Agents: []string{"codex"}}}}
+		Targets:  []Target{{Label: "fixture", Repo: "example/fixture", Agents: []string{"codex", "agy"}}}}
 	c := &Coord{cfg: cfg, st: &State{Jobs: map[int]*Job{}}}
 	c.gov.q = map[string]quota{"codex": {ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: now.Add(time.Hour).Unix()},
 		seven: RateLimit{UsedPct: 37, ResetsAt: now.Add(time.Hour).Unix()}}}
@@ -165,6 +167,13 @@ func TestAdmissionBudgetPublishesCapacityBesideAvailability(t *testing.T) {
 		want := []string{"active", "admissionCap", "capacity", "capacityReason", "maxActive", "pacing", "pacingReason", "transport"}
 		if !reflect.DeepEqual(keys, want) || string(row["transport"]) != `"`+matrixTransports[i]+`"` {
 			t.Fatalf("row %d fields %v", i, keys) // nullable fields are explicit nulls, never omitted
+		}
+	}
+	// A computed cap is published as computed, zero included; null only when none
+	// was computed (claude has no target) or seats are per pool (OpenCode).
+	for i, want := range []string{"null", "1", "0", "null"} {
+		if got := string(fields.TransportCapacity[i]["admissionCap"]); got != want {
+			t.Fatalf("%s admissionCap %s, want %s", matrixTransports[i], got, want)
 		}
 	}
 

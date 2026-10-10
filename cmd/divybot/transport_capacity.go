@@ -75,7 +75,13 @@ func buildTransportCapacity(seats transportSeats, cfg *Config, pools []openCodeP
 func (s transportSeats) capacity(transport string, maxActive int) transportCapacityRow {
 	active := s.running[transport]
 	row := transportCapacityRow{Active: &active}
+	// A computed cap is published as computed, zero included; null means admission
+	// computed none this tick.
 	limit, provisioned := s.caps[transport]
+	if provisioned { // guard:computed-cap
+		limit = max(limit, 0)
+		row.AdmissionCap = &limit
+	}
 	switch {
 	case maxActive <= 0:
 		zero := 0
@@ -89,7 +95,7 @@ func (s transportSeats) capacity(transport string, maxActive int) transportCapac
 	default:
 		row.Capacity = capacityFree
 	}
-	row.MaxActive, row.AdmissionCap = &maxActive, &limit
+	row.MaxActive = &maxActive
 	return row
 }
 
