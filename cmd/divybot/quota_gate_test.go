@@ -30,7 +30,7 @@ func TestMatrixQuotaRefusalAttribution(t *testing.T) {
 				delete(govQ, "claude")
 			},
 			wantCondition:   "claude: absent",
-			negativeControl: "stale",
+			negativeControl: "claude: stale",
 		},
 		{
 			name: "meter stale",
@@ -40,7 +40,7 @@ func TestMatrixQuotaRefusalAttribution(t *testing.T) {
 				govQ["claude"] = q
 			},
 			wantCondition:   "claude: stale",
-			negativeControl: "absent",
+			negativeControl: "claude: absent",
 		},
 		{
 			name: "weekly ceiling exceeded",

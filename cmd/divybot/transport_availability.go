@@ -24,6 +24,7 @@ type transportAvailabilitySnapshot struct {
 	Transports            []transportAvailabilityRow `json:"transports"`
 	OpenCodeProviderPools []openCodeProviderPool     `json:"openCodeProviderPools"`
 	ProviderBudgets       []providerBudgetDecision   `json:"providerBudgets,omitempty"`
+	TransportCapacity     []transportCapacityRow     `json:"transportCapacity,omitempty"`
 }
 
 // Millisecond UTC times: the governance contract reads at most three fractional
@@ -77,7 +78,7 @@ func publishTransportAvailability(receiptRoot string, owner *receiptOwner, snaps
 	return writePrivateJSON(transportAvailabilityPath(receiptRoot), ".transport-availability-", owner, snapshot)
 }
 
-func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Time, pools []openCodeProviderPool) {
+func (c *Coord) publishTransportAvailability(budget map[string]int, seats transportSeats, now time.Time, pools []openCodeProviderPool) {
 	root := c.cfg.Matrix.ReceiptRoot
 	if root == "" || c.dry {
 		return
@@ -94,6 +95,9 @@ func (c *Coord) publishTransportAvailability(budget map[string]int, now time.Tim
 		snapshot := buildTransportAvailability(budget, quotas, now, c.cfg.Governor.sampleIntervalDur(),
 			c.cfg.Governor.WeeklyCeiling, 2*durOr(c.cfg.PollInterval, 30*time.Second), c.cfg.UnmeteredTransports, pools)
 		snapshot.ProviderBudgets, err = buildProviderBudgetDecisions(c.cfg.ProviderBudgets, now, snapshot.ValidUntil)
+		if c.cfg.Matrix.TransportCapacity { // guard:capacity-reader-first
+			snapshot.TransportCapacity = buildTransportCapacity(seats, c.cfg, pools, quotas, now)
+		}
 		if err == nil {
 			err = publishTransportAvailability(root, owner, snapshot)
 		}

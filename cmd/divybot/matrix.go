@@ -39,6 +39,9 @@ type MatrixConfig struct {
 	// Publish consumer-visible launch admission/outcome records. Default off until
 	// the Harness reader and the Cockpit consume them (reader-first).
 	LaunchOutcomes bool `json:"launch_outcomes,omitempty"`
+	// Publish per-transport seat and pacing rows in the availability snapshot.
+	// Default off until the Harness reader accepts them (reader-first).
+	TransportCapacity bool `json:"transport_capacity,omitempty"`
 }
 
 // profileRevision pins the Harness profiles, as the cockpit's profile pin does. Unset,
@@ -1092,10 +1095,21 @@ func quotaHasHeadroom(q quota, now time.Time, ceiling float64) bool {
 	return quotaHeadroomCondition(q, now, ceiling) == ""
 }
 
+// A quota verdict names itself first: a nonpositive budget the governor derived
+// from a ceiling or an unread meter is not physical capacity. The published
+// capacity rows (transport_capacity.go) say which seats are actually taken.
 func transportAvailabilityReason(budget int, q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
+	if reason := quotaReason(q, now, sampleInterval, ceiling); reason != "" { // guard:quota-before-budget
+		return reason
+	}
 	if budget <= 0 {
 		return availabilityNoCapacity
 	}
+	return ""
+}
+
+// quotaReason is the native meter's own verdict, independent of seats.
+func quotaReason(q quota, now time.Time, sampleInterval time.Duration, ceiling float64) string {
 	if !q.ok {
 		return availabilityMeterUnread
 	}

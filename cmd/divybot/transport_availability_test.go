@@ -32,7 +32,9 @@ func TestTransportAvailabilityReasons(t *testing.T) {
 		condition string
 	}{
 		{"available", 1, fresh(under, under), 92, "", ""},
-		{"no capacity wins over everything", 0, quota{}, 0, "no-capacity", "blocked by capacity"},
+		{"a quota verdict names itself before a nonpositive budget", 0, quota{}, 0, "meter-unread", "absent"},
+		{"a governor ceiling pause is not physical capacity", 0, fresh(under, over), 92, "weekly-ceiling", "over ceiling"},
+		{"no seat with a fresh meter under the ceiling", 0, fresh(under, under), 92, "no-capacity", "blocked by capacity"},
 		{"meter never read", 1, quota{}, 92, "meter-unread", "absent"},
 		{"meter published no window", 1, fresh(RateLimit{}, RateLimit{}), 92, "meter-unread", "absent"},
 		{"meter older than three samples", 1, quota{ok: true, at: now.Add(-4 * sample), five: under, seven: under}, 92, "meter-stale", "stale"},
@@ -166,19 +168,19 @@ func TestTransportAvailabilityFailedPublishClears(t *testing.T) {
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	c := &Coord{cfg: &Config{Matrix: MatrixConfig{ReceiptRoot: root}}}
 	c.gov.q = map[string]quota{}
-	c.publishTransportAvailability(map[string]int{"claude": 1}, now, nil)
+	c.publishTransportAvailability(map[string]int{"claude": 1}, transportSeats{}, now, nil)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal("snapshot not published", err)
 	}
 	uid := -1
 	c.cfg.Matrix.ReceiptOwnerUID = &uid // An invalid owner makes the publish fail.
-	c.publishTransportAvailability(map[string]int{"claude": 1}, now.Add(30*time.Second), nil)
+	c.publishTransportAvailability(map[string]int{"claude": 1}, transportSeats{}, now.Add(30*time.Second), nil)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a failed publish kept the previous snapshot")
 	}
 	c.cfg.Matrix.ReceiptOwnerUID = nil
 	c.dry = true
-	c.publishTransportAvailability(map[string]int{"claude": 1}, now.Add(time.Minute), nil)
+	c.publishTransportAvailability(map[string]int{"claude": 1}, transportSeats{}, now.Add(time.Minute), nil)
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a dry run wrote a snapshot")
 	}
@@ -199,10 +201,18 @@ func TestAdmissionBudgetPublishesTransportAvailability(t *testing.T) {
 		t.Fatalf("snapshot rows %+v", got.Transports)
 	}
 	for _, row := range got.Transports {
-		// No configured account has a budget, so admission would offer nothing.
-		if budget[row.Transport] > 0 || row.Available || row.Reason == nil || *row.Reason != availabilityNoCapacity {
+		// No configured account has a budget, so admission would offer nothing. The
+		// native meters were never read, which names itself before the budget.
+		want := availabilityNoCapacity
+		if row.Transport == "claude" || row.Transport == "codex" {
+			want = availabilityMeterUnread
+		}
+		if budget[row.Transport] > 0 || row.Available || row.Reason == nil || *row.Reason != want {
 			t.Fatalf("%s: %+v with budget %d", row.Transport, row, budget[row.Transport])
 		}
+	}
+	if got.TransportCapacity != nil {
+		t.Fatal("capacity rows published before the reader-first switch", got.TransportCapacity)
 	}
 }
 
