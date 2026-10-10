@@ -76,10 +76,11 @@ func (s transportSeats) capacity(transport string, maxActive int) transportCapac
 	active := s.running[transport]
 	row := transportCapacityRow{Active: &active}
 	// A computed cap is published as computed, zero included; null means admission
-	// computed none this tick.
+	// computed none this tick. A negative governor max_active is not rejected by
+	// configuration and becomes the cap, so it is published as zero seats.
 	limit, provisioned := s.caps[transport]
 	if provisioned { // guard:computed-cap
-		limit = max(limit, 0)
+		limit = max(limit, 0) // guard:negative-cap-clamp
 		row.AdmissionCap = &limit
 	}
 	switch {

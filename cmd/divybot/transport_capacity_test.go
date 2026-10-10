@@ -225,3 +225,33 @@ func TestTransportCapacityAgreesWithAvailability(t *testing.T) {
 		}
 	}
 }
+
+// A negative governor max_active passes configuration (only zero is defaulted) and
+// decide returns it as the cap. The published seat counts stay whole numbers:
+// disabled, zero seats, a computed cap of zero.
+func TestNegativeGovernorCapPublishesZero(t *testing.T) {
+	root := privateTestRoot(t)
+	cfg := &Config{Matrix: MatrixConfig{ReceiptRoot: root, TransportCapacity: true},
+		Governor: Gov{MaxActive: -1, WeeklyCeiling: 92, SampleInterval: "90s"},
+		Targets:  []Target{{Label: "fixture", Repo: "example/fixture", Agents: []string{"claude"}}}}
+	c := &Coord{cfg: cfg, st: &State{Jobs: map[int]*Job{}}}
+	c.gov.q = map[string]quota{}
+	if budget := c.admissionBudget(map[int]agentRef{}); budget["claude"] != -1 {
+		t.Fatalf("fixture needs a negative computed cap, budget %v", budget)
+	}
+	raw, err := os.ReadFile(transportAvailabilityPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published struct {
+		TransportCapacity []map[string]json.RawMessage `json:"transportCapacity"`
+	}
+	if err := json.Unmarshal(raw, &published); err != nil || len(published.TransportCapacity) != len(matrixTransports) {
+		t.Fatalf("published capacity %s (%v)", raw, err)
+	}
+	claude := published.TransportCapacity[0]
+	got := []string{string(claude["capacity"]), string(claude["maxActive"]), string(claude["admissionCap"])}
+	if want := []string{`"disabled"`, "0", "0"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claude capacity/maxActive/admissionCap %v, want %v", got, want)
+	}
+}
