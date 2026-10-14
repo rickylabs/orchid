@@ -47,6 +47,9 @@ func registrationHost(t *testing.T, fail string) (Host, func() [][]string) {
 	script := `#!/usr/bin/env python3
 import json,os,sys,time,tomllib,pathlib
 args=sys.argv[1:]
+# Installation has its own account-scoping test; this fixture records pane effects.
+if args==['integration','install','antigravity-cli']:
+ print(json.dumps({'result':{}}));sys.exit(0)
 with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
 mode=os.environ.get('REGISTRATION_FAILURE','')
 def recorded():

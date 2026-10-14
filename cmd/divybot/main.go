@@ -787,10 +787,8 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		}
 	}
 	attempt.enter(stageWorkspace)
-	if agent == "opencode" {
-		if _, e := h.herdr(ctx, "integration", "install", "opencode"); e != nil {
-			return "", "", matrixSite("spawn.native-integration", errAgentRegistration)
-		}
+	if e := h.ensureNativeRestore(ctx, agent); e != nil {
+		return "", "", matrixSite("spawn.native-integration", errAgentRegistration)
 	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {

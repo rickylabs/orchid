@@ -177,3 +177,19 @@ location even after the mount appears; duplicate copies refuse preparation.
 The selected path is saved with each new job so cleanup cannot follow a later
 configuration change. Stop and reconcile a job before explicitly migrating its
 checkout; never copy or reset an in-flight checkout to switch storage.
+
+OpenCode and Antigravity CLI launches install the current official Herdr
+integration under that host's launch account before creating the pane. Native
+conversation restore is enabled by Herdr's default
+`session.resume_agents_on_restore = true`. If an account disabled it, enable it
+in that account's Herdr configuration for the next planned restart. Installation
+does not restart Herdr or launch an agent. Restored panes must still pass Orchid's
+existing exact dispatch, native session, location and vendor evidence checks;
+restore never authorizes replaying a goal or adopting an unbound conversation.
+
+Managed Antigravity conversations keep their private native store when restored:
+a resume-only Herdr report records the original native store flags and native
+conversation ID after the official integration identity agrees with the durable
+dispatch. This report supplies no lifecycle state and leaves the official
+identity source intact. A replacement occupant or a refused resume report is
+never accepted as a successful registration.
