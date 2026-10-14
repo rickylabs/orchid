@@ -13,6 +13,11 @@ poll GitHub issues → governor-admit → push creds → herdr spawn (BARE claud
    conflicts via herdr send → teardown
 ```
 
+New work requires the `harness` label or an explicit `/swarm` comment accepted by
+the existing source-binding rules. Target labels only route work: filing an issue
+with a target label produces no launch attempt or refusal. Existing jobs remain
+supervised when their issue lacks the launch label.
+
 - **Transport** is native herdr over plain SSH (`ssh <host> herdr <cmd>`, JSON
   out). herdr is the per-host runtime + perception layer; the coordinator is a
   thin client. No tmux, no shim.

@@ -2704,6 +2704,11 @@ func (c *Coord) tick(ctx context.Context) {
 			c.superviseActive(ctx, n, j, status, is)
 			continue
 		}
+		// Target labels route work; only the launch label or a verified /swarm
+		// comment binding requests new work. Plain issues never enter admission.
+		if !contains(is.Labels, "harness") && is.Source == nil {
+			continue
+		}
 		c.st.mu.Lock()
 		_, retrying := c.st.RetryFlights[n]
 		c.st.mu.Unlock()
