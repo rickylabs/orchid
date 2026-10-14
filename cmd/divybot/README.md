@@ -168,3 +168,50 @@ allow path: reported exhaustion yields `budget-reached`; missing authoritative
 allowance or an enforceable full-run bound yields `budget-unavailable`. See
 [provider budgets](../../docs/provider-budgets.md) for the strict config fields,
 source scope, published six-field decisions and required reservation gate.
+
+Checkout storage is selected per host. `disk_workdir_root` defaults to
+`/var/lib/orchid/worktrees`, a persistent directory mounted by the deployment.
+Orchid does not create that root. Until it exists, `workdir_root` (or the legacy
+default) remains the fallback. Existing issue checkouts stay at their original
+location even after the mount appears; duplicate copies refuse preparation.
+The selected path is saved with each new job so cleanup cannot follow a later
+configuration change. Stop and reconcile a job before explicitly migrating its
+checkout; never copy or reset an in-flight checkout to switch storage.
+
+OpenCode and Antigravity CLI launches install the current official Herdr
+integration under that host's launch account before creating the pane. Native
+conversation restore is enabled by Herdr's default
+`session.resume_agents_on_restore = true`. If an account disabled it, enable it
+in that account's Herdr configuration for the next planned restart. Installation
+does not restart Herdr or launch an agent. Restored panes must still pass Orchid's
+existing exact dispatch, native session, location and vendor evidence checks;
+restore never authorizes replaying a goal or adopting an unbound conversation.
+
+Managed Antigravity conversations keep their private native store when restored:
+a resume-only Herdr report records the original native store flags and native
+conversation ID after the official integration identity agrees with the durable
+dispatch. This report supplies no lifecycle state and leaves the official
+identity source intact. A replacement occupant or a refused resume report is
+never accepted as a successful registration.
+Set a host's `herdr_machine` to the saved profile ID (or unique label) in the
+coordinator account's Herdr catalog. Keep its existing `ssh`, `home`, and key
+settings for account-specific file, credential and integration operations. The
+profile's SSH target must exactly equal `ssh`; its session must equal
+`herdr_session` (default `default`). Use a distinct host name for each session.
+Missing, disabled, mismatched or disconnected profiles fail explicitly, without
+fallback to Local or another profile. An unset `herdr_machine` preserves existing
+single-host behavior. Each host retains an independent observer and reconnect
+loop; no combined cross-machine snapshot is invented.
+
+Manage profiles with Herdr's documented `machine list --json`, `machine add`,
+`machine status` and `machine reconnect` commands under the profile-owning
+account. Machine setup can install or start a server, so schedule that setup
+separately from a running fleet change. Existing Herdr clients automatically
+show enabled profiles and reconnect independently; a cached disconnected
+machine is never treated as live by Orchid. API commands use
+`herdr --machine <id> ...`; streaming subscriptions use the documented raw
+socket API. Since saved-machine status labels its endpoint rather than exposing
+the remote socket path, streaming discovers that path with the documented
+account-local status command for the validated profile target and session. Installation
+commands remain in the remote launch account because Herdr does not forward
+them with `--machine`.

@@ -152,7 +152,7 @@ func TestSpawnClonesSourceRepo(t *testing.T) {
 			writeFixture(t, filepath.Join(bin, "ssh"), `#!/bin/sh
 for a; do last="$a"; done
 printf '%s\n----\n' "$last" >> "$SRC_REPO_LOG"
-case "$last" in *"git clone"*) exit 1;; esac
+case "$last" in *"# orchid-checkout-root"*) exec sh -c "$last";; *"git clone"*) exit 1;; esac
 exit 0
 `)
 			if os.Chmod(filepath.Join(bin, "ssh"), 0700) != nil {
@@ -242,6 +242,7 @@ func TestSpawnWorkspaceOriginMustBeSourceRepo(t *testing.T) {
 			writeFixture(t, filepath.Join(bin, "ssh"), `#!/bin/sh
 for a; do last="$a"; done
 case "$last" in
+ *"# orchid-checkout-root"*) exec sh -c "$last";;
  *"git checkout -fB"*) printf 'prep\n' >> "$SRC_REPO_LOG"; exec sh -c "$last";;
  *herdr*) printf 'herdr\n' >> "$SRC_REPO_LOG"; exit 1;;
 esac

@@ -200,6 +200,7 @@ func (c *Coord) bindAGYLiveIdentity(ctx context.Context, host Host, j *Job) {
 		host.agentInfoOf, host.readAGYIdentity) {
 		log.Printf("issue #%d: AGY native identity bound", j.Issue)
 	}
+	c.registerAGYRestore(readCtx, host, j, owner)
 }
 
 // Read around the native metadata lookup, then reopen the durable authority.

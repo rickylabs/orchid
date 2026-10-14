@@ -131,7 +131,22 @@ func reconcileHerdrEvents(ctx context.Context, panes []string, stream io.ReadWri
 // Remote hosts use an owned SSH Unix-socket forward, with no remote helper.
 func (h Host) herdrEventConnection(ctx context.Context) (io.ReadWriteCloser, error) {
 	check, cancel := context.WithTimeout(ctx, 15*time.Second)
-	out, err := h.herdr(check, "status", "server", "--json")
+	var out string
+	var err error
+	if h.HerdrMachine != "" {
+		// --machine status deliberately labels its socket "machine:<id>/<session>".
+		// Streaming has no --machine wrapper in this release. Resolve the saved
+		// account/session, then use the documented account-local discovery CLI.
+		profile, profileErr := h.savedHerdrMachine(check)
+		if profileErr != nil {
+			cancel()
+			return nil, profileErr
+		}
+		h.SSH = profile.Target
+		out, err = h.herdrAccountCommand(check, "--session", profile.Session, "status", "server", "--json")
+	} else {
+		out, err = h.herdr(check, "status", "server", "--json")
+	}
 	cancel()
 	if err != nil {
 		return nil, errors.New("herdr endpoint unavailable")
@@ -146,9 +161,10 @@ func (h Host) herdrEventConnection(ctx context.Context) (io.ReadWriteCloser, err
 	dial := func(ctx context.Context, path string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", path)
 	}
-	if h.isLocal() {
+	if h.HerdrMachine == "" && h.isLocal() {
 		return dial(ctx, status.Socket)
 	}
+
 	dir, err := os.MkdirTemp("", "orchid-herdr-")
 	if err != nil {
 		return nil, err

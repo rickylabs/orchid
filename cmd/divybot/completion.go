@@ -360,7 +360,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			readPrivateActionJSON(filepath.Join(record, "teardown-anchor.json"), &anchor) == nil
 	}
 	if readIntent() && c.teardownObserveOne(check, intent) {
-		if host.stopRemoteRun(check, j) != nil || check.Err() != nil {
+		if host.releaseRemoteResources(check, j) != nil || check.Err() != nil {
 			return true
 		}
 		c.st.mu.Lock()

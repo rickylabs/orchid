@@ -327,6 +327,13 @@ func (h Host) stopRemoteRun(ctx context.Context, j *Job) error {
 		if err := p.verifyRemoteThread(j.RemoteControl, false); err != nil {
 			return err
 		}
+		children, err := p.remoteChildren()
+		if err != nil {
+			return err
+		}
+		if p.remoteResourcesAbsent(children) {
+			return nil
+		}
 		return p.stopRemoteWork(intent)
 	})
 }

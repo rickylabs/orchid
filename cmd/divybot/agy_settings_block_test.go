@@ -34,7 +34,7 @@ func TestAGYUnreadableStateBlocksBeforeNativeSeatAndSurvivesRestart(t *testing.T
 			ssh := `#!/usr/bin/env python3
 import os,subprocess,sys
 s=sys.argv[-1]
-if 'pwd -P' in s or s.startswith('if test -f ') or 'exec head -c' in s or 'command -v awk' in s or '__DIVYBOT_EOF__' in s or 'git rev-parse --git-path info/exclude' in s:
+if '# orchid-checkout-root' in s or 'pwd -P' in s or s.startswith('if test -f ') or 'exec head -c' in s or 'command -v awk' in s or '__DIVYBOT_EOF__' in s or 'git rev-parse --git-path info/exclude' in s:
  p=subprocess.run(['/bin/bash','-c',s]);sys.exit(p.returncode)
 if "'workspace' 'create'" in s or "'agent' 'start'" in s:
  with open(os.environ['REGISTRATION_CALLS'],'a') as f:f.write('seat attempted\n')
