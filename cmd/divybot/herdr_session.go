@@ -19,17 +19,20 @@ func (h Host) herdrScope() *herdrScope {
 	return &herdrScope{Session: herdrSession(h.HerdrSession), Machine: h.HerdrMachine}
 }
 func sameHerdrScope(a, b *herdrScope) bool {
+	if a == nil && b == nil {
+		return true
+	}
 	if a == nil {
-		a = &herdrScope{}
+		return herdrSession(b.Session) == "default"
 	}
 	if b == nil {
-		b = &herdrScope{}
+		return herdrSession(a.Session) == "default"
 	}
 	return herdrSession(a.Session) == herdrSession(b.Session) && a.Machine == b.Machine
 }
 func jobOccupant(a AgentInfo, j *Job) bool {
 	return j != nil && a.Agent == j.Agent && a.PaneID == j.Pane && a.WorkspaceID == j.Workspace && a.Name == j.Label &&
-		(j.TerminalID == "" || a.TerminalID == j.TerminalID) && (j.Workdir == "" || a.Cwd == j.Workdir) && sameHerdrScope(a.HerdrScope, j.HerdrScope)
+		(j.TerminalID == "" || a.TerminalID == j.TerminalID) && (j.Workdir == "" || a.Cwd == j.Workdir) && sameHerdrScope(a.HerdrScope, j.HerdrScope) && jobNativeOccupant(a, j)
 }
 func jobRefMatches(ref agentRef, j *Job) bool {
 	return j != nil && ref.Host == j.Host && ref.Pane == j.Pane && ref.Workspace == j.Workspace && accountKey(ref.Agent) == accountKey(j.Agent) &&
@@ -49,4 +52,32 @@ func scopedAgentResponse(raw json.RawMessage, j *Job) bool {
 	return jobOccupant(r.Agent, j)
 }
 
-func hScope(h Host) *herdrScope { return h.herdrScope() }
+func (h Host) observerKey() string {
+	if herdrSession(h.HerdrSession) == "default" && h.HerdrMachine == "" {
+		return h.Name
+	}
+	return h.Name + "\x00" + herdrSession(h.HerdrSession) + "\x00" + h.HerdrMachine
+}
+func (c *Coord) herdrObserverHosts() map[string]Host {
+	hosts := map[string]Host{}
+	for _, h := range c.hosts {
+		hosts[h.observerKey()] = h
+	}
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	for _, j := range c.st.Jobs {
+		if h, ok := c.hosts[j.Host]; ok {
+			h = h.forJob(j)
+			hosts[h.observerKey()] = h
+		}
+	}
+	return hosts
+}
+
+func jobNativeOccupant(a AgentInfo, j *Job) bool {
+	if j.NativeSessionID == "" || (j.Agent != "claude" && j.Agent != "codex") {
+		return true
+	}
+	var session struct{ Source, Agent, Kind, Value string }
+	return json.Unmarshal(a.AgentSession, &session) == nil && lifecycleSource(session.Source, j.Agent) && session.Agent == j.Agent && session.Kind == "id" && session.Value == j.NativeSessionID
+}

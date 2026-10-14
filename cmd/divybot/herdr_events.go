@@ -253,6 +253,7 @@ func (h Host) agentSnapshot(ctx context.Context) ([]AgentInfo, error) {
 }
 
 type herdrFleet struct {
+	hosts  map[string]Host
 	mu     sync.RWMutex
 	agents map[string][]AgentInfo
 	up     map[string]bool
@@ -273,8 +274,8 @@ func (f *herdrFleet) publish(host string, agents []AgentInfo, up bool) {
 	}
 }
 func (c *Coord) startHerdrFleet(ctx context.Context) {
-	c.fleet = &herdrFleet{agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
-	for name, host := range c.hosts {
+	c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	for name, host := range c.fleet.hosts {
 		go watchHerdrFleet(ctx, host.herdrEventConnection, host.agentSnapshot,
 			func(agents []AgentInfo, up bool) { c.fleet.publish(name, agents, up) })
 	}
@@ -337,7 +338,7 @@ func watchHerdrFleet(ctx context.Context, connect func(context.Context) (io.Read
 // Only routine observations use the snapshot. Effect-time identity checks still
 // perform independent authoritative reads before input or retirement.
 func (c *Coord) fleetAgentResponse(ctx context.Context, h Host, pane string) (json.RawMessage, error) {
-	if c.fleet == nil || !sameHerdrScope(h.herdrScope(), c.hosts[h.Name].herdrScope()) {
+	if c.fleet == nil {
 		out, err := h.herdr(ctx, "agent", "get", pane)
 		if err != nil {
 			return nil, err
@@ -346,11 +347,11 @@ func (c *Coord) fleetAgentResponse(ctx context.Context, h Host, pane string) (js
 	}
 	c.fleet.mu.RLock()
 	defer c.fleet.mu.RUnlock()
-	if !c.fleet.up[h.Name] {
+	if !c.fleet.up[h.observerKey()] {
 		return nil, errors.New("herdr observation unavailable")
 	}
 	var found *AgentInfo
-	for _, a := range c.fleet.agents[h.Name] {
+	for _, a := range c.fleet.agents[h.observerKey()] {
 		if a.PaneID == pane {
 			if found != nil {
 				return nil, errors.New("ambiguous herdr occupant")

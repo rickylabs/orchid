@@ -772,7 +772,7 @@ func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, profile string,
 	return actionIDPattern.MatchString(expected.OperationID) && d.State == "dispatched" &&
 		d.Source == route.Transport && d.Provider == route.Provider && d.Model == route.Model && d.Effort == route.Effort &&
 		d.Profile == profile && d.ProfileRevision == cfg.profileRevision() && d.MatrixSource == matrixSourceRepository && d.MatrixRevision == cfg.Revision &&
-		d.Host == host.Name && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
+		d.Host == host.Name && sameHerdrScope(d.HerdrScope, host.herdrScope()) && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
 		expected.Tier == route.Tier && expected.Role == route.Role
 }
 

@@ -38,7 +38,7 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 		return err == nil && filepath.IsAbs(path) && filepath.Clean(path) == path && real == path
 	}
 	if !canonical(p.RepoRoot) || !canonical(p.WorktreesRoot) || filepath.Base(p.RepoRoot) != "repo" || filepath.Base(p.WorktreesRoot) != "worktrees" || filepath.Dir(p.RepoRoot) != filepath.Dir(p.WorktreesRoot) ||
-		c.WorkspaceID == "" || c.WorkspaceCwd != p.RepoRoot || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") ||
+		c.WorkspaceID == "" || c.WorkspaceCwd != p.RepoRoot || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") || filepath.Clean(r.Branch) != r.Branch ||
 		r.Path == "" || !filepath.IsAbs(r.Path) || filepath.Clean(r.Path) != r.Path || r.Path != filepath.Join(p.WorktreesRoot, r.Branch) {
 		return errWorktreePolicy
 	}
@@ -61,14 +61,15 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 	var listed struct {
 		Type   string `json:"type"`
 		Source struct {
-			RepoRoot string `json:"repo_root"`
+			RepoRoot     string `json:"repo_root"`
+			CheckoutPath string `json:"source_checkout_path"`
 		} `json:"source"`
 		Worktrees []struct {
 			Path   string `json:"path"`
 			Branch string `json:"branch"`
 		} `json:"worktrees"`
 	}
-	if err != nil || len(raw) > 1024*1024 || json.Unmarshal(raw, &listed) != nil || listed.Type != "worktree_list" || listed.Source.RepoRoot != p.RepoRoot || listed.Worktrees == nil {
+	if err != nil || len(raw) > 1024*1024 || json.Unmarshal(raw, &listed) != nil || listed.Type != "worktree_list" || listed.Source.RepoRoot != p.RepoRoot || listed.Source.CheckoutPath != c.WorkspaceCwd || listed.Worktrees == nil {
 		return errWorktreePolicy
 	}
 	method := "create"
@@ -99,7 +100,8 @@ func herdrWorktreeCLI(out io.Writer) int {
 	var c herdrPluginContext
 	var r herdrWorktreeRequest
 	raw := os.Getenv("HERDR_PLUGIN_CONTEXT_JSON")
-	if !filepath.IsAbs(state) || !filepath.IsAbs(socket) || len(raw) > 64*1024 || decodeNativeJSON([]byte(raw), &c) != nil || len(c.SelectedText) > 4096 || strictJSON([]byte(c.SelectedText), &r) != nil || readPrivateActionJSON(filepath.Join(state, "checkout-policy.json"), &p) != nil {
+	policy, policyErr := ownerNativePrivateRead(filepath.Join(state, "checkout-policy.json"), os.Getuid())
+	if !ownerNativePrivateDir(state, os.Getuid()) || !filepath.IsAbs(socket) || len(raw) > 64*1024 || decodeNativeJSON([]byte(raw), &c) != nil || c.WorkspaceID != os.Getenv("HERDR_WORKSPACE_ID") || len(c.SelectedText) > 4096 || strictJSON([]byte(c.SelectedText), &r) != nil || policyErr != nil || len(policy) > 4096 || strictJSON(policy, &p) != nil {
 		fmt.Fprintln(out, errWorktreePolicy)
 		return 1
 	}

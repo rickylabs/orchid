@@ -157,6 +157,8 @@ func TestRemoteControlRetirementRetainsCapacityAcrossRestart(t *testing.T) {
 		}
 		a := completionAgent(j)
 		a.AgentSession = json.RawMessage(`{"agent":"claude","kind":"id","source":"herdr:claude","value":"thread-fixture"}`)
+		a.TerminalID = "fixture-terminal"
+		a.VendorEvent = &vendorLifecycleEvent{Agent: a.Agent, Name: a.Name, Pane: a.PaneID, Workspace: a.WorkspaceID, Cwd: a.Cwd, Terminal: a.TerminalID, Session: "thread-fixture", Event: "Stop", Seq: 42}
 		return []AgentInfo{a}, nil
 	}
 	ref := completionRef(j)

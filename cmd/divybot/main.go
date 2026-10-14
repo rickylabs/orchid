@@ -318,6 +318,7 @@ type tracker struct {
 }
 
 type Job struct {
+	NativeSessionID       string            `json:"native_session_id,omitempty"`
 	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
 	HerdrScope            *herdrScope       `json:"herdr_scope,omitempty"`
 	TerminalID            string            `json:"terminal_id,omitempty"`
@@ -2198,7 +2199,7 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 		return nil, false
 	}
 	ref, found := status[n]
-	if !found {
+	if !found || ref.Host == "" {
 		return nil, false
 	}
 	// Preserve native OpenCode identity; legacy run aliases retain their mapping.
@@ -2554,7 +2555,7 @@ func (c *Coord) tick(ctx context.Context) {
 			j.Misses = 0 // present this tick — clear any flicker count
 			continue
 		}
-		if !up[j.Host] {
+		if !up[c.hosts[j.Host].forJob(j).observerKey()] {
 			continue // host unreachable — transient, don't respawn
 		}
 		if j.RunMode {
@@ -2602,6 +2603,7 @@ func (c *Coord) tick(ctx context.Context) {
 			continue
 		}
 		host, ok := c.hosts[d.host]
+		host = host.forJob(d.job)
 		if !ok {
 			continue
 		}
@@ -2810,38 +2812,55 @@ func issueFromCwd(cwd string) int {
 func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]bool) {
 	out := map[int]agentRef{}
 	up := map[string]bool{}
-	if c.fleet != nil {
-		c.fleet.mu.RLock()
-		defer c.fleet.mu.RUnlock()
-		for name, agents := range c.fleet.agents {
-			if !c.fleet.up[name] {
-				continue
-			}
-			up[name] = true
-			for _, a := range agents {
-				if n := issueFromCwd(a.Cwd); n != 0 {
-					out[n] = agentRef{HerdrScope: hScope(c.hosts[name]), TerminalID: a.TerminalID, Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
-				}
-			}
-		}
-		return out, up
+	c.st.mu.Lock()
+	jobs := map[int]*Job{}
+	for n, j := range c.st.Jobs {
+		jobs[n] = j
 	}
-	for name, h := range c.hosts {
-		cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		agents, err := h.agentList(cctx)
-		cancel()
-		if err != nil {
-			log.Printf("fleetStatus %s: %v", name, err)
-			continue
-		}
-		up[name] = true
+	c.st.mu.Unlock()
+	add := func(h Host, agents []AgentInfo) {
 		for _, a := range agents {
 			n := issueFromCwd(a.Cwd)
 			if n == 0 {
 				continue
 			}
-			out[n] = agentRef{HerdrScope: hScope(c.hosts[name]), TerminalID: a.TerminalID, Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			if j := jobs[n]; j != nil && !jobRefMatches(ref, j) {
+				continue
+			}
+			if _, exists := out[n]; exists {
+				out[n] = agentRef{}
+				continue
+			}
+			out[n] = ref
 		}
+	}
+	if c.fleet != nil {
+		c.fleet.mu.RLock()
+		defer c.fleet.mu.RUnlock()
+		for key, agents := range c.fleet.agents {
+			if !c.fleet.up[key] {
+				continue
+			}
+			h, ok := c.fleet.hosts[key]
+			if !ok {
+				continue
+			}
+			up[key] = true
+			add(h, agents)
+		}
+		return out, up
+	}
+	for key, h := range c.herdrObserverHosts() {
+		check, cancel := context.WithTimeout(ctx, 12*time.Second)
+		agents, err := h.agentList(check)
+		cancel()
+		if err != nil {
+			log.Printf("fleetStatus %s: observation unavailable", h.Name)
+			continue
+		}
+		up[key] = true
+		add(h, agents)
 	}
 	return out, up
 }
@@ -3441,6 +3460,13 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		Overrides: ovr, RunMode: runMode,
 		FinalReportManaged: !runMode,
 		Home:               is.home(),
+	}
+	var nativeBinding map[string]json.RawMessage
+	if readPrivateActionJSON(filepath.Join(filepath.Dir(receipt.file), "binding.json"), &nativeBinding) == nil {
+		var id string
+		if json.Unmarshal(nativeBinding["NativeSessionID"], &id) == nil && privateNativeID(id) {
+			j.NativeSessionID = id
+		}
 	}
 	if !runMode {
 		j.GoalDelivery = "pending"

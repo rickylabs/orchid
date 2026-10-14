@@ -302,6 +302,13 @@ func (c *Coord) bindLiveNativeIdentity(ctx context.Context, host Host, j *Job) {
 		return c.fleetAgentResponse(ctx, host, pane)
 	})
 	if bound {
+		c.st.mu.Lock()
+		_, id, err := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
+		if err == nil && id != "" {
+			j.NativeSessionID = id
+			_ = c.st.saveLocked()
+		}
+		c.st.mu.Unlock()
 		log.Printf("issue #%d: live native binding acquired", j.Issue)
 	}
 }

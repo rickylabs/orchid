@@ -294,12 +294,12 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		return false
 	}
 	host, ok := c.hosts[j.Host]
-	host = host.forJob(j)
 	if !ok {
 		return fenced
 	}
 	check, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	host = host.forJob(j)
 	if j.RemoteControl != nil {
 		if fenced {
 			c.clearRemoteControl(j)
@@ -326,7 +326,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			return false
 		}
 		sequence := completionSequence(first)
-		if sequence == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < fleetRecoveryEvery {
+		if sequence == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < completionRetryEvery(j) {
 			return false
 		}
 		complete, err := c.completionEvidence(check, host, j, native)
@@ -528,4 +528,11 @@ func (c *Coord) liveChildLanes(ctx context.Context, h Host, j *Job) string {
 		return fmt.Sprintf("; stopping %d live child processes", live)
 	}
 	return ""
+}
+
+func completionRetryEvery(j *Job) time.Duration {
+	if j.Agent == "claude" {
+		return 15 * time.Second
+	}
+	return fleetRecoveryEvery
 }

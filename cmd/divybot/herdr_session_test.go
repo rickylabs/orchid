@@ -56,8 +56,42 @@ func TestHerdrWaitRejectsIdenticalOccupantInAnotherSession(t *testing.T) {
 		t.Fatal("restored occupant from another session accepted")
 	}
 	b = a
+	j.NativeSessionID = "thread-fixture"
+	b.AgentSession = json.RawMessage(`{"source":"herdr:codex","agent":"codex","kind":"id","value":"replacement-thread"}`)
+	if jobOccupant(b, j) {
+		t.Fatal("changed native conversation accepted")
+	}
+	b = a
 	b.TerminalID = "replacement-terminal"
 	if jobOccupant(b, j) {
 		t.Fatal("replacement occupant accepted")
 	}
+}
+
+func TestHerdrRoleObserversPreserveRecordedSessionOnRestart(t *testing.T) {
+	c, j, _, _, _ := completionFixture(t)
+	h := c.hosts[j.Host]
+	h.HerdrSession = "diagnostics"
+	c.hosts[j.Host] = h
+	j.HerdrScope = &herdrScope{Session: "dispatch"}
+	observed := c.herdrObserverHosts()
+	if len(observed) != 2 {
+		t.Fatal("restart dropped the recorded dispatch observer")
+	}
+	c.fleet = &herdrFleet{hosts: observed, agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	a := completionAgent(j)
+	for key, host := range observed {
+		c.fleet.publish(key, []AgentInfo{a}, true)
+		_ = host
+	}
+	status, up := c.fleetStatus(context.Background())
+	if !jobRefMatches(status[j.Issue], j) || !up[h.forJob(j).observerKey()] {
+		t.Fatal("another session replaced the recorded occupant")
+	}
+	c.fleet.publish(h.forJob(j).observerKey(), nil, false)
+	status, up = c.fleetStatus(context.Background())
+	if _, ok := status[j.Issue]; ok || up[h.forJob(j).observerKey()] {
+		t.Fatal("another session satisfied disconnected job scope")
+	}
+
 }

@@ -47,7 +47,7 @@ func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
 					if mode == "discovered-elsewhere" {
 						trees = append(trees, map[string]any{"path": filepath.Join(root, "old"), "branch": r.Branch})
 					}
-					return string(fixtureJSON(t, map[string]any{"result": map[string]any{"type": "worktree_list", "source": map[string]any{"repo_root": source}, "worktrees": trees}})), nil
+					return string(fixtureJSON(t, map[string]any{"result": map[string]any{"type": "worktree_list", "source": map[string]any{"repo_root": source, "source_checkout_path": repo}, "worktrees": trees}})), nil
 				}
 				if args[1] == "create" {
 					creates++
