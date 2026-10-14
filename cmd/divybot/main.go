@@ -86,8 +86,10 @@ type Host struct {
 	RemoteRun       *remoteControlRun    `json:"-"`
 	ShadowScope     *nativeShadowScope   `json:"-"`
 	Acceptance      *codexAcceptance     `json:"-"`
-	GoalReadiness   *goalReadinessShadow `json:"-"` // observe-only native readiness record
-	ClaudeLinks     *claudeLinkStore     `json:"-"` // Claude session links agreed by Claude's own bound records
+	GoalReadiness   *goalReadinessShadow `json:"-"`                       // observe-only native readiness record
+	ClaudeLinks     *claudeLinkStore     `json:"-"`                       // Claude session links agreed by Claude's own bound records
+	HerdrMachine    string               `json:"herdr_machine,omitempty"` // saved profile in the coordinator account
+	HerdrSession    string               `json:"herdr_session,omitempty"` // expected session; default is default
 	Name            string               `json:"name"`
 	SSH             string               `json:"ssh"`                         // ssh target, e.g. "agent@host" or "localhost"
 	Key             string               `json:"key"`                         // ssh key path; "" = default/agent
@@ -277,7 +279,18 @@ func loadConfig(path string) (*Config, error) {
 	if !c.UnmeteredTransports.valid() {
 		return nil, fmt.Errorf("unmetered_transports requires agy max_active 0..256")
 	}
+	hostNames := map[string]bool{}
 	for i, host := range c.Hosts {
+		if host.Name != "" && hostNames[host.Name] {
+			return nil, fmt.Errorf("hosts[%d].name duplicated", i)
+		}
+		hostNames[host.Name] = true
+		if strings.ContainsAny(host.HerdrMachine+host.HerdrSession, "\x00\r\n") || (host.HerdrMachine != "" && host.SSH == "") {
+			return nil, fmt.Errorf("hosts[%d].herdr_machine invalid", i)
+		}
+		if host.DiskWorkdirRoot != "" && !validRemoteCwd(host.DiskWorkdirRoot) {
+			return nil, fmt.Errorf("hosts[%d].disk_workdir_root invalid", i)
+		}
 		if _, err := host.agentStartBudget(); err != nil {
 			return nil, fmt.Errorf("hosts[%d].agent_start_timeout invalid", i)
 		}
@@ -579,18 +592,6 @@ func (h Host) writeFile(ctx context.Context, path, content string) error {
 		return fmt.Errorf("writeFile %s: %v: %.80q", path, err, out)
 	}
 	return nil
-}
-
-// herdr runs `herdr <args>` on the host with HOME + PATH set for the socket.
-func (h Host) herdr(ctx context.Context, args ...string) (string, error) {
-	q := make([]string, len(args))
-	for i, a := range args {
-		q[i] = shq(a)
-	}
-	home := h.agentHome()
-	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s`,
-		shq(home), strings.Join(q, " "))
-	return h.runRemote(ctx, script)
 }
 
 type herdrEnv struct {

@@ -146,7 +146,16 @@ func (h Host) herdrEventConnection(ctx context.Context) (io.ReadWriteCloser, err
 	dial := func(ctx context.Context, path string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", path)
 	}
-	if h.isLocal() {
+	// --machine exposes CLI commands, not a streaming subscription wrapper.
+	// Use its documented catalog target and discovered socket for the raw API.
+	// The SSH forward carries only subscription bytes, never Herdr shell calls.
+	if h.HerdrMachine != "" {
+		profile, err := h.savedHerdrMachine(ctx)
+		if err != nil {
+			return nil, err
+		}
+		h.SSH = profile.Target
+	} else if h.isLocal() {
 		return dial(ctx, status.Socket)
 	}
 	dir, err := os.MkdirTemp("", "orchid-herdr-")

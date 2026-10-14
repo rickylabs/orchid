@@ -193,3 +193,23 @@ conversation ID after the official integration identity agrees with the durable
 dispatch. This report supplies no lifecycle state and leaves the official
 identity source intact. A replacement occupant or a refused resume report is
 never accepted as a successful registration.
+Set a host's `herdr_machine` to the saved profile ID (or unique label) in the
+coordinator account's Herdr catalog. Keep its existing `ssh`, `home`, and key
+settings for account-specific file, credential and integration operations. The
+profile's SSH target must exactly equal `ssh`; its session must equal
+`herdr_session` (default `default`). Use a distinct host name for each session.
+Missing, disabled, mismatched or disconnected profiles fail explicitly, without
+fallback to Local or another profile. An unset `herdr_machine` preserves existing
+single-host behavior. Each host retains an independent observer and reconnect
+loop; no combined cross-machine snapshot is invented.
+
+Manage profiles with Herdr's documented `machine list --json`, `machine add`,
+`machine status` and `machine reconnect` commands under the profile-owning
+account. Machine setup can install or start a server, so schedule that setup
+separately from a running fleet change. Existing Herdr clients automatically
+show enabled profiles and reconnect independently; a cached disconnected
+machine is never treated as live by Orchid. API commands use
+`herdr --machine <id> ...`; streaming subscriptions use the documented raw
+socket API at the endpoint discovered through that same profile. Installation
+commands remain in the remote launch account because Herdr does not forward
+them with `--machine`.
