@@ -107,7 +107,6 @@ func (h Host) waitAgent(ctx context.Context, expected AgentInfo) (AgentInfo, err
 		Agent AgentInfo `json:"agent"`
 	}
 	if err != nil || decodeNativeJSON(raw, &result) != nil || !samePromptOccupant(expected, result.Agent) || !result.Agent.InteractiveReady ||
-		(!result.Agent.NativeLifecycle && !h.CanonicalCodex) ||
 		(result.Agent.AgentStatus != "idle" && result.Agent.AgentStatus != "done") {
 		return AgentInfo{}, errPromptUnconfirmed
 	}
@@ -115,7 +114,21 @@ func (h Host) waitAgent(ctx context.Context, expected AgentInfo) (AgentInfo, err
 }
 
 func nativePromptObserved(before, after AgentInfo) bool {
-	if !samePromptOccupant(before, after) || !after.NativeLifecycle || after.StateChangeSeq <= before.StateChangeSeq {
+	if !samePromptOccupant(before, after) {
+		return false
+	}
+	if after.Agent == "claude" || after.Agent == "codex" {
+		e := after.VendorEvent
+		if !e.matches(after) {
+			return false
+		}
+		prior := uint64(0)
+		if before.VendorEvent != nil {
+			prior = before.VendorEvent.Seq
+		}
+		return e.Seq > prior && e.Event != "SessionStart"
+	}
+	if !after.NativeLifecycle || after.StateChangeSeq <= before.StateChangeSeq {
 		return false
 	}
 	return after.AgentStatus == "working" || after.AgentStatus == "blocked" ||

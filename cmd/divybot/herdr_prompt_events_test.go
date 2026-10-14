@@ -59,7 +59,7 @@ func TestServerWaitRequiresNativeAuthorityAndExactOccupant(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			_, err := (Host{Home: root}).waitAgent(ctx, expected)
-			if (err == nil) != (mode == "native") {
+			if (err == nil) != (mode != "replacement") {
 				t.Fatal("server wait followed detected or replacement occupant", mode, err)
 			}
 		})

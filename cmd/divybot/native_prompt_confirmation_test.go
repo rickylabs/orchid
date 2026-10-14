@@ -11,7 +11,7 @@ import (
 )
 
 func TestNativePromptWaitsPastHerdrShortGateWithoutResubmitting(t *testing.T) {
-	before := AgentInfo{NativeLifecycle: true, Agent: "codex", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", StateChangeSeq: 7}
+	before := AgentInfo{NativeLifecycle: true, Agent: "opencode", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", StateChangeSeq: 7}
 	checks := 0
 	waits := 0
 	err := awaitNativePrompt(context.Background(), before, func(context.Context) (AgentInfo, error) {
@@ -30,9 +30,9 @@ func TestNativePromptWaitsPastHerdrShortGateWithoutResubmitting(t *testing.T) {
 		name  string
 		after AgentInfo
 	}{
-		{"stale-done", AgentInfo{Agent: "codex", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "done", StateChangeSeq: 7}},
-		{"changed-but-idle", AgentInfo{Agent: "codex", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", StateChangeSeq: 8}},
-		{"wrong-workspace", AgentInfo{Agent: "codex", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w2", AgentStatus: "working", StateChangeSeq: 8}},
+		{"stale-done", AgentInfo{Agent: "opencode", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "done", StateChangeSeq: 7}},
+		{"changed-but-idle", AgentInfo{Agent: "opencode", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", StateChangeSeq: 8}},
+		{"wrong-workspace", AgentInfo{Agent: "opencode", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w2", AgentStatus: "working", StateChangeSeq: 8}},
 		{"wrong-agent", AgentInfo{Agent: "claude", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "working", StateChangeSeq: 8}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -7,10 +7,16 @@ foreign-session events cannot update the occupant. Ordered hook sequences keep
 an older report from overwriting a newer one. `SessionEnd` releases that source.
 OpenCode uses Herdr's official integration, installed before registration.
 
+The reporters use the supported `herdr:claude` and `herdr:codex` sources and
+verify applied state and native identity after reporting. A private, sequenced
+receipt retains the vendor event independently of screen detection. The
+`screen_detection_skipped` flag is specific to Herdr's full lifecycle allowlist;
+it is not a universal readiness or provenance flag.
+
 Prompt and tool events report working; permission events report blocked; stopped
 turns report idle. Herdr owns status sequencing, completion sequences and event
 publication. Identity-only hooks never prove lifecycle or assignment completion.
-Claude status receipts require Herdr's full lifecycle authority flag. Uncovered
+Claude status receipts require a typed vendor event for the exact terminal and native session. Uncovered
 or unavailable native evidence remains unknown. Codex's exact native turn,
 prompt digest and delivery receipt checks remain authoritative for its managed
 Remote Control transport.
@@ -32,3 +38,9 @@ loss or occupant replacement cancels the delivery. A newer native completion
 sequence covers a fast turn that already returned to idle. OpenCode retains its
 exact persisted prompt proof, reread on event invalidations. Codex retains its
 canonical native turn and durable delivery commit.
+
+Fresh OpenCode readiness precedes the first session-bearing prompt; its official
+plugin becomes authoritative after session selection. AGY readiness retains the
+server startup contract, while acceptance requires a new native user step from
+its existing isolated store. Herdr events wake that read. Neither a displayed
+working state nor identity alone can supply this native acceptance proof.

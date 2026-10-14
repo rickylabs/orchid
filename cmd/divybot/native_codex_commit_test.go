@@ -156,7 +156,7 @@ func stageHerdrPromptHost(t *testing.T, h *accHarness) string {
 		t.Fatal("fixture")
 	}
 	agent, _ := json.Marshal(map[string]any{"result": map[string]any{"agent": map[string]any{"agent": "codex", "name": "codex-fixture", "pane_id": "w1:p1", "workspace_id": "w1",
-		"terminal_id": "fixture-terminal", "screen_detection_skipped": true, "agent_status": "idle", "state_change_seq": 1, "interactive_ready": true, "cwd": "/fixture/project"}}})
+		"terminal_id": "fixture-terminal", "screen_detection_skipped": false, "agent_status": "idle", "state_change_seq": 1, "interactive_ready": true, "cwd": "/fixture/project"}}})
 	screen := "OpenAI Codex (v0.159.3)\n› Anything interesting on the docket?\n" + h.acc.run.NativeSessionID + " fixture-footer\n"
 	_ = os.WriteFile(filepath.Join(state, "agent"), agent, 0600)
 	_ = os.WriteFile(filepath.Join(state, "screen"), []byte(screen), 0600)

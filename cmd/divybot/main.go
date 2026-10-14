@@ -80,6 +80,7 @@ type Mem struct {
 // host is usable iff it's on the tailnet and its herdr answers. Capabilities
 // gate routing (a deno build needs a beefy box, not a phone).
 type Host struct {
+	NativeJob      *Job                 `json:"-"`
 	RemoteControl  *RemoteControlConfig `json:"-"`
 	CanonicalCodex bool                 `json:"-"`
 	RemoteRun      *remoteControlRun    `json:"-"`
@@ -616,19 +617,20 @@ func herdrUnwrap(out string) (json.RawMessage, error) {
 }
 
 type AgentInfo struct {
-	TerminalID       string          `json:"terminal_id"`
-	NativeLifecycle  bool            `json:"screen_detection_skipped"`
-	InteractiveReady bool            `json:"interactive_ready"`
-	AgentSession     json.RawMessage `json:"agent_session"`
-	Agent            string          `json:"agent"`
-	AgentStatus      string          `json:"agent_status"`
-	StateChangeSeq   uint64          `json:"state_change_seq"`
-	CompletionSeq    uint64          `json:"completion_seq"`
-	Cwd              string          `json:"cwd"`
-	PaneID           string          `json:"pane_id"`
-	WorkspaceID      string          `json:"workspace_id"`
-	Label            string          `json:"label"`
-	Name             string          `json:"name"`
+	VendorEvent      *vendorLifecycleEvent `json:"native_lifecycle_event,omitempty"`
+	TerminalID       string                `json:"terminal_id"`
+	NativeLifecycle  bool                  `json:"screen_detection_skipped"`
+	InteractiveReady bool                  `json:"interactive_ready"`
+	AgentSession     json.RawMessage       `json:"agent_session"`
+	Agent            string                `json:"agent"`
+	AgentStatus      string                `json:"agent_status"`
+	StateChangeSeq   uint64                `json:"state_change_seq"`
+	CompletionSeq    uint64                `json:"completion_seq"`
+	Cwd              string                `json:"cwd"`
+	PaneID           string                `json:"pane_id"`
+	WorkspaceID      string                `json:"workspace_id"`
+	Label            string                `json:"label"`
+	Name             string                `json:"name"`
 }
 
 func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
@@ -668,6 +670,7 @@ func (h Host) agentInfoOf(ctx context.Context, target string) (AgentInfo, error)
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return AgentInfo{}, err
 	}
+	r.Agent.VendorEvent = h.vendorLifecycle(ctx, r.Agent)
 	return r.Agent, nil
 }
 
@@ -1018,6 +1021,9 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 	if err != nil || expected.TerminalID == "" || expected.Name == "" {
 		return errPromptUnconfirmed
 	}
+	if expected.Agent == "agy" {
+		return h.injectAGYGoal(ctx, expected, goal, h.NativeJob)
+	}
 	if expected.Agent == "codex" && native {
 		return h.injectCodexGoal(ctx, target, goal, expected)
 	}
@@ -1026,7 +1032,7 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 			return err
 		}
 		before, err := h.agentInfoOf(ctx, target)
-		if err != nil || !samePromptOccupant(expected, before) || !before.NativeLifecycle {
+		if err != nil || !samePromptOccupant(expected, before) {
 			return errPromptUnconfirmed
 		}
 		if _, err = p.observe(ctx); err != nil {

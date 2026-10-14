@@ -353,6 +353,9 @@ func TestSourceRefusalReopensOnlyForItsOwnPolicyGrant(t *testing.T) {
 			f.post("example/project", 7, 3100000102, ownerGitHubID, policyBody, at)
 			c.sourceTick(context.Background())
 			b := c.st.SourceBindings[3100000102]
+			if b == nil {
+				t.Fatal("fresh trigger was not bound after the source start")
+			}
 			if b.Closed == "awaiting-grant" {
 				b.Closed, b.Refusal = "refused", "source-grant-missing"
 				c.st.save()
@@ -395,6 +398,14 @@ func TestSourceRefusalReopensOnlyForItsOwnPolicyGrant(t *testing.T) {
 			if name == "edited" && !b.Regranted {
 				t.Fatal("an edited comment's reconsideration was not spent; it would be read every tick")
 			}
+			if name == "edited" {
+				reads := f.reads
+				c.recheckSourceGrants(context.Background(), time.Now().UTC(), sourceCheckRequestsPerTick)
+				if f.reads != reads {
+					t.Fatal("a spent edited comment was read again for another grant")
+				}
+			}
+
 		})
 	}
 }

@@ -251,6 +251,7 @@ func (h Host) awaitRemoteIdentity(ctx context.Context, kind, label, cwd, expecte
 }
 
 func (h Host) forJob(j *Job) Host {
+	h.NativeJob = j
 	h.CanonicalCodex = j != nil && j.Agent == "codex" && j.RemoteControl != nil
 	if h.CanonicalCodex {
 		h.RemoteRun = j.RemoteControl

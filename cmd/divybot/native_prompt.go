@@ -138,7 +138,7 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 		}
 		native := func(ctx context.Context, _ string, submit func(context.Context) error) error {
 			before, err := h.agentInfoOf(ctx, target)
-			if err != nil || !samePromptOccupant(expected, before) || !before.NativeLifecycle {
+			if err != nil || !samePromptOccupant(expected, before) {
 				return errPromptUnconfirmed
 			}
 			if _, err = p.observe(ctx); err != nil {

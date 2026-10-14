@@ -39,7 +39,7 @@ func TestNativeLifecycleHookUsesExactOccupantAndBoundedVendorEvents(t *testing.T
 				t.Fatal("session end exceeds the vendor deadline")
 			}
 		}
-		for _, mode := range []string{"working", "stopped", "permission", "release", "foreign-pane", "foreign-session", "child", "wrong-cwd"} {
+		for _, mode := range []string{"working", "stopped", "permission", "release", "ignored-report", "foreign-pane", "foreign-session", "child", "wrong-cwd"} {
 			t.Run(agent+"/"+mode, func(t *testing.T) {
 				root := t.TempDir()
 				calls := filepath.Join(root, "calls")
@@ -50,14 +50,17 @@ func TestNativeLifecycleHookUsesExactOccupantAndBoundedVendorEvents(t *testing.T
 				t.Setenv("LIFECYCLE_FIXTURE_AGENT", agent)
 				script := `#!/usr/bin/env python3
 import json,os,sys
-args=sys.argv[1:]
+args=sys.argv[1:];agent=os.environ['LIFECYCLE_FIXTURE_AGENT'];mode=os.environ['LIFECYCLE_FIXTURE_MODE'];path=os.environ['LIFECYCLE_FIXTURE_CALLS']+'.applied'
 if args[:2]==['agent','get']:
- a={'agent':os.environ['LIFECYCLE_FIXTURE_AGENT'],'name':'fixture-agent','pane_id':'w1:p1','workspace_id':'w1','cwd':'/fixture/project','agent_session':{'agent':os.environ['LIFECYCLE_FIXTURE_AGENT'],'kind':'id','value':'fixture-thread'}}
- if os.environ['LIFECYCLE_FIXTURE_MODE']=='foreign-pane':a['pane_id']='w2:p1'
- if os.environ['LIFECYCLE_FIXTURE_MODE']=='foreign-session':a['agent_session']['value']='foreign-thread'
+ a={'agent':agent,'name':'fixture-agent','terminal_id':'fixture-terminal','pane_id':'w1:p1','workspace_id':'w1','cwd':'/fixture/project','agent_status':open(path).read() if os.path.exists(path) else 'idle','screen_detection_skipped':False,'agent_session':{'source':'herdr:'+agent,'agent':agent,'kind':'id','value':'fixture-thread'}}
+ if mode=='foreign-pane':a['pane_id']='w2:p1'
+ if mode=='foreign-session':a['agent_session']['value']='foreign-thread'
  print(json.dumps({'result':{'agent':a}}))
 else:
  with open(os.environ['LIFECYCLE_FIXTURE_CALLS'],'a') as f:f.write(json.dumps(args)+'\n')
+ if args[:2]==['pane','report-agent'] and args[args.index('--source')+1]=='herdr:'+agent and mode!='ignored-report':
+  open(path,'w').write(args[args.index('--state')+1])
+ print(json.dumps({'result':{}}))
 `
 				if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
 					t.Fatal(err)
@@ -81,7 +84,8 @@ else:
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second*4)
 				defer cancel()
-				cmd := exec.CommandContext(ctx, "python3", "-c", nativeLifecycleHook, agent, "fixture-agent", "w1:p1", "w1", "/fixture/project")
+				eventFile := filepath.Join(root, ".divybot-native", "hook", "lifecycle.json")
+				cmd := exec.CommandContext(ctx, "python3", "-c", nativeLifecycleHook, agent, "fixture-agent", "w1:p1", "w1", "/fixture/project", eventFile)
 				cmd.Stdin = bytes.NewReader(fixtureJSON(t, event))
 				out, err := cmd.CombinedOutput()
 				if err != nil || string(out) != "{}\n" {
@@ -94,9 +98,21 @@ else:
 					}
 					return
 				}
-				if err != nil || !strings.Contains(string(logged), want) || !strings.Contains(string(logged), "orchid:"+agent) || !strings.Contains(string(logged), "--seq") {
+				if err != nil || !strings.Contains(string(logged), want) || !strings.Contains(string(logged), "herdr:"+agent) || !strings.Contains(string(logged), "--seq") {
 					t.Fatal("native event was not reported", err, string(logged))
 				}
+				var native vendorLifecycleEvent
+				data, readErr := os.ReadFile(eventFile)
+				if mode == "ignored-report" {
+					if !os.IsNotExist(readErr) {
+						t.Fatal("ignored report retained native proof")
+					}
+					return
+				}
+				if readErr != nil || json.Unmarshal(data, &native) != nil || native.Event != event["hook_event_name"] || native.Terminal != "fixture-terminal" {
+					t.Fatal("native vendor provenance absent", readErr)
+				}
+
 			})
 		}
 	}
@@ -113,5 +129,29 @@ func TestCodexNativeDeliveryIgnoresComposerBeforeSubmission(t *testing.T) {
 	})
 	if err != nil || calls != 1 {
 		t.Fatal("native delivery still depends on composer text", err, calls)
+	}
+}
+
+func TestPartialReporterCanReachPrePromptReadiness(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, ".local", "bin")
+	if err := os.MkdirAll(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"claude", "codex", "opencode", "agy"} {
+		a := promptFixture().Agent
+		a.Agent = agent
+		a.NativeLifecycle = false
+		a.AgentSession = nil
+		body, _ := json.Marshal(map[string]any{"result": map[string]any{"agent": a}})
+		if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' "+shq(string(body))+"\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := (Host{Home: root}).waitAgent(ctx, a)
+		cancel()
+		if err != nil {
+			t.Fatal("pre-prompt readiness requires unavailable lifecycle authority", agent, err)
+		}
 	}
 }
