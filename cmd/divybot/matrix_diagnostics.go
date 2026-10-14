@@ -338,6 +338,7 @@ var matrixSites = map[string]bool{
 	"spawn.workspace-handles":              true,
 	"launch.target":                        true,
 	"launch.auth-sync":                     true,
+	"launch.worktree-location":             true,
 	"launch.worktree":                      true,
 	"launch.worktree-origin":               true,
 	"launch.goal-file":                     true,

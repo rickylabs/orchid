@@ -297,7 +297,7 @@ import json,os,pathlib,subprocess,sys
 script=sys.argv[-1]
 with open(os.environ['FINAL_COMMENT_CALLS'],'a') as f:f.write(json.dumps(script)+'\n')
 root=pathlib.Path(os.environ['FINAL_COMMENT_WORKDIR'])
-if 'command -v awk' in script or '__DIVYBOT_EOF__' in script:
+if '# orchid-checkout-root' in script or 'command -v awk' in script or '__DIVYBOT_EOF__' in script:
  p=subprocess.run(['/bin/sh','-c',script]);sys.exit(p.returncode)
 if "'workspace' 'create'" in script:
  # The real constructor and exclusion must already exist at the seat effect.

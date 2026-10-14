@@ -168,3 +168,12 @@ allow path: reported exhaustion yields `budget-reached`; missing authoritative
 allowance or an enforceable full-run bound yields `budget-unavailable`. See
 [provider budgets](../../docs/provider-budgets.md) for the strict config fields,
 source scope, published six-field decisions and required reservation gate.
+
+Checkout storage is selected per host. `disk_workdir_root` defaults to
+`/var/lib/orchid/worktrees`, a persistent directory mounted by the deployment.
+Orchid does not create that root. Until it exists, `workdir_root` (or the legacy
+default) remains the fallback. Existing issue checkouts stay at their original
+location even after the mount appears; duplicate copies refuse preparation.
+The selected path is saved with each new job so cleanup cannot follow a later
+configuration change. Stop and reconcile a job before explicitly migrating its
+checkout; never copy or reset an in-flight checkout to switch storage.

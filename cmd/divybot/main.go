@@ -80,21 +80,22 @@ type Mem struct {
 // host is usable iff it's on the tailnet and its herdr answers. Capabilities
 // gate routing (a deno build needs a beefy box, not a phone).
 type Host struct {
-	NativeJob      *Job                 `json:"-"`
-	RemoteControl  *RemoteControlConfig `json:"-"`
-	CanonicalCodex bool                 `json:"-"`
-	RemoteRun      *remoteControlRun    `json:"-"`
-	ShadowScope    *nativeShadowScope   `json:"-"`
-	Acceptance     *codexAcceptance     `json:"-"`
-	GoalReadiness  *goalReadinessShadow `json:"-"` // observe-only native readiness record
-	ClaudeLinks    *claudeLinkStore     `json:"-"` // Claude session links agreed by Claude's own bound records
-	Name           string               `json:"name"`
-	SSH            string               `json:"ssh"`          // ssh target, e.g. "agent@host" or "localhost"
-	Key            string               `json:"key"`          // ssh key path; "" = default/agent
-	Home           string               `json:"home"`         // agent user $HOME (creds + socket)
-	WorkdirRoot    string               `json:"workdir_root"` // where issue worktrees live
-	Capabilities   []string             `json:"capabilities"` // e.g. ["build-deno","windows"]
-	Capacity       int                  `json:"capacity"`     // max concurrent agents
+	NativeJob       *Job                 `json:"-"`
+	RemoteControl   *RemoteControlConfig `json:"-"`
+	CanonicalCodex  bool                 `json:"-"`
+	RemoteRun       *remoteControlRun    `json:"-"`
+	ShadowScope     *nativeShadowScope   `json:"-"`
+	Acceptance      *codexAcceptance     `json:"-"`
+	GoalReadiness   *goalReadinessShadow `json:"-"` // observe-only native readiness record
+	ClaudeLinks     *claudeLinkStore     `json:"-"` // Claude session links agreed by Claude's own bound records
+	Name            string               `json:"name"`
+	SSH             string               `json:"ssh"`                         // ssh target, e.g. "agent@host" or "localhost"
+	Key             string               `json:"key"`                         // ssh key path; "" = default/agent
+	Home            string               `json:"home"`                        // agent user $HOME (creds + socket)
+	DiskWorkdirRoot string               `json:"disk_workdir_root,omitempty"` // persistent mount; missing mount keeps legacy root
+	WorkdirRoot     string               `json:"workdir_root"`                // where issue worktrees live
+	Capabilities    []string             `json:"capabilities"`                // e.g. ["build-deno","windows"]
+	Capacity        int                  `json:"capacity"`                    // max concurrent agents
 	// Agents restricts which agents may be PLACED on this host (empty = all).
 	// codex's chatgpt-oauth TUI gets Cloudflare-challenged from datacenter IPs
 	// (gcp/vultr), so codex is pinned to residential hosts (mac) via ["claude"]
@@ -304,6 +305,7 @@ type tracker struct {
 }
 
 type Job struct {
+	NativeRestoreTerminal string            `json:"-"` // in-memory resume registration for the current occupant
 	RemoteCleanup         string            `json:"remote_cleanup,omitempty"`
 	RemoteStopOperation   string            `json:"remote_stop_operation,omitempty"`
 	RemoteControl         *remoteControlRun `json:"remote_control,omitempty"`
@@ -321,9 +323,10 @@ type Job struct {
 	Issue                 int               `json:"issue"`
 	Home                  *dispatchIssue    `json:"home,omitempty"` // a comment binding's source issue; nil = inbox issue
 	Host                  string            `json:"host"`
-	Label                 string            `json:"label"`     // display name (claude-<n>)
-	Pane                  string            `json:"pane"`      // herdr send/read target (pane id)
-	Workspace             string            `json:"workspace"` // herdr teardown handle
+	Label                 string            `json:"label"`             // display name (claude-<n>)
+	Pane                  string            `json:"pane"`              // herdr send/read target (pane id)
+	Workdir               string            `json:"workdir,omitempty"` // exact checkout selected at launch
+	Workspace             string            `json:"workspace"`         // herdr teardown handle
 	Target                string            `json:"target"`
 	Repo                  string            `json:"repo"`
 	Branch                string            `json:"branch"`
@@ -3246,11 +3249,12 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	acancel()
 
 	branch := fmt.Sprintf("%s%d", c.cfg.BranchPrefix, n)
-	root := host.WorkdirRoot
-	if root == "" {
-		root = "/root/orch-work"
+	storageCtx, storageDone := context.WithTimeout(ctx, 15*time.Second)
+	workdir, storageErr := host.checkoutDirectory(storageCtx, n)
+	storageDone()
+	if storageErr != nil {
+		return matrixSite("launch.worktree-location", errMatrix)
 	}
-	workdir := fmt.Sprintf("%s/issue-%d", strings.TrimRight(root, "/"), n)
 	label := fmt.Sprintf("%s-%d", agent, n)
 
 	// 2. Worktree (clone + branch) before the agent runs.
@@ -3391,7 +3395,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 	}
 
 	j := &Job{
-		Issue: n, Host: host.Name, Label: label, Pane: pane, Workspace: ws,
+		Issue: n, Host: host.Name, Label: label, Pane: pane, Workspace: ws, Workdir: workdir,
 		DispatchKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"),
 		Target:      tgt.Label, Repo: tgt.Repo,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
@@ -4052,12 +4056,8 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool 
 	// on-disk clone (orch-work/issue-N), and each carries a multi-GB build/target
 	// dir — left behind they accumulate without bound (115 GB of dead worktrees
 	// filled the mac-mini and ground builds to a halt). rm it on teardown.
-	root := host.WorkdirRoot
-	if root == "" {
-		root = "/root/orch-work"
-	}
-	wd := fmt.Sprintf("%s/issue-%d", strings.TrimRight(root, "/"), n)
-	if strings.Contains(wd, "/issue-") { // belt-and-suspenders: never rm a root
+	wd := host.jobCheckout(j)
+	if validJobCheckout(wd, n) { // belt-and-suspenders: never rm a root
 		rmctx, rmcancel := context.WithTimeout(ctx, 30*time.Second)
 		if _, err := host.runRemote(rmctx, "rm -rf "+shq(wd)); err != nil {
 			log.Printf("issue #%d: worktree cleanup %s failed: %v", n, wd, err)
