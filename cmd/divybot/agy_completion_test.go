@@ -133,7 +133,7 @@ func agyCompletionFixture(t *testing.T, change string) (*Coord, *Job, *bool, *bo
 	}
 	c.cfg.Inbox, c.cfg.Matrix.ReceiptRoot = "fixture/inbox", root
 	a := AgentInfo{Agent: "agy", Name: j.Label, PaneID: j.Pane, WorkspaceID: j.Workspace,
-		Cwd: cwd, InteractiveReady: true, AgentStatus: "done", StateChangeSeq: 42}
+		Cwd: cwd, InteractiveReady: true, AgentStatus: "done", StateChangeSeq: 42, CompletionSeq: 42}
 	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
 		if *seatGone {
 			return nil, nil
@@ -500,5 +500,23 @@ func TestAGYDonePRWorkerKeepsEventRelayWithoutGoalReplay(t *testing.T) {
 	commands, err := os.ReadFile(callLog)
 	if err != nil || strings.Count(string(commands), "'agent' 'prompt'") != 1 || !strings.Contains(string(commands), "New activity on your PR") || strings.Contains(string(commands), "continue — work the assigned issue") || *closes != 0 || len(c.st.CompletedRuns) != 0 {
 		t.Fatal("AGY completion intercepted PR relay or replayed the goal", err)
+	}
+}
+
+func TestAGYViewedCompletionUsesNativeFinalStop(t *testing.T) {
+	c, j, _, _, closes, _ := agyCompletionFixture(t, "")
+	agents, err := c.actions.list(context.Background(), c.hosts[j.Host])
+	if err != nil || len(agents) != 1 {
+		t.Fatal("fixture occupant unavailable")
+	}
+	a := agents[0]
+	a.AgentStatus = "idle"
+	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) { return []AgentInfo{a}, nil }
+	raw, _ := json.Marshal(map[string]any{"result": map[string]any{"type": "agent_info", "agent": a}})
+	t.Setenv("AGY_COMPLETION_AGENT", string(raw))
+	ref := completionRef(j)
+	ref.Status = "idle"
+	if !c.retireCompleted(context.Background(), j.Issue, j, ref, true) || *closes != 1 {
+		t.Fatal("viewed AGY completion lost its certified native final stop")
 	}
 }

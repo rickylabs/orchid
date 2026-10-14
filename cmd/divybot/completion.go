@@ -212,7 +212,7 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 			continue
 		}
 		count++
-		if a.AgentStatus != "done" || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace {
+		if (a.AgentStatus != "done" && a.AgentStatus != "idle") || a.CompletionSeq == 0 || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace {
 			return AgentInfo{}, false
 		}
 		if j.Agent == "opencode" {
@@ -276,7 +276,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		return false
 	}
 	if !fenced && (!known || j == nil || j.Issue != n || !deliveryConfirmed(j) || j.RunMode ||
-		ref.Status != "done" || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent) {
+		(ref.Status != "done" && ref.Status != "idle") || ref.CompletionSeq == 0 || (ref.CompletionSeq == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < fleetRecoveryEvery) || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent) {
 		return false
 	}
 	host, ok := c.hosts[j.Host]
@@ -307,10 +307,17 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if !fenced {
 		agents, err := c.actionList(check, host)
 		first, valid := completionOccupant(agents, j, native)
-		if err != nil || !valid {
+		if err != nil || !valid || first.CompletionSeq != ref.CompletionSeq {
 			return false
 		}
 		complete, err := c.completionEvidence(check, host, j, native)
+		if err == nil && !complete {
+			c.st.mu.Lock()
+			j.CompletionCheckedSeq = first.CompletionSeq
+			j.CompletionCheckedAt = time.Now()
+			_ = c.st.saveLocked()
+			c.st.mu.Unlock()
+		}
 		if err != nil || !complete {
 			// An ended turn is never completion: a coordinator ends its turn to
 			// wait on background lanes. Only the run's own final report or native
@@ -321,7 +328,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		}
 		agents, err = c.actionList(check, host)
 		second, valid := completionOccupant(agents, j, native)
-		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq || !c.checkRemoteHook(check, host, j) || check.Err() != nil {
+		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq || second.CompletionSeq != first.CompletionSeq || !c.checkRemoteHook(check, host, j) || check.Err() != nil {
 			return false
 		}
 		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring"}

@@ -28,7 +28,7 @@ func openCodeCompletionFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int, 
 	}
 	c.cfg.Inbox = "fixture/inbox"
 	c.cfg.Matrix.ReceiptRoot = root
-	a := AgentInfo{Agent: j.Agent, Name: j.Label, PaneID: j.Pane, WorkspaceID: j.Workspace, Cwd: j.OpenCode.Cwd, InteractiveReady: true, AgentStatus: "done", StateChangeSeq: 42}
+	a := AgentInfo{Agent: j.Agent, Name: j.Label, PaneID: j.Pane, WorkspaceID: j.Workspace, Cwd: j.OpenCode.Cwd, InteractiveReady: true, AgentStatus: "done", StateChangeSeq: 42, CompletionSeq: 42}
 	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
 		if *seatGone {
 			return nil, nil

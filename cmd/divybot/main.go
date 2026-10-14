@@ -311,6 +311,8 @@ type Job struct {
 	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"` // legacy, unread
 	OwnerMismatchNotice   string            `json:"owner_mismatch_notice,omitempty"`
 	CompletionUnprovenSeq *uint64           `json:"completion_unproven_seq,omitempty"`
+	CompletionCheckedAt   time.Time         `json:"completion_checked_at,omitempty"`
+	CompletionCheckedSeq  uint64            `json:"completion_checked_seq,omitempty"`
 	GoalDelivery          string            `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
 	GoalDeliveryCommit    string            `json:"goal_delivery_commit,omitempty"` // RC Codex on-time native commit marker
 	NativeGoal            *dispatchGoal     `json:"native_goal,omitempty"`
@@ -618,6 +620,7 @@ type AgentInfo struct {
 	Agent            string          `json:"agent"`
 	AgentStatus      string          `json:"agent_status"`
 	StateChangeSeq   uint64          `json:"state_change_seq"`
+	CompletionSeq    uint64          `json:"completion_seq"`
 	Cwd              string          `json:"cwd"`
 	PaneID           string          `json:"pane_id"`
 	WorkspaceID      string          `json:"workspace_id"`
@@ -2767,6 +2770,7 @@ type agentRef struct {
 	Pane           string // send/read target
 	Workspace      string // teardown handle
 	StateChangeSeq uint64
+	CompletionSeq  uint64
 }
 
 // A completed herdr turn remains a warm, supervised job. It no longer consumes
@@ -2851,7 +2855,7 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 			if n == 0 {
 				continue
 			}
-			out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq}
+			out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
 		}
 	}
 	return out, up
@@ -3624,7 +3628,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		}
 		c.observeRemoteControl(ctx, host, j)
 	}
-	suppressInput := !matched || ref.Status == "done"
+	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && ref.CompletionSeq != 0)
 	if matched && j.Agent == "agy" {
 		c.bindAGYLiveIdentity(ctx, host, j)
 	}
