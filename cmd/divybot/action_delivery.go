@@ -64,6 +64,7 @@ type actionReceipt struct {
 }
 
 type actionCalls struct {
+	notify            func(context.Context, Host, string, string) error
 	completionPR      func(context.Context, *Job) (bool, error)
 	completed         func(context.Context, Host, *Job, string) (bool, error)
 	list              func(context.Context, Host) ([]AgentInfo, error)

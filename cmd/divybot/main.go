@@ -318,6 +318,7 @@ type tracker struct {
 }
 
 type Job struct {
+	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
 	HerdrScope            *herdrScope       `json:"herdr_scope,omitempty"`
 	TerminalID            string            `json:"terminal_id,omitempty"`
 	NativeRestoreTerminal string            `json:"-"` // in-memory resume registration for the current occupant
@@ -658,7 +659,7 @@ func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
 	for i := range r.Agents {
 		a := &r.Agents[i]
 		a.HerdrScope = h.herdrScope()
-		if a.Agent == "claude" && (a.AgentStatus == "idle" || a.AgentStatus == "done") {
+		if (a.Agent == "claude" && (a.AgentStatus == "idle" || a.AgentStatus == "done" || a.AgentStatus == "blocked")) || (a.Agent == "codex" && a.AgentStatus == "blocked") {
 			a.VendorEvent = h.vendorLifecycle(ctx, *a)
 		}
 	}
@@ -3734,6 +3735,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 
 	// Blocked: agent waiting for input it can't get in the swarm → escalate.
 	if matched && ref.Status == "blocked" {
+		c.emitHerdrAlert(ctx, j, "native-block", "")
 		c.transitionGoal(ctx, j, "blocked")
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)
 		c.notify(fmt.Sprintf("issue #%d blocked — needs input", n))

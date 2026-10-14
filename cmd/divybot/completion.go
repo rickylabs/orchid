@@ -154,6 +154,7 @@ func completionGoalAllowsRetirement(j *Job, goal *nativeGoal) bool {
 }
 
 func (c *Coord) noteCompletionUnproven(j *Job, seq uint64) {
+	c.emitHerdrAlert(context.Background(), j, "policy", "completion-unproven")
 	c.st.mu.Lock()
 	if j.CompletionUnprovenSeq != nil && *j.CompletionUnprovenSeq == seq {
 		c.st.mu.Unlock()

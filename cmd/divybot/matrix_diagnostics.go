@@ -191,6 +191,10 @@ func (c *Coord) reportIssueMatrixRefusal(ctx context.Context, n int, is Issue, r
 	c.st.mu.Lock()
 	notified := c.st.MatrixNotices[n] == key
 	c.st.mu.Unlock()
+	c.st.mu.Lock()
+	alertJob := c.st.Jobs[n]
+	c.st.mu.Unlock()
+	c.emitHerdrAlert(ctx, alertJob, "policy", r.ReasonCode)
 	if notified {
 		return
 	}
