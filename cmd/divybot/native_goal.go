@@ -293,11 +293,7 @@ func (c *Coord) bindLiveNativeIdentity(ctx context.Context, host Host, j *Job) {
 	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	bound, _ := retryLiveNativeBinding(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j, func(ctx context.Context, pane string) (json.RawMessage, error) {
-		out, e := host.herdr(ctx, "agent", "get", pane)
-		if e != nil {
-			return nil, e
-		}
-		return herdrUnwrap(out)
+		return c.fleetAgentResponse(ctx, host, pane)
 	})
 	if bound {
 		log.Printf("issue #%d: live native binding acquired", j.Issue)

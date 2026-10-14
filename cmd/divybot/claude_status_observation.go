@@ -133,11 +133,7 @@ func (c *Coord) observeClaudeWorking(ctx context.Context, host Host, j *Job) {
 	defer cancel()
 	_ = observeClaudeWorking(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j,
 		func(ctx context.Context, pane string) (json.RawMessage, error) {
-			out, err := host.herdr(ctx, "agent", "get", pane)
-			if err != nil {
-				return nil, err
-			}
-			return herdrUnwrap(out)
+			return c.fleetAgentResponse(ctx, host, pane)
 		}, time.Now())
 }
 

@@ -354,7 +354,8 @@ type Job struct {
 	// herdr load, just after a coordinator restart). Dropping on a single miss
 	// mass-respawns live agents on any such flicker; require deadMissThreshold
 	// consecutive misses before declaring an agent truly gone. Reset on presence.
-	Misses int `json:"misses,omitempty"`
+	LastMissAt time.Time `json:"last_miss_at,omitempty"`
+	Misses     int       `json:"misses,omitempty"`
 }
 
 type State struct {
@@ -2201,6 +2202,7 @@ func relaxBucket(used float64) bool { return used < govEngageFloorPct }
 // ============================ coordinator ============================
 
 type Coord struct {
+	fleet       *herdrFleet
 	finalCalls  finalPublicationCalls
 	finalMu     sync.Mutex
 	ownerGrants *ownerNativeGrantStore
@@ -2302,15 +2304,16 @@ func (c *Coord) run(ctx context.Context) {
 		defer t.Stop()
 		c.shadowReadoutLoop(ctx, t.C, time.Now())
 	}()
-	iv := durOr(c.cfg.PollInterval, 30*time.Second)
-	t := time.NewTicker(iv)
+	c.startHerdrFleet(ctx)
+	t := time.NewTicker(fleetRecoveryEvery)
 	defer t.Stop()
-	c.tick(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			c.st.save()
 			return
+		case <-c.fleet.wake:
+			c.tick(ctx)
 		case <-t.C:
 			c.tick(ctx)
 		}
@@ -2594,6 +2597,7 @@ func (c *Coord) tick(ctx context.Context) {
 			continue // an uncertain cleanup is never a disappeared launch
 		}
 		if _, alive := status[n]; alive {
+			j.LastMissAt = time.Time{}
 			j.Misses = 0 // present this tick — clear any flicker count
 			continue
 		}
@@ -2614,6 +2618,11 @@ func (c *Coord) tick(ctx context.Context) {
 		// live agent (mid-render, herdr load, post-restart). Only declare it gone
 		// after deadMissThreshold consecutive absences so one flicker can't
 		// mass-respawn the host's live agents.
+		// Event bursts must not accelerate the former 30-second miss debounce.
+		if time.Since(j.LastMissAt) < 30*time.Second {
+			continue
+		}
+		j.LastMissAt = time.Now()
 		j.Misses++
 		if j.Misses < deadMissThreshold {
 			continue
@@ -2841,6 +2850,22 @@ func issueFromCwd(cwd string) int {
 func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]bool) {
 	out := map[int]agentRef{}
 	up := map[string]bool{}
+	if c.fleet != nil {
+		c.fleet.mu.RLock()
+		defer c.fleet.mu.RUnlock()
+		for name, agents := range c.fleet.agents {
+			if !c.fleet.up[name] {
+				continue
+			}
+			up[name] = true
+			for _, a := range agents {
+				if n := issueFromCwd(a.Cwd); n != 0 {
+					out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+				}
+			}
+		}
+		return out, up
+	}
 	for name, h := range c.hosts {
 		cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		agents, err := h.agentList(cctx)
