@@ -246,6 +246,9 @@ func (h Host) agentSnapshot(ctx context.Context) ([]AgentInfo, error) {
 	if response.Type != "session_snapshot" || response.Snapshot == nil || response.Snapshot.Agents == nil {
 		return nil, errors.New("herdr snapshot invalid")
 	}
+	for i := range response.Snapshot.Agents {
+		response.Snapshot.Agents[i].HerdrScope = h.herdrScope()
+	}
 	return response.Snapshot.Agents, nil
 }
 
@@ -334,7 +337,7 @@ func watchHerdrFleet(ctx context.Context, connect func(context.Context) (io.Read
 // Only routine observations use the snapshot. Effect-time identity checks still
 // perform independent authoritative reads before input or retirement.
 func (c *Coord) fleetAgentResponse(ctx context.Context, h Host, pane string) (json.RawMessage, error) {
-	if c.fleet == nil {
+	if c.fleet == nil || !sameHerdrScope(h.herdrScope(), c.hosts[h.Name].herdrScope()) {
 		out, err := h.herdr(ctx, "agent", "get", pane)
 		if err != nil {
 			return nil, err

@@ -225,7 +225,7 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 			continue
 		}
 		count++
-		if (a.AgentStatus != "done" && a.AgentStatus != "idle") || completionSequence(a) == 0 || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace {
+		if (a.AgentStatus != "done" && a.AgentStatus != "idle") || completionSequence(a) == 0 || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace || !jobOccupant(a, j) {
 			return AgentInfo{}, false
 		}
 		if j.Agent == "opencode" {
@@ -289,10 +289,11 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		return false
 	}
 	if !fenced && (!known || j == nil || j.Issue != n || !deliveryConfirmed(j) || j.RunMode ||
-		(ref.Status != "done" && ref.Status != "idle") || (j.Agent != "claude" && (ref.CompletionSeq == 0 || (ref.CompletionSeq == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < fleetRecoveryEvery))) || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent) {
+		(ref.Status != "done" && ref.Status != "idle") || (j.Agent != "claude" && (ref.CompletionSeq == 0 || (ref.CompletionSeq == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < fleetRecoveryEvery))) || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent || !jobRefMatches(ref, j)) {
 		return false
 	}
 	host, ok := c.hosts[j.Host]
+	host = host.forJob(j)
 	if !ok {
 		return fenced
 	}

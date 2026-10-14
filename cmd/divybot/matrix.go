@@ -536,10 +536,12 @@ type dispatchIssue struct {
 	Number int    `json:"number"`
 }
 type dispatchLocation struct {
+	TerminalID  string `json:"terminalId,omitempty"`
 	PaneID      string `json:"paneId"`
 	WorkspaceID string `json:"workspaceId"`
 }
 type dispatchBinding struct {
+	HerdrScope      *herdrScope       `json:"herdrScope,omitempty"`
 	Provider        string            `json:"provider"`
 	SchemaVersion   int               `json:"schemaVersion"`
 	RunID           string            `json:"runId"`
@@ -959,7 +961,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: c.issueHome(n), Source: route.Transport,
-		Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
+		HerdrScope: host.herdrScope(), Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
 		Provider: route.Provider, Model: route.Model, Role: route.Role, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	handle.profile = &workerProfile{Name: o.Profile, Revision: profileRevision, Text: req.ProfileText} // guard:worker-profile

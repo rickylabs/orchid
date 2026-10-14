@@ -106,7 +106,11 @@ func (h Host) waitAgent(ctx context.Context, expected AgentInfo) (AgentInfo, err
 	var result struct {
 		Agent AgentInfo `json:"agent"`
 	}
-	if err != nil || decodeNativeJSON(raw, &result) != nil || !samePromptOccupant(expected, result.Agent) || !result.Agent.InteractiveReady ||
+	if err != nil || decodeNativeJSON(raw, &result) != nil {
+		return AgentInfo{}, errPromptUnconfirmed
+	}
+	result.Agent.HerdrScope = h.herdrScope()
+	if !samePromptOccupant(expected, result.Agent) || !result.Agent.InteractiveReady ||
 		(result.Agent.AgentStatus != "idle" && result.Agent.AgentStatus != "done") {
 		return AgentInfo{}, errPromptUnconfirmed
 	}

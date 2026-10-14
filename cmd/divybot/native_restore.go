@@ -33,7 +33,7 @@ func (h Host) herdrAccountCommand(ctx context.Context, args ...string) (string, 
 	for i, a := range args {
 		q[i] = shq(a)
 	}
-	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s`, shq(h.agentHome()), strings.Join(q, " "))
+	script := fmt.Sprintf(`unset HERDR_SESSION HERDR_SOCKET_PATH; export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s`, shq(h.agentHome()), strings.Join(q, " "))
 	return h.runRemote(ctx, script)
 }
 

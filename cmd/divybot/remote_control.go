@@ -252,6 +252,13 @@ func (h Host) awaitRemoteIdentity(ctx context.Context, kind, label, cwd, expecte
 
 func (h Host) forJob(j *Job) Host {
 	h.NativeJob = j
+	if j != nil {
+		h.HerdrSession = ""
+		if j.HerdrScope != nil {
+			h.HerdrSession = j.HerdrScope.Session
+			h.HerdrMachine = j.HerdrScope.Machine
+		}
+	}
 	h.CanonicalCodex = j != nil && j.Agent == "codex" && j.RemoteControl != nil
 	if h.CanonicalCodex {
 		h.RemoteRun = j.RemoteControl

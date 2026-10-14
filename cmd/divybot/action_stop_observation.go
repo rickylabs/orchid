@@ -241,6 +241,7 @@ func (c *Coord) actionObserveStops(ctx context.Context, root string) {
 			continue
 		}
 		host, ok := c.hosts[result.Host]
+		host = host.forJob(&Job{HerdrScope: result.HerdrScope})
 		if !ok {
 			continue
 		}

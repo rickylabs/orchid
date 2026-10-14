@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -15,16 +16,17 @@ import (
 // delivery. Only separate observations of the seat and captured native process
 // can prove that an ordinary teardown actually ended the run.
 type teardownIntent struct {
-	SchemaVersion   int    `json:"schemaVersion"`
-	Issue           int    `json:"issue"`
-	DispatchKey     string `json:"dispatchKey"`
-	NativeRunID     string `json:"nativeRunId"`
-	NativeSessionID string `json:"nativeSessionId"`
-	Host            string `json:"host"`
-	PaneID          string `json:"paneId"`
-	WorkspaceID     string `json:"workspaceId"`
-	Cause           string `json:"cause"` // operator-timeout | teardown
-	StartedAt       string `json:"startedAt"`
+	HerdrScope      *herdrScope `json:"herdrScope,omitempty"`
+	SchemaVersion   int         `json:"schemaVersion"`
+	Issue           int         `json:"issue"`
+	DispatchKey     string      `json:"dispatchKey"`
+	NativeRunID     string      `json:"nativeRunId"`
+	NativeSessionID string      `json:"nativeSessionId"`
+	Host            string      `json:"host"`
+	PaneID          string      `json:"paneId"`
+	WorkspaceID     string      `json:"workspaceId"`
+	Cause           string      `json:"cause"` // operator-timeout | teardown
+	StartedAt       string      `json:"startedAt"`
 }
 
 type teardownObservation struct {
@@ -164,7 +166,7 @@ func (c *Coord) teardownStart(ctx context.Context, n int, j *Job, ws, cause stri
 	if readPrivateActionJSON(filepath.Join(record, "dispatch.json"), &dispatch) != nil ||
 		dispatch.SchemaVersion != 1 || dispatch.State != "dispatched" || dispatch.RunID != runID ||
 		dispatch.Issue != c.issueHome(n) ||
-		dispatch.Host != j.Host || dispatch.Location == nil ||
+		dispatch.Host != j.Host || !sameHerdrScope(dispatch.HerdrScope, j.HerdrScope) || dispatch.Location == nil ||
 		dispatch.Location.PaneID != j.Pane || dispatch.Location.WorkspaceID != ws {
 		return
 	}
@@ -180,6 +182,7 @@ func (c *Coord) teardownStart(ctx context.Context, n int, j *Job, ws, cause stri
 		return
 	}
 	host, ok := c.hosts[j.Host]
+	host = host.forJob(j)
 	if !ok {
 		return
 	}
@@ -201,7 +204,7 @@ func (c *Coord) teardownStart(ctx context.Context, n int, j *Job, ws, cause stri
 		return
 	}
 	intent := teardownIntent{SchemaVersion: 1, Issue: n, DispatchKey: j.DispatchKey, NativeRunID: runID,
-		NativeSessionID: binding.NativeSessionID, Host: j.Host, PaneID: j.Pane, WorkspaceID: ws,
+		HerdrScope: j.HerdrScope, NativeSessionID: binding.NativeSessionID, Host: j.Host, PaneID: j.Pane, WorkspaceID: ws,
 		Cause: cause, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if err := actionImmutableJSON(record, "teardown-anchor.json", anchor); err != nil {
 		return
@@ -259,6 +262,7 @@ func (c *Coord) teardownObserveOne(ctx context.Context, intent teardownIntent) b
 		return false
 	}
 	host, ok := c.hosts[intent.Host]
+	host = host.forJob(&Job{HerdrScope: intent.HerdrScope})
 	if !ok {
 		return false
 	}
@@ -268,7 +272,7 @@ func (c *Coord) teardownObserveOne(ctx context.Context, intent teardownIntent) b
 	}
 	var persisted teardownIntent
 	var anchor actionStopProcess
-	if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &persisted) != nil || persisted != intent ||
+	if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &persisted) != nil || !reflect.DeepEqual(persisted, intent) ||
 		readPrivateActionJSON(filepath.Join(record, "teardown-anchor.json"), &anchor) != nil {
 		return false
 	}

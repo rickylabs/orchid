@@ -426,7 +426,7 @@ func fixtureGoalBinding(t *testing.T) (*durableMatrixReceipt, *Job, string) {
 	t.Helper()
 	r := registrationReceipt(t, "codex", Overrides{})
 	r.dispatch.Source = "codex"
-	loc := &dispatchLocation{"w1:p1", "w1"}
+	loc := &dispatchLocation{PaneID: "w1:p1", WorkspaceID: "w1"}
 	if r.writeDispatch("dispatched", loc) != nil {
 		t.Fatal("fixture dispatch failed")
 	}
