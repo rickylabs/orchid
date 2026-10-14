@@ -552,6 +552,7 @@ type dispatchBinding struct {
 	MatrixSource    string            `json:"matrixSource,omitempty"`
 	MatrixRevision  string            `json:"matrixRevision"`
 	Model           string            `json:"model"`
+	Role            string            `json:"role,omitempty"`
 	Effort          string            `json:"effort,omitempty"`
 	State           string            `json:"state"`
 	Location        *dispatchLocation `json:"location"`
@@ -959,7 +960,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: c.issueHome(n), Source: route.Transport,
 		Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
-		Provider: route.Provider, Model: route.Model, Effort: route.Effort,
+		Provider: route.Provider, Model: route.Model, Role: route.Role, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	handle.profile = &workerProfile{Name: o.Profile, Revision: profileRevision, Text: req.ProfileText} // guard:worker-profile
 	if e := handle.writeDispatch("reserved", nil); e != nil {

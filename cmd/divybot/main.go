@@ -984,6 +984,13 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			return pane, ws, matrixSite("spawn.remote-control-observation", errMatrix)
 		}
 	}
+	task := ""
+	if len(titles) == 1 {
+		task = titles[0]
+	}
+	if h.publishDisplayMetadata(ctx, receipt.dispatch, task) != nil {
+		log.Printf("issue #%d: display metadata unavailable", receipt.dispatch.Issue.Number)
+	}
 	return pane, ws, nil
 }
 

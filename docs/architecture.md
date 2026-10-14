@@ -62,3 +62,10 @@ prove assignment completion.
 A negative native completion read is reconsidered by recovery even when the
 completion sequence is unchanged. Viewed `idle` completions use the same native
 identity, stable sequence, and final-stop checks as unseen `done` completions.
+
+Each dispatched pane receives display-only `issue`, `model`, `role`, and `task`
+metadata tokens from its verified dispatch binding and short task title. Herdr
+sidebar configuration can render `$issue`, `$model`, `$role`, and `$task`. A
+metadata failure does not alter the dispatch, and tokens never establish identity
+or state. Herdr clears these ephemeral values when the pane closes or its server
+restarts.
