@@ -652,6 +652,12 @@ func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, err
 	}
+	for i := range r.Agents {
+		a := &r.Agents[i]
+		if a.Agent == "claude" && (a.AgentStatus == "idle" || a.AgentStatus == "done") {
+			a.VendorEvent = h.vendorLifecycle(ctx, *a)
+		}
+	}
 	return r.Agents, nil
 }
 
@@ -3575,7 +3581,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		}
 		c.observeRemoteControl(ctx, host, j)
 	}
-	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && ref.CompletionSeq != 0)
+	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && (ref.CompletionSeq != 0 || j.Agent == "claude"))
 	if matched && j.Agent == "agy" {
 		c.bindAGYLiveIdentity(ctx, host, j)
 	}
