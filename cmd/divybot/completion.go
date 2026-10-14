@@ -154,6 +154,7 @@ func completionGoalAllowsRetirement(j *Job, goal *nativeGoal) bool {
 }
 
 func (c *Coord) noteCompletionUnproven(j *Job, seq uint64) {
+	c.emitHerdrAlert(context.Background(), j, "policy", "completion-unproven")
 	c.st.mu.Lock()
 	if j.CompletionUnprovenSeq != nil && *j.CompletionUnprovenSeq == seq {
 		c.st.mu.Unlock()
@@ -204,6 +205,19 @@ func (c *Coord) pruneCompletedRuns(allOpen map[int]bool, pollOK bool, state func
 
 // Use each adapter's certified native identity and exact occupant. Any other
 // agent in the workspace makes a close unsafe.
+// Claude's Stop hook can be authoritative while Herdr's completion counter is
+// still zero. Its vendor receipt pins the native session and terminal; a Stop
+// only permits checking final delivery, never proves assignment completion.
+func completionSequence(a AgentInfo) uint64 {
+	if a.Agent != "claude" {
+		return a.CompletionSeq
+	}
+	if (a.AgentStatus != "idle" && a.AgentStatus != "done") || !a.VendorEvent.matches(a) || a.VendorEvent.Event != "Stop" {
+		return 0
+	}
+	return a.VendorEvent.Seq
+}
+
 func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, bool) {
 	var found AgentInfo
 	count := 0
@@ -212,7 +226,7 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 			continue
 		}
 		count++
-		if (a.AgentStatus != "done" && a.AgentStatus != "idle") || a.CompletionSeq == 0 || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace {
+		if (a.AgentStatus != "done" && a.AgentStatus != "idle") || completionSequence(a) == 0 || a.PaneID != j.Pane || a.WorkspaceID != j.Workspace || !jobOccupant(a, j) {
 			return AgentInfo{}, false
 		}
 		if j.Agent == "opencode" {
@@ -276,7 +290,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		return false
 	}
 	if !fenced && (!known || j == nil || j.Issue != n || !deliveryConfirmed(j) || j.RunMode ||
-		(ref.Status != "done" && ref.Status != "idle") || ref.CompletionSeq == 0 || (ref.CompletionSeq == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < fleetRecoveryEvery) || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent) {
+		(ref.Status != "done" && ref.Status != "idle") || (j.Agent != "claude" && (ref.CompletionSeq == 0 || (ref.CompletionSeq == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < fleetRecoveryEvery))) || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || ref.Agent != j.Agent || !jobRefMatches(ref, j)) {
 		return false
 	}
 	host, ok := c.hosts[j.Host]
@@ -285,6 +299,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	}
 	check, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	host = host.forJob(j)
 	if j.RemoteControl != nil {
 		if fenced {
 			c.clearRemoteControl(j)
@@ -307,13 +322,17 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if !fenced {
 		agents, err := c.actionList(check, host)
 		first, valid := completionOccupant(agents, j, native)
-		if err != nil || !valid || first.CompletionSeq != ref.CompletionSeq {
+		if err != nil || !valid || (j.Agent != "claude" && first.CompletionSeq != ref.CompletionSeq) {
+			return false
+		}
+		sequence := completionSequence(first)
+		if sequence == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < completionRetryEvery(j) {
 			return false
 		}
 		complete, err := c.completionEvidence(check, host, j, native)
 		if err == nil && !complete {
 			c.st.mu.Lock()
-			j.CompletionCheckedSeq = first.CompletionSeq
+			j.CompletionCheckedSeq = sequence
 			j.CompletionCheckedAt = time.Now()
 			_ = c.st.saveLocked()
 			c.st.mu.Unlock()
@@ -328,7 +347,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		}
 		agents, err = c.actionList(check, host)
 		second, valid := completionOccupant(agents, j, native)
-		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq || second.CompletionSeq != first.CompletionSeq || !c.checkRemoteHook(check, host, j) || check.Err() != nil {
+		if err != nil || !valid || second.StateChangeSeq != first.StateChangeSeq || completionSequence(second) != sequence || !c.checkRemoteHook(check, host, j) || check.Err() != nil {
 			return false
 		}
 		fence = completedRun{DispatchKey: j.DispatchKey, NativeSessionID: native, StateChangeSeq: second.StateChangeSeq, Phase: "retiring"}
@@ -400,7 +419,7 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	}
 	agents, err = c.actionList(check, host)
 	after, valid := completionOccupant(agents, j, native)
-	if err != nil || !valid || after.StateChangeSeq != before.StateChangeSeq || !c.checkRemoteHook(check, host, j) {
+	if err != nil || !valid || after.StateChangeSeq != before.StateChangeSeq || completionSequence(after) != completionSequence(before) || !c.checkRemoteHook(check, host, j) {
 		return true
 	}
 	if err = host.stopRemoteRun(check, j); err != nil {
@@ -509,4 +528,11 @@ func (c *Coord) liveChildLanes(ctx context.Context, h Host, j *Job) string {
 		return fmt.Sprintf("; stopping %d live child processes", live)
 	}
 	return ""
+}
+
+func completionRetryEvery(j *Job) time.Duration {
+	if j.Agent == "claude" {
+		return 15 * time.Second
+	}
+	return fleetRecoveryEvery
 }

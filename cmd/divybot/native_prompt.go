@@ -36,7 +36,7 @@ type promptCalls struct {
 
 func samePromptOccupant(a, b AgentInfo) bool {
 	return a.Agent != "" && a.Name != "" && a.PaneID != "" && a.WorkspaceID != "" &&
-		a.Agent == b.Agent && a.Name == b.Name && a.PaneID == b.PaneID && a.WorkspaceID == b.WorkspaceID && a.Cwd == b.Cwd && a.TerminalID == b.TerminalID && sameNativeSession(a.AgentSession, b.AgentSession)
+		a.Agent == b.Agent && a.Name == b.Name && a.PaneID == b.PaneID && a.WorkspaceID == b.WorkspaceID && a.Cwd == b.Cwd && a.TerminalID == b.TerminalID && sameHerdrScope(a.HerdrScope, b.HerdrScope) && sameNativeSession(a.AgentSession, b.AgentSession)
 }
 
 func codexReady(s promptSnapshot) bool {

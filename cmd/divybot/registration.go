@@ -57,6 +57,10 @@ func (c *Coord) reportBlockedLaunch(ctx context.Context, n int) bool {
 	if !blocked || block.Notified || c.dry {
 		return blocked
 	}
+	c.st.mu.Lock()
+	alertJob := c.st.Jobs[n]
+	c.st.mu.Unlock()
+	c.emitHerdrAlert(ctx, alertJob, "policy", block.Reason)
 	// Keep native handles, paths, process output and credentials out of the issue.
 	reason := "registration_incomplete"
 	switch block.Reason {

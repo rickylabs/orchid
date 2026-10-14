@@ -192,6 +192,7 @@ func (c *Coord) publishFinalReport(ctx context.Context, j *Job) (int64, error) {
 		return 0, err
 	}
 	h, ok := c.hosts[j.Host]
+	h = h.forJob(j)
 	if !ok {
 		return 0, errFinalPublication
 	}

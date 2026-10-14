@@ -536,10 +536,12 @@ type dispatchIssue struct {
 	Number int    `json:"number"`
 }
 type dispatchLocation struct {
+	TerminalID  string `json:"terminalId,omitempty"`
 	PaneID      string `json:"paneId"`
 	WorkspaceID string `json:"workspaceId"`
 }
 type dispatchBinding struct {
+	HerdrScope      *herdrScope       `json:"herdrScope,omitempty"`
 	Provider        string            `json:"provider"`
 	SchemaVersion   int               `json:"schemaVersion"`
 	RunID           string            `json:"runId"`
@@ -770,7 +772,7 @@ func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, profile string,
 	return actionIDPattern.MatchString(expected.OperationID) && d.State == "dispatched" &&
 		d.Source == route.Transport && d.Provider == route.Provider && d.Model == route.Model && d.Effort == route.Effort &&
 		d.Profile == profile && d.ProfileRevision == cfg.profileRevision() && d.MatrixSource == matrixSourceRepository && d.MatrixRevision == cfg.Revision &&
-		d.Host == host.Name && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
+		d.Host == host.Name && sameHerdrScope(d.HerdrScope, host.herdrScope()) && d.BudgetSource == route.BudgetSource && reflect.DeepEqual(d.TokenBudget, route.TokenBudget) &&
 		expected.Tier == route.Tier && expected.Role == route.Role
 }
 
@@ -959,7 +961,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	handle.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key,
 		Issue: c.issueHome(n), Source: route.Transport,
-		Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
+		HerdrScope: host.herdrScope(), Host: host.Name, Profile: o.Profile, ProfileRevision: profileRevision, MatrixSource: matrixSource, MatrixRevision: matrixRevision,
 		Provider: route.Provider, Model: route.Model, Role: route.Role, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	handle.profile = &workerProfile{Name: o.Profile, Revision: profileRevision, Text: req.ProfileText} // guard:worker-profile

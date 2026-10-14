@@ -39,30 +39,32 @@ type actionRequest struct {
 }
 
 type actionReceipt struct {
-	SchemaVersion         int    `json:"schemaVersion"`
-	OperationID           string `json:"operationId"`
-	RequestDigest         string `json:"requestDigest"`
-	IdempotencyKey        string `json:"idempotencyKey"`
-	Repository            string `json:"repository,omitempty"`
-	IssueNumber           int    `json:"issueNumber,omitempty"`
-	AgentID               string `json:"agentId,omitempty"`
-	DispatchID            string `json:"dispatchId,omitempty"`
-	Action                string `json:"action,omitempty"`
-	NativeRunID           string `json:"nativeRunId,omitempty"`
-	NativeSessionID       string `json:"nativeSessionId,omitempty"`
-	Host                  string `json:"host,omitempty"`
-	PaneID                string `json:"paneId,omitempty"`
-	WorkspaceID           string `json:"workspaceId,omitempty"`
-	Outcome               string `json:"outcome"` // accepted|rejected|unknown, never execution
-	Reason                string `json:"reason"`
-	ObservedAt            string `json:"observedAt"`
-	ReplacementAgentID    string `json:"replacementAgentId,omitempty"`
-	ReplacementDispatchID string `json:"replacementDispatchId,omitempty"`
-	TokenBudget           *int64 `json:"tokenBudget,omitempty"`
-	MessageID             string `json:"messageId,omitempty"`
+	HerdrScope            *herdrScope `json:"herdrScope,omitempty"`
+	SchemaVersion         int         `json:"schemaVersion"`
+	OperationID           string      `json:"operationId"`
+	RequestDigest         string      `json:"requestDigest"`
+	IdempotencyKey        string      `json:"idempotencyKey"`
+	Repository            string      `json:"repository,omitempty"`
+	IssueNumber           int         `json:"issueNumber,omitempty"`
+	AgentID               string      `json:"agentId,omitempty"`
+	DispatchID            string      `json:"dispatchId,omitempty"`
+	Action                string      `json:"action,omitempty"`
+	NativeRunID           string      `json:"nativeRunId,omitempty"`
+	NativeSessionID       string      `json:"nativeSessionId,omitempty"`
+	Host                  string      `json:"host,omitempty"`
+	PaneID                string      `json:"paneId,omitempty"`
+	WorkspaceID           string      `json:"workspaceId,omitempty"`
+	Outcome               string      `json:"outcome"` // accepted|rejected|unknown, never execution
+	Reason                string      `json:"reason"`
+	ObservedAt            string      `json:"observedAt"`
+	ReplacementAgentID    string      `json:"replacementAgentId,omitempty"`
+	ReplacementDispatchID string      `json:"replacementDispatchId,omitempty"`
+	TokenBudget           *int64      `json:"tokenBudget,omitempty"`
+	MessageID             string      `json:"messageId,omitempty"`
 }
 
 type actionCalls struct {
+	notify            func(context.Context, Host, string, string) error
 	completionPR      func(context.Context, *Job) (bool, error)
 	completed         func(context.Context, Host, *Job, string) (bool, error)
 	list              func(context.Context, Host) ([]AgentInfo, error)
@@ -514,7 +516,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		dispatch.SchemaVersion != 1 || dispatch.State != "dispatched" || dispatch.RunID != runID ||
 		dispatch.Issue != jobHome(c.cfg.Inbox, j) ||
 		dispatch.Location == nil || dispatch.Location.PaneID != j.Pane || dispatch.Location.WorkspaceID != j.Workspace ||
-		dispatch.Host != j.Host {
+		dispatch.Host != j.Host || !sameHerdrScope(dispatch.HerdrScope, j.HerdrScope) {
 		r.Reason = "dispatch_receipt_unavailable"
 		return
 	}
@@ -563,7 +565,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	matches := 0
 	status := ""
 	for _, a := range agents {
-		if issueFromCwd(a.Cwd) == j.Issue && a.PaneID == j.Pane && a.WorkspaceID == j.Workspace && accountKey(a.Agent) == accountKey(j.Agent) {
+		if issueFromCwd(a.Cwd) == j.Issue && jobOccupant(a, j) {
 			matches++
 			status = a.AgentStatus
 		}
@@ -572,6 +574,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		r.Reason = "seat_identity_unavailable"
 		return
 	}
+	r.HerdrScope = j.HerdrScope
 	r.NativeRunID, r.Host, r.PaneID, r.WorkspaceID = runID, j.Host, j.Pane, j.Workspace
 	if j.RemoteCleanup != "" {
 		r.Outcome, r.Reason = "rejected", "agent_not_live"

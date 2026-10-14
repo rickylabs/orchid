@@ -318,6 +318,10 @@ type tracker struct {
 }
 
 type Job struct {
+	NativeSessionID       string            `json:"native_session_id,omitempty"`
+	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
+	HerdrScope            *herdrScope       `json:"herdr_scope,omitempty"`
+	TerminalID            string            `json:"terminal_id,omitempty"`
 	NativeRestoreTerminal string            `json:"-"` // in-memory resume registration for the current occupant
 	RemoteCleanup         string            `json:"remote_cleanup,omitempty"`
 	RemoteStopOperation   string            `json:"remote_stop_operation,omitempty"`
@@ -621,6 +625,7 @@ func herdrUnwrap(out string) (json.RawMessage, error) {
 }
 
 type AgentInfo struct {
+	HerdrScope       *herdrScope           `json:"herdr_scope,omitempty"`
 	VendorEvent      *vendorLifecycleEvent `json:"native_lifecycle_event,omitempty"`
 	TerminalID       string                `json:"terminal_id"`
 	NativeLifecycle  bool                  `json:"screen_detection_skipped"`
@@ -652,6 +657,13 @@ func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return nil, err
 	}
+	for i := range r.Agents {
+		a := &r.Agents[i]
+		a.HerdrScope = h.herdrScope()
+		if (a.Agent == "claude" && (a.AgentStatus == "idle" || a.AgentStatus == "done" || a.AgentStatus == "blocked")) || (a.Agent == "codex" && a.AgentStatus == "blocked") {
+			a.VendorEvent = h.vendorLifecycle(ctx, *a)
+		}
+	}
 	return r.Agents, nil
 }
 
@@ -673,6 +685,10 @@ func (h Host) agentInfoOf(ctx context.Context, target string) (AgentInfo, error)
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return AgentInfo{}, err
+	}
+	r.Agent.HerdrScope = h.herdrScope()
+	if h.NativeJob != nil && h.NativeJob.TerminalID != "" && !jobOccupant(r.Agent, h.NativeJob) {
+		return AgentInfo{}, errAgentRegistration
 	}
 	r.Agent.VendorEvent = h.vendorLifecycle(ctx, r.Agent)
 	return r.Agent, nil
@@ -905,6 +921,12 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		raw, e := herdrUnwrap(out)
 		if e == nil {
 			attempt.registered() // guard:fact-registered
+			var started struct {
+				Agent AgentInfo `json:"agent"`
+			}
+			if json.Unmarshal(raw, &started) == nil {
+				location.TerminalID = started.Agent.TerminalID
+			}
 		} else {
 			attempt.herdrStartError(out) // a structured error in a zero-exit response
 		}
@@ -1010,6 +1032,12 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 
 // send submits once; Herdr orders the paste and Enter.
 func (h Host) send(ctx context.Context, target, text string) error {
+	if h.NativeJob != nil && h.NativeJob.TerminalID != "" {
+		if _, err := h.agentInfoOf(ctx, h.NativeJob.Pane); err != nil {
+			return err
+		}
+	}
+
 	if out, err := h.herdr(ctx, "agent", "prompt", target, text); err != nil {
 		return fmt.Errorf("send: %v: %.120q", err, out)
 	}
@@ -1061,6 +1089,15 @@ func (h Host) read(ctx context.Context, target string, lines int) string {
 }
 
 func (h Host) closeWorkspace(ctx context.Context, ws string) error {
+	if h.NativeJob != nil && h.NativeJob.TerminalID != "" {
+		if ws != h.NativeJob.Workspace {
+			return errAgentRegistration
+		}
+		if _, err := h.agentInfoOf(ctx, h.NativeJob.Pane); err != nil {
+			return err
+		}
+	}
+
 	out, err := h.herdr(ctx, "workspace", "close", ws)
 	if err != nil {
 		return fmt.Errorf("%v: %.120q", err, out)
@@ -2162,7 +2199,7 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 		return nil, false
 	}
 	ref, found := status[n]
-	if !found {
+	if !found || ref.Host == "" {
 		return nil, false
 	}
 	// Preserve native OpenCode identity; legacy run aliases retain their mapping.
@@ -2173,6 +2210,7 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 	}
 	j := &Job{
 		Issue: n, Host: ref.Host, Label: agent + "-" + strconv.Itoa(n),
+		HerdrScope: ref.HerdrScope, TerminalID: ref.TerminalID,
 		Pane: ref.Pane, Workspace: ref.Workspace,
 		Target: tgt.Label, Repo: tgt.Repo, Branch: fmt.Sprintf("%s%d", c.cfg.BranchPrefix, n),
 		Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
@@ -2517,7 +2555,7 @@ func (c *Coord) tick(ctx context.Context) {
 			j.Misses = 0 // present this tick — clear any flicker count
 			continue
 		}
-		if !up[j.Host] {
+		if !up[c.hosts[j.Host].forJob(j).observerKey()] {
 			continue // host unreachable — transient, don't respawn
 		}
 		if j.RunMode {
@@ -2565,6 +2603,7 @@ func (c *Coord) tick(ctx context.Context) {
 			continue
 		}
 		host, ok := c.hosts[d.host]
+		host = host.forJob(d.job)
 		if !ok {
 			continue
 		}
@@ -2694,6 +2733,8 @@ func (c *Coord) pollIssues(ctx context.Context) (open map[int]Issue, all map[int
 // agentRef is a live herdr agent resolved to an issue number, with the handles
 // needed to drive it (pane for send/read, workspace for close).
 type agentRef struct {
+	HerdrScope     *herdrScope
+	TerminalID     string
 	Host           string
 	Agent          string // claude | codex
 	Status         string // idle|working|blocked|done|unknown
@@ -2746,7 +2787,7 @@ func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
 	if !known || j == nil || j.Pane == "" || j.Workspace == "" {
 		return true
 	}
-	return ref.Status != "done" || ref.Host != j.Host || ref.Pane != j.Pane || ref.Workspace != j.Workspace || accountKey(ref.Agent) != accountKey(j.Agent)
+	return ref.Status != "done" || !jobRefMatches(ref, j)
 }
 
 var issueCwdRe = regexp.MustCompile(`issue-(\d+)`)
@@ -2771,38 +2812,55 @@ func issueFromCwd(cwd string) int {
 func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]bool) {
 	out := map[int]agentRef{}
 	up := map[string]bool{}
-	if c.fleet != nil {
-		c.fleet.mu.RLock()
-		defer c.fleet.mu.RUnlock()
-		for name, agents := range c.fleet.agents {
-			if !c.fleet.up[name] {
-				continue
-			}
-			up[name] = true
-			for _, a := range agents {
-				if n := issueFromCwd(a.Cwd); n != 0 {
-					out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
-				}
-			}
-		}
-		return out, up
+	c.st.mu.Lock()
+	jobs := map[int]*Job{}
+	for n, j := range c.st.Jobs {
+		jobs[n] = j
 	}
-	for name, h := range c.hosts {
-		cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		agents, err := h.agentList(cctx)
-		cancel()
-		if err != nil {
-			log.Printf("fleetStatus %s: %v", name, err)
-			continue
-		}
-		up[name] = true
+	c.st.mu.Unlock()
+	add := func(h Host, agents []AgentInfo) {
 		for _, a := range agents {
 			n := issueFromCwd(a.Cwd)
 			if n == 0 {
 				continue
 			}
-			out[n] = agentRef{Host: name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			if j := jobs[n]; j != nil && !jobRefMatches(ref, j) {
+				continue
+			}
+			if _, exists := out[n]; exists {
+				out[n] = agentRef{}
+				continue
+			}
+			out[n] = ref
 		}
+	}
+	if c.fleet != nil {
+		c.fleet.mu.RLock()
+		defer c.fleet.mu.RUnlock()
+		for key, agents := range c.fleet.agents {
+			if !c.fleet.up[key] {
+				continue
+			}
+			h, ok := c.fleet.hosts[key]
+			if !ok {
+				continue
+			}
+			up[key] = true
+			add(h, agents)
+		}
+		return out, up
+	}
+	for key, h := range c.herdrObserverHosts() {
+		check, cancel := context.WithTimeout(ctx, 12*time.Second)
+		agents, err := h.agentList(check)
+		cancel()
+		if err != nil {
+			log.Printf("fleetStatus %s: observation unavailable", h.Name)
+			continue
+		}
+		up[key] = true
+		add(h, agents)
 	}
 	return out, up
 }
@@ -3395,12 +3453,20 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 
 	j := &Job{
 		Issue: n, Host: host.Name, Label: label, Pane: pane, Workspace: ws, Workdir: workdir,
+		HerdrScope: host.herdrScope(), TerminalID: receipt.dispatch.Location.TerminalID,
 		DispatchKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"),
 		Target:      tgt.Label, Repo: tgt.Repo,
 		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 		FinalReportManaged: !runMode,
 		Home:               is.home(),
+	}
+	var nativeBinding map[string]json.RawMessage
+	if readPrivateActionJSON(filepath.Join(filepath.Dir(receipt.file), "binding.json"), &nativeBinding) == nil {
+		var id string
+		if json.Unmarshal(nativeBinding["NativeSessionID"], &id) == nil && privateNativeID(id) {
+			j.NativeSessionID = id
+		}
 	}
 	if !runMode {
 		j.GoalDelivery = "pending"
@@ -3552,6 +3618,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		return // completion owns every remaining effect for this run
 	}
 	host, ok := c.hosts[j.Host]
+	host = host.forJob(j)
 	if !ok {
 		return
 	}
@@ -3560,7 +3627,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		return
 	}
 	ref, known := status[n]
-	matched := known && ref.Host == j.Host && ref.Pane == j.Pane && ref.Workspace == j.Workspace && accountKey(ref.Agent) == accountKey(j.Agent)
+	matched := known && jobRefMatches(ref, j)
 	if c.dry {
 		log.Printf("issue #%d: supervise %s/%s status=%s pr=%d (dry-run, no action)", n, j.Host, j.Label, ref.Status, j.PR)
 		return
@@ -3575,7 +3642,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		}
 		c.observeRemoteControl(ctx, host, j)
 	}
-	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && ref.CompletionSeq != 0)
+	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && (ref.CompletionSeq != 0 || j.Agent == "claude"))
 	if matched && j.Agent == "agy" {
 		c.bindAGYLiveIdentity(ctx, host, j)
 	}
@@ -3618,9 +3685,13 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		c.reportBlockedLaunch(ctx, n)
 		return
 	}
-	if !suppressInput {
+	// Binding and observation are reads, independent of permission to send
+	// continuation input. A fast first Claude turn may already be idle here.
+	if matched {
 		c.bindLiveNativeIdentity(ctx, host, j)
 		c.observeClaudeWorking(ctx, host, j)
+	}
+	if !suppressInput {
 		if ref.Status == "working" || ref.Status == "blocked" {
 			c.retryBoundGoal(ctx, host, j)
 		}
@@ -3694,6 +3765,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 
 	// Blocked: agent waiting for input it can't get in the swarm → escalate.
 	if matched && ref.Status == "blocked" {
+		c.emitHerdrAlert(ctx, j, "native-block", "")
 		c.transitionGoal(ctx, j, "blocked")
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)
 		c.notify(fmt.Sprintf("issue #%d blocked — needs input", n))
@@ -3975,6 +4047,7 @@ func checksGreen(v *PRView) bool {
 
 func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool {
 	host, ok := c.hosts[j.Host]
+	host = host.forJob(j)
 	if !ok {
 		return false
 	}
@@ -4152,6 +4225,7 @@ func (c *Coord) fanoutGrace(ctx context.Context, n int, j *Job) bool {
 		return true // keep deferring
 	}
 	host, hok := c.hosts[j.Host]
+	host = host.forJob(j)
 	if !hok || j.Pane == "" {
 		return false // can't reach the worker — skip straight to teardown+fallback
 	}
@@ -4366,6 +4440,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "herdr-worktree-create" {
+		os.Exit(herdrWorktreeCLI(os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "owner-native-grant" {
 		os.Exit(ownerNativeGrantCLI(os.Args[2:], os.Stdout))
 	}

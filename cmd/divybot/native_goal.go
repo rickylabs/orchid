@@ -120,6 +120,9 @@ func acquireNativeGoalBinding(ctx context.Context, r *durableMatrixReceipt, j *J
 			continue
 		}
 		lastUnavailable = "native-session-unavailable"
+		if !scopedAgentResponse(raw, j) {
+			return "", goalError("goal-dispatch-binding-invalid")
+		}
 		id, reason := nativeSessionFromResponse(raw, "agent_info", "codex", j.Label, r.dispatch.Location)
 		if reason == "" {
 			if j.RemoteControl != nil && id != j.RemoteControl.NativeSessionID {
@@ -199,7 +202,7 @@ func loadNativeBindingReceipt(root, key string, j *Job, inbox string, owner *rec
 	if e := read("dispatch.json", &d); e != nil {
 		return nil, "", e
 	}
-	if d.SchemaVersion != 1 || d.State != "dispatched" || d.Source != source || d.Issue != jobHome(inbox, j) || d.RunID != "orchid-"+key || d.ParentRunID != nil {
+	if d.SchemaVersion != 1 || d.State != "dispatched" || d.Source != source || d.Issue != jobHome(inbox, j) || d.RunID != "orchid-"+key || d.ParentRunID != nil || !sameHerdrScope(d.HerdrScope, j.HerdrScope) {
 		return nil, "", goalError("goal-dispatch-binding-invalid")
 	}
 	var b struct {
@@ -250,6 +253,9 @@ func retryLiveNativeBinding(ctx context.Context, root, inbox string, owner *rece
 	if e != nil {
 		return false, goalError("goal-identity-source-unavailable")
 	}
+	if !scopedAgentResponse(raw, j) {
+		return false, goalError("goal-dispatch-binding-invalid")
+	}
 	id, reason := nativeSessionFromResponse(raw, "agent_info", j.Agent, j.Label, r.dispatch.Location)
 	if reason == nativeUnavailable {
 		return false, nil
@@ -296,6 +302,13 @@ func (c *Coord) bindLiveNativeIdentity(ctx context.Context, host Host, j *Job) {
 		return c.fleetAgentResponse(ctx, host, pane)
 	})
 	if bound {
+		c.st.mu.Lock()
+		_, id, err := loadNativeBindingReceipt(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, j, c.cfg.Inbox, owner, j.Agent)
+		if err == nil && id != "" {
+			j.NativeSessionID = id
+			_ = c.st.saveLocked()
+		}
+		c.st.mu.Unlock()
 		log.Printf("issue #%d: live native binding acquired", j.Issue)
 	}
 }

@@ -487,6 +487,8 @@ func claudeCoordinatorFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int) {
 		}
 		a := completionAgent(j)
 		a.AgentSession = json.RawMessage(`{"source":"herdr:claude","agent":"claude","kind":"id","value":"thread-fixture"}`)
+		a.TerminalID = "fixture-terminal"
+		a.VendorEvent = &vendorLifecycleEvent{Agent: a.Agent, Name: a.Name, Pane: a.PaneID, Workspace: a.WorkspaceID, Cwd: a.Cwd, Terminal: a.TerminalID, Session: "thread-fixture", Event: "Stop", Seq: 42}
 		return []AgentInfo{a}, nil
 	}
 	c.cfg.Targets = []Target{{Agent: "claude"}}
