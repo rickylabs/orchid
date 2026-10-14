@@ -1,0 +1,12 @@
+id = "orchid.worktrees"
+name = "Orchid worktrees"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Explicit project checkout policy for native worktrees"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "create-worktree"
+title = "Create or open the explicitly authorized worktree"
+contexts = ["workspace"]
+command = ["divybot", "herdr-worktree-create"]

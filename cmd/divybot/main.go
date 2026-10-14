@@ -4408,6 +4408,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "herdr-worktree-create" {
+		os.Exit(herdrWorktreeCLI(os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "owner-native-grant" {
 		os.Exit(ownerNativeGrantCLI(os.Args[2:], os.Stdout))
 	}
