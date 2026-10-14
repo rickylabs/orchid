@@ -210,6 +210,8 @@ separately from a running fleet change. Existing Herdr clients automatically
 show enabled profiles and reconnect independently; a cached disconnected
 machine is never treated as live by Orchid. API commands use
 `herdr --machine <id> ...`; streaming subscriptions use the documented raw
-socket API at the endpoint discovered through that same profile. Installation
+socket API. Since saved-machine status labels its endpoint rather than exposing
+the remote socket path, streaming discovers that path with the documented
+account-local status command for the validated profile target and session. Installation
 commands remain in the remote launch account because Herdr does not forward
 them with `--machine`.

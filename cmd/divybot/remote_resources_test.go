@@ -60,7 +60,11 @@ func TestRemoteResourcesNativeRelease(t *testing.T) {
 				}
 				return base(method, params)
 			}, run.NativeSessionID)
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			budget := 50 * time.Millisecond
+			if mode == "valid" {
+				budget = 2 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			defer cancel()
 			p.ctx = ctx
 			err := p.releaseRemoteResources()
