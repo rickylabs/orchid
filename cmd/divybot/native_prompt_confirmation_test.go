@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -158,5 +159,52 @@ func TestLateGoalRetryWaitsForPrivateBinding(t *testing.T) {
 	c.retryBoundGoal(ctx, Host{}, j)
 	if j.NativeGoal.Owned || j.NativeGoal.Reason != "native-session-unavailable" {
 		t.Fatal("goal write was attempted before private identity binding")
+	}
+}
+
+func TestPromptSubmissionIsSingleAndTimeoutIsUncertain(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+			root := t.TempDir()
+			bin := filepath.Join(root, ".local", "bin")
+			if err := os.MkdirAll(bin, 0700); err != nil {
+				t.Fatal(err)
+			}
+			calls := filepath.Join(root, "calls")
+			t.Setenv("PROMPT_FIXTURE_CALLS", calls)
+			t.Setenv("PROMPT_FIXTURE_FAIL", strconv.FormatBool(fail))
+			script := `#!/usr/bin/env python3
+import json,os,sys
+args=sys.argv[1:]
+with open(os.environ['PROMPT_FIXTURE_CALLS'],'a') as f:f.write(' '.join(args[:2])+'\n')
+if args[:2]==['agent','get']:
+ print(json.dumps({'result':{'agent':{'agent_status':'idle'}}}))
+elif args[:2]==['agent','prompt'] and os.environ['PROMPT_FIXTURE_FAIL']=='true':
+ print(json.dumps({'error':{'code':'timeout','message':'delivery uncertain'}}));sys.exit(1)
+else:print(json.dumps({'result':{}}))
+`
+			if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			h := Host{Home: root}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			var err error
+			if fail {
+				err = h.injectGoal(ctx, "w1:p1", "goal", false)
+			} else {
+				err = h.send(ctx, "w1:p1", "goal")
+			}
+			log, readErr := os.ReadFile(calls)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if strings.Count(string(log), "agent prompt") != 1 || strings.Contains(string(log), "pane send-keys") {
+				t.Fatalf("submission was repeated: %s", log)
+			}
+			if fail && (err == nil || !strings.Contains(err.Error(), "unconfirmed")) {
+				t.Fatalf("timeout lost uncertainty: %v", err)
+			}
+		})
 	}
 }

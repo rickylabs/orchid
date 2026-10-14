@@ -983,13 +983,10 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	return pane, ws, nil
 }
 
-// send injects literal text then submits with Enter.
+// send submits once; Herdr orders the paste and Enter.
 func (h Host) send(ctx context.Context, target, text string) error {
 	if out, err := h.herdr(ctx, "agent", "prompt", target, text); err != nil {
 		return fmt.Errorf("send: %v: %.120q", err, out)
-	}
-	if out, err := h.herdr(ctx, "pane", "send-keys", target, "Enter"); err != nil {
-		return fmt.Errorf("enter: %v: %.120q", err, out)
 	}
 	return nil
 }
@@ -1006,7 +1003,7 @@ func agentBareIdle(pane string) bool {
 // injectGoal waits for a freshly spawned agent to be ready, submits its
 // assignment, then confirms an observed state change. Native prompts are sent
 // once because a delayed observation cannot prove that a prior send was lost;
-// the non-native branch retains its legacy Enter nudge and retry behavior.
+// every path preserves uncertain delivery without resubmitting.
 func nativePromptObserved(before, after AgentInfo) bool {
 	if before.PaneID == "" || before.WorkspaceID == "" || before.Agent == "" ||
 		after.PaneID != before.PaneID || after.WorkspaceID != before.WorkspaceID || after.Agent != before.Agent || after.Name != before.Name ||
@@ -1060,35 +1057,28 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 	// blind to opencode's TUI, so the wait loop never broke → it burned the whole
 	// ctx and the goal inject context-canceled.)
 	ready := func() bool {
-		st := h.agentStatusOf(ctx, target)
-		return st == "idle" || st == "done"
+		info, err := h.agentInfoOf(ctx, target)
+		return err == nil && (info.Agent != "codex" || info.InteractiveReady) && (info.AgentStatus == "idle" || info.AgentStatus == "done")
 	}
 	accepted := func() bool {
 		st := h.agentStatusOf(ctx, target)
 		return st == "working" || st == "blocked"
 	}
-	// Wait for the TUI to render + be ready for input. codex boots into a
-	// directory-trust prompt; an Enter accepts its selected default and the
-	// agent flips to idle/done. Older herdr reported that prompt as "blocked".
-	// codex 0.159.2's "Folder access / Trust this folder?" dialog is reported
-	// idle by herdr 0.9.1 (default fallback, no rule), so readiness also reads
-	// the screen: while the dialog shows, it is accepted and never counts as
-	// ready. (#509, RUN-453: the goal was typed into the dialog and lost, the
-	// Enter that followed accepted it, and codex's boot-time "working" was
-	// taken as the goal being accepted, leaving an empty composer.)
+	// Wait for Herdr's native readiness signal before submitting.
+	readyObserved := false
 	for i := 0; i < 30; i++ {
-		if codexTrustDialog(h.screen(ctx, target)) {
-			h.herdr(ctx, "pane", "send-keys", target, "Enter")
-		} else if ready() {
+		if ready() {
+			readyObserved = true
 			break
-		} else if h.agentStatusOf(ctx, target) == "blocked" {
-			h.herdr(ctx, "pane", "send-keys", target, "Enter")
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
+	}
+	if !readyObserved {
+		return fmt.Errorf("goal readiness unconfirmed")
 	}
 	if native {
 		// Herdr's --wait requires a working/blocked transition within five
@@ -1107,35 +1097,21 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 			return h.agentInfoOf(ctx, target)
 		}, nativePromptWait)
 	}
-	// Send the goal, then poll for acceptance with a GENEROUS window: opencode
-	// (and codex-class models) can take 10-20s after receiving the prompt before
-	// the first model call flips status to "working". Checking too early then
-	// re-sending double-submits the goal, so poll ~20s per attempt and nudge
-	// Enter once mid-poll in case the submit raced the paste.
-	for attempt := 0; attempt < 3; attempt++ {
-		if err := h.send(ctx, target, goal); err != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(2 * time.Second):
-			}
-			continue
+	// A timeout cannot establish whether the prompt arrived. Submit only once.
+	if err := h.send(ctx, target, goal); err != nil {
+		return fmt.Errorf("goal submission unconfirmed: %w", err)
+	}
+	for j := 0; j < 7; j++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
 		}
-		for j := 0; j < 7; j++ {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(3 * time.Second):
-			}
-			if accepted() {
-				return nil // processing → task accepted
-			}
-			if j == 1 { // ~6s in: nudge Enter once in case the submit raced
-				_, _ = h.herdr(ctx, "pane", "send-keys", target, "Enter")
-			}
+		if accepted() {
+			return nil
 		}
 	}
-	return fmt.Errorf("goal did not register after retries")
+	return fmt.Errorf("goal acceptance unconfirmed")
 }
 
 // codexTrustDialog reports codex's folder-trust dialog on the visible screen
