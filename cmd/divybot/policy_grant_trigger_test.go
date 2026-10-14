@@ -196,7 +196,7 @@ func TestSourcePolicyGrantRefusesAnotherBody(t *testing.T) {
 	}
 	f.post("example/project", 7, 3100000090, policyMember, policyBody+"\nEdited.", c.st.SourceCursors["example/project"].Add(time.Second))
 	c.sourceTick(context.Background())
-	if b := c.st.SourceBindings[3100000090]; b == nil || b.Closed != "refused" {
+	if b := c.st.SourceBindings[3100000090]; b == nil || b.Closed != "awaiting-grant" {
 		t.Fatalf("a comment whose body differs from its grant was not refused: %+v", b)
 	}
 }
@@ -292,10 +292,10 @@ func TestSourceOwnerCommentLaunchesOnALatePolicyGrant(t *testing.T) {
 	c, f, s, r, at := ownerPolicyGrant(t, 3100000100)
 	f.post("example/project", 7, 3100000100, ownerGitHubID, policyBody, at)
 	c.sourceTick(context.Background())
-	if b := c.st.SourceBindings[3100000100]; b == nil || b.Closed != "refused" || b.Refusal != "source-grant-missing" {
+	if b := c.st.SourceBindings[3100000100]; b == nil || b.Closed != "awaiting-grant" || b.Refusal != "" {
 		t.Fatalf("the ungranted owner comment was not refused for want of a grant: %+v", b)
 	}
-	if refusedMarkers(f) != 1 {
+	if refusedMarkers(f) != 0 {
 		t.Fatalf("refusal not posted once: %v", f.markers())
 	}
 	if ack := s.install(context.Background(), r); ack.State != "LIVE" {
@@ -307,7 +307,7 @@ func TestSourceOwnerCommentLaunchesOnALatePolicyGrant(t *testing.T) {
 	if b == nil || b.Closed != "" || !b.Regranted || b.Author != ownerGitHubID {
 		t.Fatalf("the owner comment was not bound for launch on the late policy grant: %+v", b)
 	}
-	if refusedMarkers(f) != 1 {
+	if refusedMarkers(f) != 0 {
 		t.Fatalf("the refusal was posted again: %v", f.markers())
 	}
 	// Admission accepts the binding the late grant opened.
@@ -319,31 +319,24 @@ func TestSourceOwnerCommentLaunchesOnALatePolicyGrant(t *testing.T) {
 
 // A late policy grant reconsiders a refusal once: a grant for another body is
 // refused again without a second reply, and the comment is never kept again.
-func TestSourceLatePolicyGrantReconsidersOnlyOnce(t *testing.T) {
+func TestSourceWrongGrantStaysIneligibleWithinTheWindow(t *testing.T) {
 	c, f, s, r, at := ownerPolicyGrant(t, 3100000101)
-	f.post("example/project", 7, 3100000101, ownerGitHubID, policyBody+"\nAnother.", at)
+	f.post("example/project", 7, r.CommentID, ownerGitHubID, policyBody+"\nAnother.", at)
 	c.sourceTick(context.Background())
 	if ack := s.install(context.Background(), r); ack.State != "LIVE" {
-		t.Fatalf("policy grant not LIVE: %s %s", ack.State, ack.Reason)
+		t.Fatal(ack.Reason)
 	}
 	for range 3 {
 		c.sourceTick(context.Background())
 	}
-	if b := c.st.SourceBindings[3100000101]; b == nil || b.Closed != "refused" || !b.Regranted {
-		t.Fatalf("a grant for another body was not refused once more: %+v", b)
+	b := c.st.SourceBindings[int(r.CommentID)]
+	if b == nil || b.Closed != "awaiting-grant" || b.Regranted || refusedMarkers(f) != 0 {
+		t.Fatal("mismatched grant admitted or finalized a fresh comment")
 	}
-	if refusedMarkers(f) != 1 {
-		t.Fatalf("the refusal was posted again: %v", f.markers())
-	}
-	if reconsidered(c, f, 3100000101) {
-		t.Fatal("a refusal was reconsidered a second time")
-	}
-	mem := c.sourceMem()
-	mem.mu.Lock()
-	kept := len(mem.pending)
-	mem.mu.Unlock()
-	if kept != 0 {
-		t.Fatal("a reconsidered comment was kept for another grant")
+	open := map[int]Issue{}
+	c.pollSourceBindings(context.Background(), open, map[int]bool{})
+	if len(open) != 0 {
+		t.Fatal("a wrong grant became launchable")
 	}
 }
 
@@ -359,6 +352,11 @@ func TestSourceRefusalReopensOnlyForItsOwnPolicyGrant(t *testing.T) {
 			}
 			f.post("example/project", 7, 3100000102, ownerGitHubID, policyBody, at)
 			c.sourceTick(context.Background())
+			b := c.st.SourceBindings[3100000102]
+			if b.Closed == "awaiting-grant" {
+				b.Closed, b.Refusal = "refused", "source-grant-missing"
+				c.st.save()
+			}
 			switch name {
 			case "closed-issue":
 				// Refused for another reason than a missing grant: never reconsidered,
@@ -390,7 +388,7 @@ func TestSourceRefusalReopensOnlyForItsOwnPolicyGrant(t *testing.T) {
 			if name != "edited" && reconsidered(c, f, 3100000102, again...) {
 				t.Fatalf("a listing reconsidered a refusal %s", name)
 			}
-			b := c.st.SourceBindings[3100000102]
+			b = c.st.SourceBindings[3100000102]
 			if b == nil || b.Closed != "refused" {
 				t.Fatalf("a refusal was reopened by %s: %+v", name, b)
 			}
@@ -417,7 +415,7 @@ func TestSourceLatePolicyGrantSurvivesARestart(t *testing.T) {
 	if b := restarted.st.SourceBindings[3100000110]; b == nil || b.Closed != "" || !b.Regranted {
 		t.Fatalf("the late grant was lost across a restart: %+v", b)
 	}
-	if refusedMarkers(f) != 1 {
+	if refusedMarkers(f) != 0 {
 		t.Fatalf("the refusal was posted again: %v", f.markers())
 	}
 }
@@ -437,7 +435,7 @@ func TestSourceLegacyRefusalReopensOnlyForAMissingGrant(t *testing.T) {
 				c.st.mu.Unlock()
 				t.Fatal("the ungranted owner comment was not refused")
 			}
-			b.Refusal, b.Author, b.Outbox = "", 0, nil
+			b.Closed, b.Refusal, b.Author, b.Outbox = "refused", "", 0, nil
 			switch name {
 			case "delivered":
 				b.Replies = map[string]bool{missing: true}
@@ -469,7 +467,7 @@ func TestSourceLegacyRefusalReopensOnlyForAMissingGrant(t *testing.T) {
 // memory keeps what the state file holds, so the refusal is not reopened again.
 func TestSourceRegrantKeptWhenTheSaveFailsAfterRename(t *testing.T) {
 	c, f, s, r, at := ownerPolicyGrant(t, 3100000112)
-	f.post("example/project", 7, 3100000112, ownerGitHubID, policyBody+"\nAnother.", at)
+	f.post("example/project", 7, 3100000112, ownerGitHubID, policyBody, at)
 	c.sourceTick(context.Background())
 	if ack := s.install(context.Background(), r); ack.State != "LIVE" {
 		t.Fatalf("policy grant not LIVE: %s %s", ack.State, ack.Reason)

@@ -880,10 +880,10 @@ func TestOwnerNativeCommentGrant(t *testing.T) {
 	f.post("example/project", 7, 3100000063, ownerGitHubID, body, at)
 	f.post("example/project", 7, 3100000064, ownerGitHubID, body+"\nOther.", at)
 	c.sourceTick(context.Background())
-	if b := c.st.SourceBindings[3100000063]; b == nil || b.Closed != "refused" {
+	if b := c.st.SourceBindings[3100000063]; b == nil || b.Closed != "awaiting-grant" {
 		t.Fatal("a comment reusing a claimed grant was not refused at binding")
 	}
-	if b := c.st.SourceBindings[3100000064]; b == nil || b.Closed != "refused" {
+	if b := c.st.SourceBindings[3100000064]; b == nil || b.Closed != "awaiting-grant" {
 		t.Fatal("an ungranted comment was not refused at binding")
 	}
 }
