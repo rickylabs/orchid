@@ -45,6 +45,7 @@ func (h Host) remoteEnabled(agent string) bool {
 
 // Private runtime binding; never serialized in the public dispatch projection.
 type remoteControlRun struct {
+	LifecycleHooks  map[string]any    `json:"lifecycleHooks,omitempty"`
 	NativeSessionID string            `json:"nativeSessionId"`
 	Cwd             string            `json:"cwd"`
 	Name            string            `json:"name"`

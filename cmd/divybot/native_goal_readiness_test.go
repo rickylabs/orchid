@@ -112,6 +112,7 @@ func TestDeliverCodexPromptReadinessIsObserveOnly(t *testing.T) {
 			wait:      func(context.Context) bool { return true },
 			now:       func() time.Time { return time.Unix(100, 0) },
 			readiness: readiness,
+			native:    func(ctx context.Context, _ string, submit func(context.Context) error) error { return submit(ctx) },
 		})
 		return
 	}
@@ -172,7 +173,7 @@ func TestShadowGoalReadinessComparison(t *testing.T) {
 	}
 	for i, want := range []string{"agree", "disagree", "shadow-unknown"} {
 		c := l[i]
-		if c.Site != shadowSiteGoalReadiness || c.Agreement != want || !c.ScreenDerived || len(c.Proposed) != 1 || c.Proposed[0].Fact != shadowReadiness {
+		if c.Site != shadowSiteGoalReadiness || c.Agreement != want || c.ScreenDerived || len(c.Proposed) != 1 || c.Proposed[0].Fact != shadowReadiness {
 			t.Fatalf("comparison %d wrong: %+v", i, c)
 		}
 	}
@@ -182,7 +183,7 @@ func TestShadowGoalReadinessComparison(t *testing.T) {
 		for _, c := range r.Comparisons {
 			if c.Site == shadowSiteGoalReadiness {
 				found++
-				if c.Today == shadowInputOther || c.Proposed[0].Value == shadowInputOther || c.Proposed[0].Reason == shadowInputOther || c.Provenance[1] != shadowInputScreenComposer {
+				if c.Today == shadowInputOther || c.Proposed[0].Value == shadowInputOther || c.Proposed[0].Reason == shadowInputOther || len(c.Provenance) != 1 || c.Provenance[0] != shadowInputHerdrAgent {
 					t.Fatalf("readout lost a closed readiness code: %+v", c)
 				}
 			}
@@ -285,6 +286,7 @@ func TestGoalReadinessNeverAffectsLaunch(t *testing.T) {
 			wait:      func(context.Context) bool { return true },
 			now:       func() time.Time { return time.Unix(100, 0) },
 			readiness: readiness,
+			native:    func(ctx context.Context, _ string, submit func(context.Context) error) error { return submit(ctx) },
 		})
 		return submits, err
 	}

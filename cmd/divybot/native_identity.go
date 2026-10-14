@@ -72,7 +72,7 @@ func nativeSessionFromResponse(raw json.RawMessage, responseType, kind, label st
 		return "", nativeUnavailable
 	}
 	s := a.Session
-	if s.Source != "herdr:"+kind || s.Agent != kind || s.Kind != "id" || !privateNativeID(s.Value) {
+	if !lifecycleSource(s.Source, kind) || s.Agent != kind || s.Kind != "id" || !privateNativeID(s.Value) {
 		return "", nativeInvalid
 	}
 	return s.Value, ""

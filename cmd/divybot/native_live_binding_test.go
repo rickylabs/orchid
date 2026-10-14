@@ -58,6 +58,7 @@ func claudeAgentInfo(t *testing.T, id string) map[string]any {
 	v["type"] = "agent_info"
 	a := v["agent"].(map[string]any)
 	a["agent"] = "claude"
+	a["screen_detection_skipped"] = true
 	s := a["agent_session"].(map[string]any)
 	s["source"], s["agent"] = "herdr:claude", "claude"
 	return v

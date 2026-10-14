@@ -33,7 +33,7 @@ func (g *goalReadinessShadow) record(today string, native shadowVerdict, at time
 	if g == nil || g.shadow == nil || g.job == nil {
 		return
 	}
-	g.shadow.compareNativeAt(g.job, shadowSiteGoalReadiness, today, []string{shadowInputHerdrAgent, shadowInputScreenComposer}, native, at)
+	g.shadow.compareNativeAt(g.job, shadowSiteGoalReadiness, today, []string{shadowInputHerdrAgent}, native, at)
 }
 
 // observe starts the native read for one recording moment off the launch

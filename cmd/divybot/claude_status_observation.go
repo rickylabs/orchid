@@ -97,9 +97,10 @@ func observeClaudeWorking(ctx context.Context, root, inbox string, owner *receip
 	var response struct {
 		Agent struct {
 			Status string `json:"agent_status"`
+			Native bool   `json:"screen_detection_skipped"`
 		} `json:"agent"`
 	}
-	if decodeNativeJSON(raw, &response) != nil {
+	if decodeNativeJSON(raw, &response) != nil || !response.Agent.Native {
 		return false
 	}
 	switch response.Agent.Status {

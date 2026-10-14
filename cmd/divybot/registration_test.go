@@ -207,6 +207,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 				relative, _ := filepath.Rel(gemini, store)
 				expected = append(expected, "--gemini_dir", gemini, "--app_data_dir", relative)
 			}
+			expected = append(expected, lifecycleArgs(kind, "fixture-agent", pane, ws, cwd)...)
 			if !reflect.DeepEqual(got[2], expected) {
 				t.Fatalf("argv lost identity or quoting: %q", got[2])
 			}

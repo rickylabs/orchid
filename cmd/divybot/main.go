@@ -616,6 +616,8 @@ func herdrUnwrap(out string) (json.RawMessage, error) {
 }
 
 type AgentInfo struct {
+	TerminalID       string          `json:"terminal_id"`
+	NativeLifecycle  bool            `json:"screen_detection_skipped"`
 	InteractiveReady bool            `json:"interactive_ready"`
 	AgentSession     json.RawMessage `json:"agent_session"`
 	Agent            string          `json:"agent"`
@@ -779,6 +781,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		}
 	}
 	attempt.enter(stageWorkspace)
+	if agent == "opencode" {
+		if _, e := h.herdr(ctx, "integration", "install", "opencode"); e != nil {
+			return "", "", matrixSite("spawn.native-integration", errAgentRegistration)
+		}
+	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", matrixSite("spawn.workspace-create", errMatrix)
@@ -808,6 +815,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		return "", "", matrixSite("spawn.workspace-handles", errMatrix)
 	}
 	location := &dispatchLocation{PaneID: pane, WorkspaceID: ws}
+	nativeArgs = append(nativeArgs, lifecycleArgs(agent, label, pane, ws, cwd)...)
 	if e := receipt.writeDispatch("launching", location); e != nil {
 		return pane, ws, matrixSite("spawn.launching-binding", e)
 	}
@@ -856,6 +864,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if remote != nil {
 		attempt.enter(stageThreadPreparation)
 		if agent == "codex" {
+			remote.LifecycleHooks = nativeLifecycleHooks(agent, label, pane, ws, cwd)
 			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
 				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
 			}
@@ -1002,15 +1011,6 @@ func (h Host) send(ctx context.Context, target, text string) error {
 	return nil
 }
 
-// agentBareIdle reports whether the pane shows an idle, empty agent prompt
-// (the "bypass permissions" footer is present only when claude is sitting
-// at an empty input box). Used to detect (a) that the TUI has finished
-// booting and (b) after a send, that the input was NOT accepted — once a
-// task is submitted claude goes busy and the footer disappears.
-func agentBareIdle(pane string) bool {
-	return strings.Contains(pane, "bypass permissions")
-}
-
 // injectGoal waits for a freshly spawned agent to be ready, submits its
 // assignment, then confirms an observed state change. Native prompts are sent
 // once because a delayed observation cannot prove that a prior send was lost;
@@ -1123,19 +1123,6 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		}
 	}
 	return fmt.Errorf("goal acceptance unconfirmed")
-}
-
-// codexTrustDialog reports codex's folder-trust dialog on the visible screen
-// (codex 0.159.2: "Trust this folder?" with "1. Trust and continue" selected).
-func codexTrustDialog(screen string) bool {
-	return strings.Contains(screen, "Trust this folder?") && strings.Contains(screen, "Trust and continue")
-}
-
-// screen is the pane's visible text. `agent read --source recent` does not show
-// codex's trust dialog; `pane read` does.
-func (h Host) screen(ctx context.Context, target string) string {
-	screen, _ := h.visiblePromptScreen(ctx, target)
-	return screen
 }
 
 func (h Host) read(ctx context.Context, target string, lines int) string {

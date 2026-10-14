@@ -9,21 +9,6 @@ import (
 	"time"
 )
 
-// The screen codex 0.159.2 shows in a new work directory, as herdr 0.9.1's
-// `pane read` returned it (harness #509, 2026-09-30).
-const codexTrustScreen = "  Folder access\n  /ephemeral/orch-work/issue-509\n  Trust this folder? Codex can read, edit, and run\n  files here, subject to your permission settings.\n› 1. Trust and continue\n  2. Quit\n  enter continue · esc quit\n"
-
-func TestCodexTrustDialogIsRecognized(t *testing.T) {
-	if !codexTrustDialog(codexTrustScreen) {
-		t.Fatal("the codex 0.159.2 trust dialog was not recognized")
-	}
-	for _, screen := range []string{"", "  >_ OpenAI Codex (v0.159.2)\n  permissions: YOLO mode\n›", "Trust this folder? (quoted in a brief, no dialog)"} {
-		if codexTrustDialog(screen) {
-			t.Fatalf("recognized a trust dialog in %q", screen)
-		}
-	}
-}
-
 // An idle badge without native readiness cannot authorize trust input or a goal.
 func TestCodexGoalWaitsForNativeReadinessWithoutTrustInput(t *testing.T) {
 	root := t.TempDir()

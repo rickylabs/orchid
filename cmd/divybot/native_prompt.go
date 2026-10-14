@@ -1,16 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 var errPromptUnconfirmed = errors.New("goal-prompt-unconfirmed")
@@ -42,26 +39,12 @@ func samePromptOccupant(a, b AgentInfo) bool {
 		a.Agent == b.Agent && a.Name == b.Name && a.PaneID == b.PaneID && a.WorkspaceID == b.WorkspaceID && a.Cwd == b.Cwd
 }
 
-// These are UI placeholders, never route/model choices. Unknown/nonempty input refuses.
-func emptyCodexComposer(screen string) bool {
-	at := strings.LastIndex(screen, "›")
-	if at < 0 || codexTrustDialog(screen) {
-		return false
-	}
-	line := strings.TrimSpace(strings.SplitN(screen[at+len("›"):], "\n", 2)[0])
-	switch line {
-	case "", "Ask Codex to do anything", "Anything interesting on the docket?":
-		return true
-	}
-	return false
-}
-
 func codexReady(s promptSnapshot) bool {
 	return s.Stable && s.Agent.Agent == "codex" && s.Agent.InteractiveReady &&
-		(s.Agent.AgentStatus == "idle" || s.Agent.AgentStatus == "done") && emptyCodexComposer(s.Screen)
+		(s.Agent.AgentStatus == "idle" || s.Agent.AgentStatus == "done")
 }
 
-// The nonce is confined to the submitted prompt and private screen proof. Put it
+// The nonce is confined to the submitted prompt and native acceptance proof. Put it
 // at both ends so a long wrapped message can lose its head from the visible tail.
 func markedCodexPrompt(goal string) (string, string, error) {
 	if strings.TrimSpace(goal) == "" || len(goal) > 32*1024 {
@@ -75,147 +58,45 @@ func markedCodexPrompt(goal string) (string, string, error) {
 	line := "Assignment delivery marker: " + marker
 	return line + "\n" + goal + "\n" + line, marker, nil
 }
-func markerVisible(screen, marker string) bool {
-	// Terminal wrapping can split the nonce mid-word. Only this fresh nonce, not
-	// arbitrary goal prose, is matched after stripping display whitespace.
-	return marker != "" && strings.Contains(strings.Join(strings.Fields(screen), ""), marker)
-}
-func collapsedPromptRetained(s promptSnapshot, sent string) bool {
-	at := strings.LastIndex(s.Screen, "›")
-	if at < 0 {
-		return false
-	}
-	line := strings.TrimSpace(strings.SplitN(s.Screen[at+len("›"):], "\n", 2)[0])
-	// Codex0.159.3 uses Unicode scalar count, not bytes, for this exact label.
-	// A matching placeholder can license Enter only; it never confirms a turn.
-	return line == fmt.Sprintf("[Pasted Content %d chars]", utf8.RuneCountInString(sent))
-}
 
-// Boot-time done, a placeholder, or the assignment text alone is not a turn.
-// Require the fresh marker plus a newer sequence and consumed-turn evidence.
-func codexPromptConsumed(s, before promptSnapshot, marker string) bool {
-	if s.Agent.StateChangeSeq <= before.Agent.StateChangeSeq || !markerVisible(s.Screen, marker) {
-		return false
-	}
-	if s.Agent.AgentStatus == "working" || s.Agent.AgentStatus == "blocked" {
-		return true
-	}
-	at := strings.LastIndex(s.Screen, "›")
-	return s.Agent.InteractiveReady && s.Agent.AgentStatus == "done" && at >= 0 && emptyCodexComposer(s.Screen) &&
-		markerVisible(s.Screen[:at], marker) && !markerVisible(s.Screen[at:], marker)
-}
-
-// One submission and at most one evidence-safe repair. Uncertain delivery never
-// licenses replay: a changed sequence/session/screen can mean a real turn started.
+// Only native acceptance can confirm a Codex prompt. Readiness uses structured
+// occupant state; no composer, marker rendering, Enter repair or replay is read.
 func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d promptCalls) error {
-	var before, prior promptSnapshot
-	stable, observed := false, false
-	recordReadiness := func(s promptSnapshot, today string) {
+	record := func(s promptSnapshot, today string) {
 		if d.readiness != nil {
-			func() {
-				defer shadowContain()
-				d.readiness(s, today, time.Now())
-			}()
+			func() { defer shadowContain(); d.readiness(s, today, time.Now()) }()
 		}
 	}
-	for {
-		if ctx.Err() != nil {
-			return errPromptUnconfirmed
-		}
+	observed := false
+	for ctx.Err() == nil {
 		s, err := d.observe(ctx)
 		if err != nil || !samePromptOccupant(expected, s.Agent) {
 			return errPromptUnconfirmed
 		}
-		if !observed { // guard:readiness-first-observation
+		today := "not-ready"
+		if codexReady(s) {
+			today = "ready"
+		}
+		if !observed {
+			record(s, today)
 			observed = true
-			today := "not-ready"
-			if codexReady(s) {
-				today = "ready"
-			}
-			recordReadiness(s, today)
 		}
-		if codexTrustDialog(s.Screen) {
-			if d.noConsent {
+		if codexReady(s) {
+			record(s, "ready")
+			if d.native == nil || ctx.Err() != nil {
 				return errPromptUnconfirmed
 			}
-			if err := d.enter(ctx); err != nil {
+			sent, _, err := markedCodexPrompt(goal)
+			if err != nil {
 				return errPromptUnconfirmed
 			}
-			stable = false
-		} else if codexReady(s) {
-			if stable && samePromptOccupant(prior.Agent, s.Agent) && prior.Agent.StateChangeSeq == s.Agent.StateChangeSeq && prior.Screen == s.Screen {
-				before = s
-				break
-			}
-			prior, stable = s, true
-		} else {
-			stable = false
-			if s.Agent.AgentStatus == "blocked" {
-				return errPromptUnconfirmed
-			}
+			return d.native(ctx, sent, func(ctx context.Context) error { return d.submit(ctx, sent) })
 		}
-		if !d.wait(ctx) {
+		if s.Agent.AgentStatus == "blocked" || !d.wait(ctx) {
 			return errPromptUnconfirmed
 		}
 	}
-	recordReadiness(before, "ready") // guard:readiness-at-gate
-	if ctx.Err() != nil {
-		return errPromptUnconfirmed
-	}
-	sent, marker, err := markedCodexPrompt(goal)
-	if err != nil || markerVisible(before.Screen, marker) {
-		return errPromptUnconfirmed
-	}
-	if d.native != nil { // guard:native-branch
-		return d.native(ctx, sent, func(ctx context.Context) error { return d.submit(ctx, sent) })
-	}
-	if err := d.submit(ctx, sent); err != nil {
-		return errPromptUnconfirmed
-	}
-	started := d.now()
-	repaired, seen, unchanged := false, false, 0
-	for {
-		after, err := d.observe(ctx)
-		if err != nil || !samePromptOccupant(before.Agent, after.Agent) {
-			return errPromptUnconfirmed
-		}
-		if codexPromptConsumed(after, before, marker) {
-			if ctx.Err() != nil {
-				return errPromptUnconfirmed
-			}
-			return nil
-		}
-		at := strings.LastIndex(after.Screen, "›")
-		markedComposer := at >= 0 && markerVisible(after.Screen[at:], marker)
-		placeholder := after.Stable && after.Agent.StateChangeSeq == before.Agent.StateChangeSeq && collapsedPromptRetained(after, sent)
-		if markerVisible(after.Screen, marker) || placeholder {
-			seen = true
-			// Text landed but Enter did not. A known-size collapsed paste can
-			// receive Enter once; it never licenses a second copy or completion.
-			if !repaired && (markedComposer || placeholder) && after.Stable && after.Agent.InteractiveReady && (after.Agent.AgentStatus == "idle" || after.Agent.AgentStatus == "done") {
-				if err := d.enter(ctx); err != nil {
-					return errPromptUnconfirmed
-				}
-				repaired = true
-			}
-		}
-		if !seen && codexReady(after) && after.Screen == before.Screen && after.Agent.StateChangeSeq == before.Agent.StateChangeSeq && bytes.Equal(after.Agent.AgentSession, before.Agent.AgentSession) {
-			unchanged++
-		} else {
-			unchanged = 0
-			// Permanently prohibit full text replay after any ambiguous effect.
-			seen = true
-		}
-		if !repaired && !seen && unchanged >= 3 && d.now().Sub(started) >= 10*time.Second {
-			if err := d.submit(ctx, sent); err != nil {
-				return errPromptUnconfirmed
-			}
-			repaired = true
-		}
-		if !d.wait(ctx) {
-			return errPromptUnconfirmed
-		}
-	}
+	return errPromptUnconfirmed
 }
 
 // Herdr0.9.1 formats read output as plain text. Older adapters/fixtures may
@@ -246,19 +127,23 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 	if err != nil {
 		return promptSnapshot{}, errPromptUnconfirmed
 	}
-	screen, err := h.visiblePromptScreen(ctx, target)
-	if err != nil {
-		return promptSnapshot{}, errPromptUnconfirmed
-	}
-	after, err := h.agentInfoOf(ctx, target)
-	if err != nil || !samePromptOccupant(before, after) {
-		return promptSnapshot{}, errPromptUnconfirmed
-	}
-	return promptSnapshot{Agent: after, Screen: screen, Stable: before.StateChangeSeq == after.StateChangeSeq}, nil
+	return promptSnapshot{Agent: before, Stable: true}, nil
 }
 
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
-	var native func(context.Context, string, func(context.Context) error) error
+	native := func(ctx context.Context, _ string, submit func(context.Context) error) error {
+		if !expected.NativeLifecycle {
+			return errPromptUnconfirmed
+		}
+		before, err := h.agentInfoOf(ctx, target)
+		if err != nil || !samePromptOccupant(expected, before) {
+			return errPromptUnconfirmed
+		}
+		if err = submit(ctx); err != nil {
+			return errPromptUnconfirmed
+		}
+		return awaitNativePrompt(ctx, before, func(ctx context.Context) (AgentInfo, error) { return h.agentInfoOf(ctx, target) }, nativePromptWait)
+	}
 	var readiness func(promptSnapshot, string, time.Time)
 	if h.CanonicalCodex && h.RemoteRun != nil {
 		// Remote Control Codex has no screen-confirmed delivery path.
