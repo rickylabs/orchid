@@ -101,7 +101,7 @@ func TestDelayedReadinessUsesConfiguredBudgetWithoutSecondSpawn(t *testing.T) {
 			t.Fatal("scaled cold startup was truncated at the old deadline")
 		}
 		got := calls()
-		if len(got) != 3 || got[2][0] != "agent" || got[2][1] != "start" {
+		if len(got) != 4 || got[2][0] != "agent" || got[2][1] != "start" || got[3][1] != "report-metadata" {
 			t.Fatal("delayed startup caused a retry or goal submission")
 		}
 		if configured != "" && got[2][8] != "180000" {

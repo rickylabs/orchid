@@ -77,11 +77,11 @@ func completionFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int) {
 
 func completionAgent(j *Job) AgentInfo {
 	return AgentInfo{Agent: j.Agent, AgentStatus: "done", InteractiveReady: true, Name: j.Label,
-		PaneID: j.Pane, WorkspaceID: j.Workspace, StateChangeSeq: 42,
+		PaneID: j.Pane, WorkspaceID: j.Workspace, StateChangeSeq: 42, CompletionSeq: 42,
 		Cwd: "/fixture/issue-7", AgentSession: json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"thread-fixture"}`)}
 }
 func completionRef(j *Job) agentRef {
-	return agentRef{Host: j.Host, Agent: j.Agent, Status: "done", Pane: j.Pane, Workspace: j.Workspace}
+	return agentRef{Host: j.Host, Agent: j.Agent, Status: "done", CompletionSeq: 42, Pane: j.Pane, Workspace: j.Workspace}
 }
 
 func TestCompletionHoldsSlotUntilSeatAndProcessAbsenceAndSurvivesRestart(t *testing.T) {
@@ -868,5 +868,53 @@ func TestCompletionPRInputHonorsOwnerAndCompletionFence(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCompletionSequenceSurvivesViewedIdleAndTriggersOnce(t *testing.T) {
+	c, j, _, _, closes := completionFixture(t)
+	checks := 0
+	c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { checks++; return false, nil }
+	a := completionAgent(j)
+	a.AgentStatus = "idle"
+	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) { return []AgentInfo{a}, nil }
+	ref := completionRef(j)
+	ref.Status = "idle"
+	c.retireCompleted(context.Background(), j.Issue, j, ref, true)
+	if checks != 1 || *closes != 0 || c.st.Jobs[j.Issue] == nil {
+		t.Fatalf("viewed completion skipped native fence: checks=%d closes=%d", checks, *closes)
+	}
+	c.retireCompleted(context.Background(), j.Issue, j, ref, true)
+	if checks != 1 {
+		t.Fatal("same completion checked again")
+	}
+	a.CompletionSeq++
+	a.StateChangeSeq++
+	ref.CompletionSeq = a.CompletionSeq
+	c.retireCompleted(context.Background(), j.Issue, j, ref, true)
+	if checks != 2 || *closes != 0 {
+		t.Fatal("new completed turn bypassed native fence")
+	}
+	ref.CompletionSeq = 0
+	c.retireCompleted(context.Background(), j.Issue, j, ref, true)
+	if checks != 2 {
+		t.Fatal("missing sequence triggered completion")
+	}
+}
+
+func TestCompletionRecoveryRechecksNegativeEvidenceForSameSequence(t *testing.T) {
+	c, j, _, _, closes := completionFixture(t)
+	complete := false
+	checks := 0
+	c.actions.completed = func(context.Context, Host, *Job, string) (bool, error) { checks++; return complete, nil }
+	ref := completionRef(j)
+	c.retireCompleted(context.Background(), j.Issue, j, ref, true)
+	if checks != 1 || *closes != 0 {
+		t.Fatal("negative native read retired the run")
+	}
+	complete = true
+	j.CompletionCheckedAt = time.Now().Add(-fleetRecoveryEvery)
+	if !c.retireCompleted(context.Background(), j.Issue, j, ref, true) || checks != 2 || *closes != 1 {
+		t.Fatal("recovery never reconsidered newly available native evidence")
 	}
 }

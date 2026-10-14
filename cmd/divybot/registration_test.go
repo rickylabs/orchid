@@ -18,7 +18,7 @@ func registrationReceipt(t *testing.T, agent string, o Overrides) *durableMatrix
 	if err != nil {
 		t.Fatal("fixture matrix receipt failed")
 	}
-	r.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key, Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Source: strings.TrimSuffix(agent, "-run")}
+	r.dispatch = &dispatchBinding{SchemaVersion: 1, RunID: "orchid-" + key, Issue: dispatchIssue{Repo: "fixture/inbox", Number: 7}, Source: strings.TrimSuffix(agent, "-run"), Model: o.Model, Role: o.Role}
 	if r.writeDispatch("reserved", nil) != nil {
 		t.Fatal("fixture dispatch binding failed")
 	}
@@ -182,12 +182,16 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 				t.Fatal("registration did not return the created handles")
 			}
 			got := calls()
-			wantCalls := 3
+			wantCalls := 4
 			if kind == "agy" {
-				wantCalls = 6 // Exact occupant/screen/occupant before goal delivery.
+				wantCalls = 7 // Exact occupant checks, followed by display metadata.
 			}
 			if len(got) != wantCalls {
 				t.Fatalf("wanted workspace, environment, registration; got %d calls", len(got))
+			}
+			metadata := []string{"pane", "report-metadata", pane, "--source", "orchid:dispatch", "--token", "issue=#7", "--token", "model=" + o.Model, "--token", "role=" + o.Role, "--token", "task="}
+			if !reflect.DeepEqual(got[len(got)-1], metadata) {
+				t.Fatalf("display tokens lost binding or quoting: %q", got[len(got)-1])
 			}
 			if strings.Contains(got[1][3], "exec ") || !strings.Contains(got[1][3], "export FIXTURE_ENV=") {
 				t.Fatal("environment preparation must leave the shell available")
@@ -241,7 +245,7 @@ func TestNonInteractiveRunKeepsDeadlineSupervisedLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := calls()
-	if len(got) != 2 || !strings.Contains(got[1][3], "exec bash") {
+	if len(got) != 3 || !strings.Contains(got[1][3], "exec bash") || got[2][1] != "report-metadata" {
 		t.Fatal("run mode must not pretend to register an interactive agent")
 	}
 }

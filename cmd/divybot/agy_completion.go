@@ -160,7 +160,7 @@ func (c *Coord) agyCompletionWithObserver(ctx context.Context, j *Job, native st
 		return false, err
 	}
 	before, err := agent(ctx, j.Pane)
-	if err != nil || ctx.Err() != nil || !agyIdentityOccupant(before, j) || before.AgentStatus != "done" {
+	if err != nil || ctx.Err() != nil || !agyIdentityOccupant(before, j) || (before.AgentStatus != "done" && before.AgentStatus != "idle") || before.CompletionSeq == 0 {
 		return false, errMatrix
 	}
 	directory, err := agyStoreDirectory(before.Cwd, r.dispatch.RunID)
@@ -172,7 +172,7 @@ func (c *Coord) agyCompletionWithObserver(ctx context.Context, j *Job, native st
 		return false, errMatrix
 	}
 	after, err := agent(ctx, j.Pane)
-	if err != nil || ctx.Err() != nil || !agyIdentityOccupant(after, j) || after.AgentStatus != "done" || before.Cwd != after.Cwd || before.StateChangeSeq != after.StateChangeSeq {
+	if err != nil || ctx.Err() != nil || !agyIdentityOccupant(after, j) || (after.AgentStatus != "done" && after.AgentStatus != "idle") || after.CompletionSeq != before.CompletionSeq || before.Cwd != after.Cwd || before.StateChangeSeq != after.StateChangeSeq {
 		return false, errMatrix
 	}
 	verified, currentDigest, currentStore, err := read()

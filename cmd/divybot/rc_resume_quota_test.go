@@ -183,7 +183,7 @@ func TestRunPrimesGovernorBeforeFirstTick(t *testing.T) {
 				loop = i
 			}
 		case *ast.ExprStmt:
-			if types.ExprString(x.X) == "c.tick(ctx)" && tick < 0 {
+			if types.ExprString(x.X) == "c.startHerdrFleet(ctx)" && tick < 0 {
 				tick = i
 			}
 		}

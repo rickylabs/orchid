@@ -25,7 +25,7 @@ func TestManagedCodexStartsWithOnlyItsCheckoutTrusted(t *testing.T) {
 		t.Fatal("folder consent still prevents managed readiness")
 	}
 	after, _ := os.ReadFile(config)
-	if string(before) != string(after) || len(calls()) != 3 {
+	if string(before) != string(after) || (len(calls()) != 4 || calls()[3][1] != "report-metadata") {
 		t.Fatal("startup changed persisted trust, retried, or sent input")
 	}
 	if _, err := os.Stat("CANARY"); !os.IsNotExist(err) {

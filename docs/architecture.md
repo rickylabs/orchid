@@ -39,3 +39,33 @@ The previous orchid was ~13k LOC across 25 files: an SSH+tmux shim, capture-pane
 scraping, paste-buffer pokes, a `www/` dashboard, a Cloudflare relay, and
 per-workspace clawpatrol. All collapsed into native herdr calls and central
 auth-sync — ~1.2k LOC, one file.
+
+## Fleet observations
+
+The coordinator subscribes to Herdr's documented `events.subscribe` API on each
+host before reading `session.snapshot`. Global lifecycle subscriptions first
+discover panes; pane-scoped status subscriptions are acknowledged before a new
+baseline and replaced when panes change. Events invalidate the cache;
+the coordinator serializes authoritative reads and repeats a read if an event
+arrives while it is in flight. Loss or disconnection discards that host's cache,
+then resubscribes before taking another baseline. Remote subscriptions use a
+private, temporary SSH Unix-socket forward to the endpoint reported by
+`herdr status server --json`.
+
+Fleet changes wake supervision. A five-minute safety tick reconciles snapshots
+and recovers supervision when no events arrive. The legacy `poll_interval`
+setting no longer controls fleet supervision. Routine Claude observations and
+late identity binding read this cache; effect-time ownership and completion
+checks retain their independent reads. Neither event payloads nor screen text
+prove assignment completion.
+
+A negative native completion read is reconsidered by recovery even when the
+completion sequence is unchanged. Viewed `idle` completions use the same native
+identity, stable sequence, and final-stop checks as unseen `done` completions.
+
+Each dispatched pane receives display-only `issue`, `model`, `role`, and `task`
+metadata tokens from its verified dispatch binding and short task title. Herdr
+sidebar configuration can render `$issue`, `$model`, `$role`, and `$task`. A
+metadata failure does not alter the dispatch, and tokens never establish identity
+or state. Herdr clears these ephemeral values when the pane closes or its server
+restarts.

@@ -459,7 +459,7 @@ else: print(json.dumps({'result':{}}))
 	_ = os.WriteFile(filepath.Join(record, "binding.json"), binding, 0600)
 	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
 		return []AgentInfo{{Agent: "codex", AgentStatus: "done", InteractiveReady: true, Name: j.Label, PaneID: j.Pane, WorkspaceID: j.Workspace,
-			StateChangeSeq: 42, Cwd: run.Cwd, AgentSession: json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"` + run.NativeSessionID + `"}`)}}, nil
+			StateChangeSeq: 42, CompletionSeq: 42, Cwd: run.Cwd, AgentSession: json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"` + run.NativeSessionID + `"}`)}}, nil
 	}
 	c.actions.completed = func(_ context.Context, _ Host, _ *Job, native string) (bool, error) {
 		return native == run.NativeSessionID, nil
