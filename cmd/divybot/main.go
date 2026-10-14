@@ -4037,7 +4037,7 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool 
 					return false
 				}
 			}
-			if host.stopRemoteRun(cctx, j) != nil || cctx.Err() != nil {
+			if host.releaseRemoteResources(cctx, j) != nil || cctx.Err() != nil {
 				return false
 			}
 		} else {

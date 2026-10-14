@@ -97,7 +97,7 @@ func (c *Coord) finishRemoteActionStop(ctx context.Context, h Host, dir string, 
 	}
 	check, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if h.stopRemoteRun(check, j) != nil || check.Err() != nil {
+	if h.releaseRemoteResources(check, j) != nil || check.Err() != nil {
 		return
 	}
 	c.st.mu.Lock()
