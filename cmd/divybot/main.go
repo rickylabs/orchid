@@ -3685,9 +3685,13 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		c.reportBlockedLaunch(ctx, n)
 		return
 	}
-	if !suppressInput {
+	// Binding and observation are reads, independent of permission to send
+	// continuation input. A fast first Claude turn may already be idle here.
+	if matched {
 		c.bindLiveNativeIdentity(ctx, host, j)
 		c.observeClaudeWorking(ctx, host, j)
+	}
+	if !suppressInput {
 		if ref.Status == "working" || ref.Status == "blocked" {
 			c.retryBoundGoal(ctx, host, j)
 		}

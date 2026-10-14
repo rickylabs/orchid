@@ -78,6 +78,13 @@ func jobNativeOccupant(a AgentInfo, j *Job) bool {
 	if j.NativeSessionID == "" || (j.Agent != "claude" && j.Agent != "codex") {
 		return true
 	}
+	// Before the first turn, the canonical TUI can have a certified stored
+	// resume proof while its SessionStart hook is deferred. Reuse that native
+	// path with the exact recorded scope/terminal and refuse conflicting hooks.
+	if rcCodex(j) && j.RemoteControl.IdentitySource == "codex-native-status" && j.RemoteControl.NativeSessionID == j.NativeSessionID && codexResumeProven(j.RemoteControl) {
+		raw, err := json.Marshal(map[string]any{"type": "agent_info", "agent": a})
+		return err == nil && remoteStatusOccupant(raw, "codex", j.Label, j.RemoteControl.Cwd, j.NativeSessionID, &dispatchLocation{PaneID: j.Pane, WorkspaceID: j.Workspace})
+	}
 	var session struct{ Source, Agent, Kind, Value string }
 	return json.Unmarshal(a.AgentSession, &session) == nil && lifecycleSource(session.Source, j.Agent) && session.Agent == j.Agent && session.Kind == "id" && session.Value == j.NativeSessionID
 }
