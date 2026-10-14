@@ -294,6 +294,10 @@ func remoteThreadParams(r *remoteControlRun, env map[string]string) (map[string]
 	if len(env) > 0 {
 		config["shell_environment_policy"] = map[string]any{"set": env}
 	}
+	if r.LifecycleHooks != nil {
+		config["hooks"] = r.LifecycleHooks
+		config["features"] = map[string]bool{"hooks": true}
+	}
 	params := map[string]any{"cwd": r.Cwd, "approvalPolicy": "never", "sandbox": "danger-full-access", "config": config, "ephemeral": false, "historyMode": "paginated"}
 	if r.Model != "" {
 		params["model"] = r.Model

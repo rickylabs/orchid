@@ -95,16 +95,13 @@ func observeClaudeWorking(ctx context.Context, root, inbox string, owner *receip
 		return false
 	}
 	var response struct {
-		Agent struct {
-			Status string `json:"agent_status"`
-		} `json:"agent"`
+		Agent AgentInfo `json:"agent"`
 	}
-	if decodeNativeJSON(raw, &response) != nil {
+	if decodeNativeJSON(raw, &response) != nil || !response.Agent.VendorEvent.matches(response.Agent) {
 		return false
 	}
-	switch response.Agent.Status {
-	case "working", "idle", "done":
-	default:
+	status := vendorEventState(response.Agent.VendorEvent.Event)
+	if status != "working" && status != "idle" {
 		return false
 	}
 	verified, currentID, err := loadNativeBindingReceipt(root, j.DispatchKey, j, inbox, owner, "claude")
@@ -113,7 +110,7 @@ func observeClaudeWorking(ctx context.Context, root, inbox string, owner *receip
 	}
 	row := claudeStatusObservation{SchemaVersion: 1, RunID: r.dispatch.RunID,
 		NativeSessionID: id, Host: j.Host, PaneID: j.Pane, WorkspaceID: j.Workspace,
-		Status: response.Agent.Status, ObservedAt: now.UTC().Format(time.RFC3339Nano)}
+		Status: status, ObservedAt: now.UTC().Format(time.RFC3339Nano)}
 	if writeClaudeStatus(path, owner, row) != nil {
 		return false
 	}
@@ -133,7 +130,19 @@ func (c *Coord) observeClaudeWorking(ctx context.Context, host Host, j *Job) {
 	defer cancel()
 	_ = observeClaudeWorking(readCtx, c.cfg.Matrix.ReceiptRoot, c.cfg.Inbox, owner, j,
 		func(ctx context.Context, pane string) (json.RawMessage, error) {
-			return c.fleetAgentResponse(ctx, host, pane)
+			raw, err := c.fleetAgentResponse(ctx, host, pane)
+			if err != nil {
+				return nil, err
+			}
+			var response struct {
+				Type  string    `json:"type"`
+				Agent AgentInfo `json:"agent"`
+			}
+			if decodeNativeJSON(raw, &response) != nil {
+				return nil, errMatrix
+			}
+			response.Agent.VendorEvent = host.vendorLifecycle(ctx, response.Agent)
+			return json.Marshal(response)
 		}, time.Now())
 }
 

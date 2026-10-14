@@ -8,8 +8,7 @@ import (
 
 // Native goal-input readiness for the Remote Control Codex TUI, observe-only.
 //
-// deliverCodexPrompt still decides readiness from today's inputs (Herdr agent
-// info plus the visible composer). Beside it, this records in the private
+// Readiness uses Herdr's structured startup contract. Beside it, this records in the private
 // native-evidence shadow what native evidence alone would decide at the same
 // moments: the stored native attachment proof, Herdr's STRUCTURED occupant,
 // and the canonical Codex app-server's own status for the prepared thread.
@@ -33,7 +32,7 @@ func (g *goalReadinessShadow) record(today string, native shadowVerdict, at time
 	if g == nil || g.shadow == nil || g.job == nil {
 		return
 	}
-	g.shadow.compareNativeAt(g.job, shadowSiteGoalReadiness, today, []string{shadowInputHerdrAgent, shadowInputScreenComposer}, native, at)
+	g.shadow.compareNativeAt(g.job, shadowSiteGoalReadiness, today, []string{shadowInputHerdrAgent}, native, at)
 }
 
 // observe starts the native read for one recording moment off the launch

@@ -174,3 +174,22 @@ trigger, status can still prove the exact record; install remains inert-only.
 Ambiguous publication or trigger effects must be reconciled, never retried with
 a fresh grant automatically. This port adds no public HTTP endpoint, billing
 exception, model alias or teardown cause.
+
+## Delayed comment grants
+
+A fresh ungranted owner comment stays durably `awaiting-grant` while Cockpit's
+grant endpoint is available. This uses the existing comment admission window;
+it does not create an approval request or make the comment launchable. A restart
+restores the wait. A matching grant wakes reconciliation of the current comment
+and issue before admission; edits, deletion, another author, body or issue still
+prevent launch.
+
+Only a closed admission window, or absence of a grant endpoint, produces a final
+missing-grant refusal. Expiry is reconciled through the current comment and
+issue, within the existing read budget. A grant arriving after expiry cannot
+launch that comment. Replayed grants retain the existing one-launch claim.
+
+A valid late grant removes an unposted legacy missing-grant refusal and clears
+that refusal's saved notice and launch block. If a refusal was already posted,
+the successful started reply for the same comment explicitly supersedes it and
+states that no approval request is pending. Other refusal reasons remain fenced.

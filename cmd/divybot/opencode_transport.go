@@ -471,6 +471,31 @@ func openCodeOccupant(a AgentInfo, j *Job, run *openCodeRun) bool {
 }
 
 func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, goal string, persist func() error) error {
+	if j == nil || j.OpenCode == nil || strings.TrimSpace(goal) == "" || j.OpenCode.ExpectedPromptDigest != shaText([]byte(goal)) {
+		return matrixReason("opencode-output-unconfirmed")
+	}
+	expected, err := h.agentInfoOf(ctx, j.Pane)
+	if err != nil || !openCodeOccupant(expected, j, j.OpenCode) {
+		return matrixReason("opencode-output-unconfirmed")
+	}
+	err = h.withPromptEvents(ctx, expected, func(ctx context.Context, p *promptEvents) error {
+		if _, err := h.waitAgent(ctx, expected); err != nil {
+			return matrixReason("opencode-output-unconfirmed")
+		}
+		return h.deliverOpenCodeGoal(ctx, j, goal, persist, p.wait)
+	})
+	if err != nil {
+		var reason matrixReason
+		if errors.As(err, &reason) {
+			return err
+		}
+		return matrixReason("opencode-output-unconfirmed")
+	}
+	return nil
+}
+
+func (h Host) deliverOpenCodeGoal(ctx context.Context, j *Job, goal string, persist func() error, wait func(context.Context) bool) error {
+
 	// The rendered goal is bound at launch, never reconstructed from Job.Goal's
 	// truncated summary or recovered by reading a file in the model's first turn.
 	if j == nil || j.OpenCode == nil || strings.TrimSpace(goal) == "" || j.OpenCode.ExpectedPromptDigest != shaText([]byte(goal)) {
@@ -516,10 +541,10 @@ func (h Host) injectOpenCodeGoal(ctx context.Context, j *Job, goal string, persi
 	}
 	return waitOpenCodePrompt(ctx, func(ctx context.Context) (bool, bool, error) {
 		return h.observeOpenCode(ctx, j)
-	})
+	}, wait)
 }
 
-func waitOpenCodePrompt(ctx context.Context, observe func(context.Context) (bool, bool, error)) error {
+func waitOpenCodePrompt(ctx context.Context, observe func(context.Context) (bool, bool, error), wait func(context.Context) bool) error {
 	for {
 		if ctx.Err() != nil {
 			return matrixReason("opencode-output-unconfirmed")
@@ -535,7 +560,7 @@ func waitOpenCodePrompt(ctx context.Context, observe func(context.Context) (bool
 		if errors.As(err, &reason) && (reason == "opencode-empty-answer" || reason == "opencode-route-mismatch" || reason == "opencode-provider-error") {
 			return err
 		}
-		if !nativePromptWait(ctx) {
+		if !wait(ctx) {
 			return matrixReason("opencode-output-unconfirmed")
 		}
 	}

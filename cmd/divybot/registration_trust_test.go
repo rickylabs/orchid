@@ -57,15 +57,12 @@ func TestManagedTrustSettingDoesNotChangeOtherTransports(t *testing.T) {
 	}
 }
 
-func TestStartupTrustDialogReportsBlockedWithoutInput(t *testing.T) {
+func TestStartupTrustTextCannotOverrideNativeFailure(t *testing.T) {
 	for _, mode := range []string{"trust-dialog", "trust-foreign", "trust-name", "trust-pane", "trust-workspace", "trust-cwd", "trust-working", "trust-changed", "trust-unreadable", "trust-malformed", "trust-oversized", "trust-quoted"} {
 		t.Run(mode, func(t *testing.T) {
 			h, calls := registrationHost(t, mode)
 			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{}, registrationReceipt(t, "codex", Overrides{}))
 			want := "startup_timeout"
-			if mode == "trust-dialog" {
-				want = "startup_blocked"
-			}
 			if !errors.Is(err, errAgentRegistration) || registrationFailureKind(err) != want || pane != "w1:p1" || ws != "w1" || strings.Contains(err.Error(), "CANARY") {
 				t.Fatal("startup diagnosis lost trust blocking, ownership, cleanup, or privacy")
 			}

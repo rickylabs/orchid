@@ -31,22 +31,7 @@ func managedInteractiveAgentArgs(agent string, o Overrides, cwd string) (string,
 	return kind, args, nil
 }
 
-func codexStartupTrustDialog(screen string) bool {
-	if len(screen) > 64*1024 {
-		return false
-	}
-	text := strings.Join(strings.Fields(screen), " ")
-	for _, marker := range []string{"Folder access", "Trust this folder?", "1. Trust and continue", "2. Quit", "enter continue"} {
-		if !strings.Contains(text, marker) {
-			return false
-		}
-	}
-	return true
-}
-
-// The current Herdr manifest misses a line-wrapped trust dialog and returns a
-// timeout. Read only the exact owned Codex occupant; never send keys or retry.
-// Keep cancellation/busy/native blocked errors and uncertain screens unchanged.
+// Classify startup from native Herdr errors. Screen text cannot refine it.
 func (h Host) registrationStartFailure(ctx context.Context, output, agent, label, cwd, pane, ws string) error {
 	failure := registrationFailure(output, ctx.Err())
 	if agent == "agy" && registrationFailureKind(failure) == "startup_timeout" && ctx.Err() == nil {
@@ -55,25 +40,5 @@ func (h Host) registrationStartFailure(ctx context.Context, output, agent, label
 		}
 		return failure
 	}
-	if agent != "codex" || registrationFailureKind(failure) != "startup_timeout" || ctx.Err() != nil {
-		return failure
-	}
-	before, err := h.agentInfoOf(ctx, pane)
-	if err != nil || !startupCodexOccupant(before, label, cwd, pane, ws) {
-		return failure
-	}
-	screen, err := h.visiblePromptScreen(ctx, pane)
-	if err != nil || !codexStartupTrustDialog(screen) {
-		return failure
-	}
-	after, err := h.agentInfoOf(ctx, pane)
-	if err != nil || !startupCodexOccupant(after, label, cwd, pane, ws) || before.Name != after.Name || before.StateChangeSeq != after.StateChangeSeq {
-		return failure
-	}
-	return &agentRegistrationFailure{kind: "startup_blocked"}
-}
-
-func startupCodexOccupant(a AgentInfo, label, cwd, pane, ws string) bool {
-	// Herdr releases the pending name at timeout, but preserves the pane occupant.
-	return a.Agent == "codex" && a.PaneID == pane && a.WorkspaceID == ws && a.Cwd == cwd && (a.Name == label || a.Name == "") && a.AgentStatus == "unknown"
+	return failure
 }

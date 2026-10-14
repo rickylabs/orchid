@@ -14,7 +14,7 @@ func TestClaudeWorkingObservationBoundAndInvalidated(t *testing.T) {
 	id := privateTestID(t)
 	info := claudeAgentInfo(t, id)
 	if bound, err := retryLiveNativeBinding(context.Background(), root, "fixture/inbox", nil, job,
-		func(context.Context, string) (json.RawMessage, error) { return fixtureJSON(t, info), nil }); err != nil || !bound {
+		func(context.Context, string) (json.RawMessage, error) { return claudeVendorFixture(t, info), nil }); err != nil || !bound {
 		t.Fatal("fixture did not bind its native session", err)
 	}
 	path := filepath.Join(root, job.DispatchKey, "record", "claude-status.json")
@@ -23,7 +23,7 @@ func TestClaudeWorkingObservationBoundAndInvalidated(t *testing.T) {
 		if pane != job.Pane {
 			t.Fatal("status read escaped the bound pane")
 		}
-		return fixtureJSON(t, info), nil
+		return claudeVendorFixture(t, info), nil
 	}
 	info["agent"].(map[string]any)["agent_status"] = "working"
 	if !observeClaudeWorking(context.Background(), root, "fixture/inbox", nil, job, read, now) {
@@ -79,14 +79,14 @@ func TestClaudeStoppedAtPromptIsObservedNotRemoved(t *testing.T) {
 	root, job, _ := claudeLiveBindingFixture(t)
 	id := privateTestID(t)
 	info := claudeAgentInfo(t, id)
-	read := func(context.Context, string) (json.RawMessage, error) { return fixtureJSON(t, info), nil }
+	read := func(context.Context, string) (json.RawMessage, error) { return claudeVendorFixture(t, info), nil }
 	if bound, err := retryLiveNativeBinding(context.Background(), root, "fixture/inbox", nil, job, read); err != nil || !bound {
 		t.Fatal("fixture did not bind its native session", err)
 	}
 	path := filepath.Join(root, job.DispatchKey, "record", "claude-status.json")
 	tick := time.Date(2026, 9, 30, 11, 22, 0, 0, time.UTC)
 	for _, step := range []struct{ herdr, want string }{
-		{"working", "working"}, {"done", "done"}, {"idle", "idle"}, {"blocked", ""}, {"done", "done"}, {"working", "working"},
+		{"working", "working"}, {"done", "idle"}, {"idle", "idle"}, {"blocked", ""}, {"done", "idle"}, {"working", "working"},
 	} {
 		tick = tick.Add(30 * time.Second)
 		info["agent"].(map[string]any)["agent_status"] = step.herdr
@@ -103,4 +103,21 @@ func TestClaudeStoppedAtPromptIsObservedNotRemoved(t *testing.T) {
 			t.Fatalf("%s at %s: want a fresh %q row, got %+v (%v)", step.herdr, tick.Format(time.TimeOnly), step.want, row, err)
 		}
 	}
+}
+
+func claudeVendorFixture(t *testing.T, info map[string]any) json.RawMessage {
+	a := info["agent"].(map[string]any)
+	event := "Stop"
+	switch a["agent_status"] {
+	case "working":
+		event = "UserPromptSubmit"
+	case "blocked":
+		event = "PermissionRequest"
+	case "unknown":
+		event = "invalid"
+	}
+	session, _ := a["agent_session"].(map[string]any)
+	id, _ := session["value"].(string)
+	a["native_lifecycle_event"] = &vendorLifecycleEvent{Agent: "claude", Name: "fixture-agent", Pane: "w1:p1", Workspace: "w1", Cwd: func() string { s, _ := a["cwd"].(string); return s }(), Terminal: "fixture-terminal", Session: id, Event: event, Seq: 1}
+	return fixtureJSON(t, info)
 }

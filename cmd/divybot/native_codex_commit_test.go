@@ -149,20 +149,22 @@ func jsonNumber(n int) string {
 func stageHerdrPromptHost(t *testing.T, h *accHarness) string {
 	t.Helper()
 	state := t.TempDir()
+	t.Setenv("PROMPT_FIXTURE_SOCKET", herdrEventFixture(t))
 	h.f.sentFile = filepath.Join(state, "prompt")
 	bin := filepath.Join(h.f.home, ".local", "bin")
 	if os.MkdirAll(bin, 0700) != nil {
 		t.Fatal("fixture")
 	}
 	agent, _ := json.Marshal(map[string]any{"result": map[string]any{"agent": map[string]any{"agent": "codex", "name": "codex-fixture", "pane_id": "w1:p1", "workspace_id": "w1",
-		"agent_status": "idle", "state_change_seq": 1, "interactive_ready": true, "cwd": "/fixture/project"}}})
+		"terminal_id": "fixture-terminal", "screen_detection_skipped": false, "agent_status": "idle", "state_change_seq": 1, "interactive_ready": true, "cwd": "/fixture/project"}}})
 	screen := "OpenAI Codex (v0.159.3)\n› Anything interesting on the docket?\n" + h.acc.run.NativeSessionID + " fixture-footer\n"
 	_ = os.WriteFile(filepath.Join(state, "agent"), agent, 0600)
 	_ = os.WriteFile(filepath.Join(state, "screen"), []byte(screen), 0600)
 	script := `#!/usr/bin/env python3
 import json,os,sys
 d=os.environ['ACC_HERDR']; a=sys.argv[1:]
-if a[:2]==['agent','get']: print(open(d+'/agent').read())
+if a[:2] in (['agent','get'],['agent','wait']): print(open(d+'/agent').read())
+elif a[:2]==['status','server']:print(json.dumps({'running':True,'socket':os.environ['PROMPT_FIXTURE_SOCKET']}))
 elif a[:2]==['pane','read']: print(json.dumps({'result':{'text':open(d+'/screen').read()}}))
 elif a[:2]==['agent','prompt']:
  open(d+'/prompt','w').write(a[3]); print(json.dumps({'result':{}}))

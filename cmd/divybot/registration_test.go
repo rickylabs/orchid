@@ -207,6 +207,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 				relative, _ := filepath.Rel(gemini, store)
 				expected = append(expected, "--gemini_dir", gemini, "--app_data_dir", relative)
 			}
+			expected = append(expected, lifecycleArgs(kind, "fixture-agent", pane, ws, cwd)...)
 			if !reflect.DeepEqual(got[2], expected) {
 				t.Fatalf("argv lost identity or quoting: %q", got[2])
 			}
@@ -226,9 +227,6 @@ func TestRegistrationRefusesBusyNotReadyAndMalformedResponses(t *testing.T) {
 				t.Fatal("failure must retain owned cleanup handles")
 			}
 			wantCalls := 3
-			if failure == "timeout" {
-				wantCalls++ // exact-pane diagnostic read; never an input or retry
-			}
 			if len(calls()) != wantCalls {
 				t.Fatal("registration failure retried or delivered a goal")
 			}

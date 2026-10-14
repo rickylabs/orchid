@@ -80,6 +80,7 @@ type Mem struct {
 // host is usable iff it's on the tailnet and its herdr answers. Capabilities
 // gate routing (a deno build needs a beefy box, not a phone).
 type Host struct {
+	NativeJob      *Job                 `json:"-"`
 	RemoteControl  *RemoteControlConfig `json:"-"`
 	CanonicalCodex bool                 `json:"-"`
 	RemoteRun      *remoteControlRun    `json:"-"`
@@ -616,17 +617,20 @@ func herdrUnwrap(out string) (json.RawMessage, error) {
 }
 
 type AgentInfo struct {
-	InteractiveReady bool            `json:"interactive_ready"`
-	AgentSession     json.RawMessage `json:"agent_session"`
-	Agent            string          `json:"agent"`
-	AgentStatus      string          `json:"agent_status"`
-	StateChangeSeq   uint64          `json:"state_change_seq"`
-	CompletionSeq    uint64          `json:"completion_seq"`
-	Cwd              string          `json:"cwd"`
-	PaneID           string          `json:"pane_id"`
-	WorkspaceID      string          `json:"workspace_id"`
-	Label            string          `json:"label"`
-	Name             string          `json:"name"`
+	VendorEvent      *vendorLifecycleEvent `json:"native_lifecycle_event,omitempty"`
+	TerminalID       string                `json:"terminal_id"`
+	NativeLifecycle  bool                  `json:"screen_detection_skipped"`
+	InteractiveReady bool                  `json:"interactive_ready"`
+	AgentSession     json.RawMessage       `json:"agent_session"`
+	Agent            string                `json:"agent"`
+	AgentStatus      string                `json:"agent_status"`
+	StateChangeSeq   uint64                `json:"state_change_seq"`
+	CompletionSeq    uint64                `json:"completion_seq"`
+	Cwd              string                `json:"cwd"`
+	PaneID           string                `json:"pane_id"`
+	WorkspaceID      string                `json:"workspace_id"`
+	Label            string                `json:"label"`
+	Name             string                `json:"name"`
 }
 
 func (h Host) agentList(ctx context.Context) ([]AgentInfo, error) {
@@ -666,6 +670,7 @@ func (h Host) agentInfoOf(ctx context.Context, target string) (AgentInfo, error)
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return AgentInfo{}, err
 	}
+	r.Agent.VendorEvent = h.vendorLifecycle(ctx, r.Agent)
 	return r.Agent, nil
 }
 
@@ -779,6 +784,11 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		}
 	}
 	attempt.enter(stageWorkspace)
+	if agent == "opencode" {
+		if _, e := h.herdr(ctx, "integration", "install", "opencode"); e != nil {
+			return "", "", matrixSite("spawn.native-integration", errAgentRegistration)
+		}
+	}
 	wout, werr := h.herdr(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if werr != nil {
 		return "", "", matrixSite("spawn.workspace-create", errMatrix)
@@ -808,6 +818,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		return "", "", matrixSite("spawn.workspace-handles", errMatrix)
 	}
 	location := &dispatchLocation{PaneID: pane, WorkspaceID: ws}
+	nativeArgs = append(nativeArgs, lifecycleArgs(agent, label, pane, ws, cwd)...)
 	if e := receipt.writeDispatch("launching", location); e != nil {
 		return pane, ws, matrixSite("spawn.launching-binding", e)
 	}
@@ -856,6 +867,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if remote != nil {
 		attempt.enter(stageThreadPreparation)
 		if agent == "codex" {
+			remote.LifecycleHooks = nativeLifecycleHooks(agent, label, pane, ws, cwd)
 			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
 				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
 			}
@@ -1002,140 +1014,35 @@ func (h Host) send(ctx context.Context, target, text string) error {
 	return nil
 }
 
-// agentBareIdle reports whether the pane shows an idle, empty agent prompt
-// (the "bypass permissions" footer is present only when claude is sitting
-// at an empty input box). Used to detect (a) that the TUI has finished
-// booting and (b) after a send, that the input was NOT accepted — once a
-// task is submitted claude goes busy and the footer disappears.
-func agentBareIdle(pane string) bool {
-	return strings.Contains(pane, "bypass permissions")
-}
-
-// injectGoal waits for a freshly spawned agent to be ready, submits its
-// assignment, then confirms an observed state change. Native prompts are sent
-// once because a delayed observation cannot prove that a prior send was lost;
-// every path preserves uncertain delivery without resubmitting.
-func nativePromptObserved(before, after AgentInfo) bool {
-	if before.PaneID == "" || before.WorkspaceID == "" || before.Agent == "" ||
-		after.PaneID != before.PaneID || after.WorkspaceID != before.WorkspaceID || after.Agent != before.Agent || after.Name != before.Name ||
-		after.StateChangeSeq <= before.StateChangeSeq {
-		return false
-	}
-	switch after.AgentStatus {
-	case "working", "blocked":
-		return true
-	}
-	return false
-}
-
-func awaitNativePrompt(ctx context.Context, before AgentInfo, observe func(context.Context) (AgentInfo, error), wait func(context.Context) bool) error {
-	for {
-		if after, err := observe(ctx); err == nil && nativePromptObserved(before, after) {
-			return nil
-		}
-		if !wait(ctx) {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("native prompt state unconfirmed: %w", err)
-			}
-			return fmt.Errorf("native prompt state unconfirmed")
-		}
-	}
-}
-
-func nativePromptWait(ctx context.Context) bool {
-	t := time.NewTimer(2 * time.Second)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
+// Readiness is a bounded Herdr wait; acceptance observes the original occupant's
+// native events from a subscription established before the single submission.
 func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) error {
-	if native {
-		info, err := h.agentInfoOf(ctx, target)
-		if err != nil {
+	expected, err := h.agentInfoOf(ctx, target)
+	if err != nil || expected.TerminalID == "" || expected.Name == "" {
+		return errPromptUnconfirmed
+	}
+	if expected.Agent == "agy" {
+		return h.injectAGYGoal(ctx, expected, goal, h.NativeJob)
+	}
+	if expected.Agent == "codex" && native {
+		return h.injectCodexGoal(ctx, target, goal, expected)
+	}
+	return h.withPromptEvents(ctx, expected, func(ctx context.Context, p *promptEvents) error {
+		if _, err := h.waitAgent(ctx, expected); err != nil {
+			return err
+		}
+		before, err := h.agentInfoOf(ctx, target)
+		if err != nil || !samePromptOccupant(expected, before) {
 			return errPromptUnconfirmed
 		}
-		if info.Agent == "codex" {
-			return h.injectCodexGoal(ctx, target, goal, info)
+		if _, err = p.observe(ctx); err != nil {
+			return err
 		}
-	}
-	// Readiness/acceptance via herdr's native status — works for claude AND
-	// opencode. (The old "bypass permissions" pane scrape was claude-only and
-	// blind to opencode's TUI, so the wait loop never broke → it burned the whole
-	// ctx and the goal inject context-canceled.)
-	ready := func() bool {
-		info, err := h.agentInfoOf(ctx, target)
-		return err == nil && (info.Agent != "codex" || info.InteractiveReady) && (info.AgentStatus == "idle" || info.AgentStatus == "done")
-	}
-	accepted := func() bool {
-		st := h.agentStatusOf(ctx, target)
-		return st == "working" || st == "blocked"
-	}
-	// Wait for Herdr's native readiness signal before submitting.
-	readyObserved := false
-	for i := 0; i < 30; i++ {
-		if ready() {
-			readyObserved = true
-			break
+		if err = h.send(ctx, expected.Name, goal); err != nil {
+			return errPromptUnconfirmed
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
-	if !readyObserved {
-		return fmt.Errorf("goal readiness unconfirmed")
-	}
-	if native {
-		// Herdr's --wait requires a working/blocked transition within five
-		// seconds, even with a longer --timeout. Codex can start real work later,
-		// so that gate falsely reports a failure and retrying may submit the same
-		// prompt multiple times. Submit once, then independently watch this exact
-		// occupant's state-change sequence for the full launch context.
-		before, err := h.agentInfoOf(ctx, target)
-		if err != nil {
-			return fmt.Errorf("native prompt baseline unavailable: %w", err)
-		}
-		if _, err := h.herdr(ctx, "agent", "prompt", target, goal); err != nil {
-			return fmt.Errorf("native prompt submission unconfirmed: %w", err)
-		}
-		return awaitNativePrompt(ctx, before, func(ctx context.Context) (AgentInfo, error) {
-			return h.agentInfoOf(ctx, target)
-		}, nativePromptWait)
-	}
-	// A timeout cannot establish whether the prompt arrived. Submit only once.
-	if err := h.send(ctx, target, goal); err != nil {
-		return fmt.Errorf("goal submission unconfirmed: %w", err)
-	}
-	for j := 0; j < 7; j++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
-		if accepted() {
-			return nil
-		}
-	}
-	return fmt.Errorf("goal acceptance unconfirmed")
-}
-
-// codexTrustDialog reports codex's folder-trust dialog on the visible screen
-// (codex 0.159.2: "Trust this folder?" with "1. Trust and continue" selected).
-func codexTrustDialog(screen string) bool {
-	return strings.Contains(screen, "Trust this folder?") && strings.Contains(screen, "Trust and continue")
-}
-
-// screen is the pane's visible text. `agent read --source recent` does not show
-// codex's trust dialog; `pane read` does.
-func (h Host) screen(ctx context.Context, target string) string {
-	screen, _ := h.visiblePromptScreen(ctx, target)
-	return screen
+		return awaitNativePrompt(ctx, before, p.observe, p.wait)
+	})
 }
 
 func (h Host) read(ctx context.Context, target string, lines int) string {
