@@ -227,9 +227,6 @@ func TestRegistrationRefusesBusyNotReadyAndMalformedResponses(t *testing.T) {
 				t.Fatal("failure must retain owned cleanup handles")
 			}
 			wantCalls := 3
-			if failure == "timeout" {
-				wantCalls++ // exact-pane diagnostic read; never an input or retry
-			}
 			if len(calls()) != wantCalls {
 				t.Fatal("registration failure retried or delivered a goal")
 			}

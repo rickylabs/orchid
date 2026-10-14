@@ -39,7 +39,7 @@ func TestOpenCodePromptWaitDeadlineCannotConfirm(t *testing.T) {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		defer cancel()
 		reads := 0
-		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { reads++; return true, true, nil })
+		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { reads++; return true, true, nil }, func(ctx context.Context) bool { return ctx.Err() == nil })
 		if err != matrixReason("opencode-output-unconfirmed") || reads != 0 {
 			t.Fatal("expired confirmation budget read or accepted native proof", err, reads)
 		}
@@ -47,7 +47,7 @@ func TestOpenCodePromptWaitDeadlineCannotConfirm(t *testing.T) {
 	t.Run("cancel during positive read", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { cancel(); return true, true, nil })
+		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { cancel(); return true, true, nil }, func(ctx context.Context) bool { return ctx.Err() == nil })
 		if err != matrixReason("opencode-output-unconfirmed") {
 			t.Fatal("late positive observation bypassed cancellation", err)
 		}
@@ -56,7 +56,7 @@ func TestOpenCodePromptWaitDeadlineCannotConfirm(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		reads := 0
-		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { reads++; return reads == 2, false, nil })
+		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { reads++; return reads == 2, false, nil }, func(ctx context.Context) bool { return ctx.Err() == nil })
 		if err != nil || reads != 2 || ctx.Err() != nil {
 			t.Fatal("bounded re-read failed to certify a fresh streaming session", err, reads)
 		}
@@ -64,7 +64,7 @@ func TestOpenCodePromptWaitDeadlineCannotConfirm(t *testing.T) {
 	t.Run("never appears", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 		defer cancel()
-		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { return false, false, nil })
+		err := waitOpenCodePrompt(ctx, func(context.Context) (bool, bool, error) { return false, false, nil }, func(ctx context.Context) bool { <-ctx.Done(); return false })
 		if err != matrixReason("opencode-output-unconfirmed") || ctx.Err() == nil {
 			t.Fatal("missing native session escaped its deadline", err)
 		}

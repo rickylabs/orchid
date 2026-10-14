@@ -111,7 +111,7 @@ func TestLaunchOutcomeNativeNotScreen(t *testing.T) {
 				dispatchIssue{Repo: "fixture/inbox", Number: 7}, outcomeRoute{Harness: "codex"}, false, nil, time.Now)
 			r.attempt.begin()
 			_, _, err := h.spawnAgent(context.Background(), "fixture-agent", t.TempDir(), nil, "codex", Overrides{}, r)
-			if registrationFailureKind(err) != "startup_blocked" {
+			if registrationFailureKind(err) != strings.ReplaceAll(tc.wantReason, "-", "_") {
 				t.Fatalf("fixture no longer yields the shared final kind: %s", registrationFailureKind(err))
 			}
 			r.attempt.finish(context.Background(), err)

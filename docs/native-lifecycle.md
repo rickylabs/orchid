@@ -23,3 +23,12 @@ The contracts are documented in [Herdr integrations](https://github.com/herdrdev
 [Herdr reporting](https://github.com/herdrdev/herdr/blob/v0.9.3/docs/next/website/src/content/docs/socket-api.mdx),
 [Claude hooks](https://code.claude.com/docs/en/hooks), and
 [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+
+Readiness uses a bounded `agent.wait` pinned by Herdr to the resolved occupant.
+Orchid independently checks the original terminal and native session on its
+Host and discovered socket. A pane-scoped subscription is acknowledged before
+the baseline and the single submit. Native transitions wake acceptance reads;
+loss or occupant replacement cancels the delivery. A newer native completion
+sequence covers a fast turn that already returned to idle. OpenCode retains its
+exact persisted prompt proof, reread on event invalidations. Codex retains its
+canonical native turn and durable delivery commit.

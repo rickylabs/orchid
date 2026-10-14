@@ -1011,118 +1011,32 @@ func (h Host) send(ctx context.Context, target, text string) error {
 	return nil
 }
 
-// injectGoal waits for a freshly spawned agent to be ready, submits its
-// assignment, then confirms an observed state change. Native prompts are sent
-// once because a delayed observation cannot prove that a prior send was lost;
-// every path preserves uncertain delivery without resubmitting.
-func nativePromptObserved(before, after AgentInfo) bool {
-	if before.PaneID == "" || before.WorkspaceID == "" || before.Agent == "" ||
-		after.PaneID != before.PaneID || after.WorkspaceID != before.WorkspaceID || after.Agent != before.Agent || after.Name != before.Name ||
-		after.StateChangeSeq <= before.StateChangeSeq {
-		return false
-	}
-	switch after.AgentStatus {
-	case "working", "blocked":
-		return true
-	}
-	return false
-}
-
-func awaitNativePrompt(ctx context.Context, before AgentInfo, observe func(context.Context) (AgentInfo, error), wait func(context.Context) bool) error {
-	for {
-		if after, err := observe(ctx); err == nil && nativePromptObserved(before, after) {
-			return nil
-		}
-		if !wait(ctx) {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("native prompt state unconfirmed: %w", err)
-			}
-			return fmt.Errorf("native prompt state unconfirmed")
-		}
-	}
-}
-
-func nativePromptWait(ctx context.Context) bool {
-	t := time.NewTimer(2 * time.Second)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
+// Readiness is a bounded Herdr wait; acceptance observes the original occupant's
+// native events from a subscription established before the single submission.
 func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) error {
-	if native {
-		info, err := h.agentInfoOf(ctx, target)
-		if err != nil {
+	expected, err := h.agentInfoOf(ctx, target)
+	if err != nil || expected.TerminalID == "" || expected.Name == "" {
+		return errPromptUnconfirmed
+	}
+	if expected.Agent == "codex" && native {
+		return h.injectCodexGoal(ctx, target, goal, expected)
+	}
+	return h.withPromptEvents(ctx, expected, func(ctx context.Context, p *promptEvents) error {
+		if _, err := h.waitAgent(ctx, expected); err != nil {
+			return err
+		}
+		before, err := h.agentInfoOf(ctx, target)
+		if err != nil || !samePromptOccupant(expected, before) || !before.NativeLifecycle {
 			return errPromptUnconfirmed
 		}
-		if info.Agent == "codex" {
-			return h.injectCodexGoal(ctx, target, goal, info)
+		if _, err = p.observe(ctx); err != nil {
+			return err
 		}
-	}
-	// Readiness/acceptance via herdr's native status — works for claude AND
-	// opencode. (The old "bypass permissions" pane scrape was claude-only and
-	// blind to opencode's TUI, so the wait loop never broke → it burned the whole
-	// ctx and the goal inject context-canceled.)
-	ready := func() bool {
-		info, err := h.agentInfoOf(ctx, target)
-		return err == nil && (info.Agent != "codex" || info.InteractiveReady) && (info.AgentStatus == "idle" || info.AgentStatus == "done")
-	}
-	accepted := func() bool {
-		st := h.agentStatusOf(ctx, target)
-		return st == "working" || st == "blocked"
-	}
-	// Wait for Herdr's native readiness signal before submitting.
-	readyObserved := false
-	for i := 0; i < 30; i++ {
-		if ready() {
-			readyObserved = true
-			break
+		if err = h.send(ctx, expected.Name, goal); err != nil {
+			return errPromptUnconfirmed
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
-	if !readyObserved {
-		return fmt.Errorf("goal readiness unconfirmed")
-	}
-	if native {
-		// Herdr's --wait requires a working/blocked transition within five
-		// seconds, even with a longer --timeout. Codex can start real work later,
-		// so that gate falsely reports a failure and retrying may submit the same
-		// prompt multiple times. Submit once, then independently watch this exact
-		// occupant's state-change sequence for the full launch context.
-		before, err := h.agentInfoOf(ctx, target)
-		if err != nil {
-			return fmt.Errorf("native prompt baseline unavailable: %w", err)
-		}
-		if _, err := h.herdr(ctx, "agent", "prompt", target, goal); err != nil {
-			return fmt.Errorf("native prompt submission unconfirmed: %w", err)
-		}
-		return awaitNativePrompt(ctx, before, func(ctx context.Context) (AgentInfo, error) {
-			return h.agentInfoOf(ctx, target)
-		}, nativePromptWait)
-	}
-	// A timeout cannot establish whether the prompt arrived. Submit only once.
-	if err := h.send(ctx, target, goal); err != nil {
-		return fmt.Errorf("goal submission unconfirmed: %w", err)
-	}
-	for j := 0; j < 7; j++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
-		if accepted() {
-			return nil
-		}
-	}
-	return fmt.Errorf("goal acceptance unconfirmed")
+		return awaitNativePrompt(ctx, before, p.observe, p.wait)
+	})
 }
 
 func (h Host) read(ctx context.Context, target string, lines int) string {

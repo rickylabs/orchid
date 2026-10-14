@@ -6,7 +6,7 @@ const promptFixtureGoal = "Read the staged fixture assignment in full and carry 
 const promptFixtureEmpty = "OpenAI Codex (v0.159.3)\n› Anything interesting on the docket?\n"
 
 func promptFixture() promptSnapshot {
-	return promptSnapshot{Agent: AgentInfo{Agent: "codex", Name: "fixture-agent", PaneID: "w1:p1", WorkspaceID: "w1", Cwd: "/fixture/project", AgentStatus: "done", StateChangeSeq: 7, InteractiveReady: true}, Screen: promptFixtureEmpty, Stable: true}
+	return promptSnapshot{Agent: AgentInfo{TerminalID: "fixture-terminal", NativeLifecycle: true, Agent: "codex", Name: "fixture-agent", PaneID: "w1:p1", WorkspaceID: "w1", Cwd: "/fixture/project", AgentStatus: "done", StateChangeSeq: 7, InteractiveReady: true}, Screen: promptFixtureEmpty, Stable: true}
 }
 
 func consumedPrompt(sent string) promptSnapshot {

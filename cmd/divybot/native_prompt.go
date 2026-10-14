@@ -36,7 +36,7 @@ type promptCalls struct {
 
 func samePromptOccupant(a, b AgentInfo) bool {
 	return a.Agent != "" && a.Name != "" && a.PaneID != "" && a.WorkspaceID != "" &&
-		a.Agent == b.Agent && a.Name == b.Name && a.PaneID == b.PaneID && a.WorkspaceID == b.WorkspaceID && a.Cwd == b.Cwd
+		a.Agent == b.Agent && a.Name == b.Name && a.PaneID == b.PaneID && a.WorkspaceID == b.WorkspaceID && a.Cwd == b.Cwd && a.TerminalID == b.TerminalID && sameNativeSession(a.AgentSession, b.AgentSession)
 }
 
 func codexReady(s promptSnapshot) bool {
@@ -131,58 +131,52 @@ func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot
 }
 
 func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected AgentInfo) error {
-	native := func(ctx context.Context, _ string, submit func(context.Context) error) error {
-		if !expected.NativeLifecycle {
-			return errPromptUnconfirmed
+	return h.withPromptEvents(ctx, expected, func(ctx context.Context, p *promptEvents) error {
+		ready, err := h.waitAgent(ctx, expected)
+		if err != nil {
+			return err
 		}
-		before, err := h.agentInfoOf(ctx, target)
-		if err != nil || !samePromptOccupant(expected, before) {
-			return errPromptUnconfirmed
+		native := func(ctx context.Context, _ string, submit func(context.Context) error) error {
+			before, err := h.agentInfoOf(ctx, target)
+			if err != nil || !samePromptOccupant(expected, before) || !before.NativeLifecycle {
+				return errPromptUnconfirmed
+			}
+			if _, err = p.observe(ctx); err != nil {
+				return err
+			}
+			if err = submit(ctx); err != nil {
+				return errPromptUnconfirmed
+			}
+			return awaitNativePrompt(ctx, before, p.observe, p.wait)
 		}
-		if err = submit(ctx); err != nil {
-			return errPromptUnconfirmed
-		}
-		return awaitNativePrompt(ctx, before, func(ctx context.Context) (AgentInfo, error) { return h.agentInfoOf(ctx, target) }, nativePromptWait)
-	}
-	var readiness func(promptSnapshot, string, time.Time)
-	if h.CanonicalCodex && h.RemoteRun != nil {
-		// Remote Control Codex has no screen-confirmed delivery path.
-		if h.Acceptance == nil {
-			return errPromptUnconfirmed
-		}
-		// The attached TUI was proven natively once before delivery (stored with
-		// its pin); the native acceptance then binds the goal to exactly this thread.
-		if !codexResumeProven(h.RemoteRun) { // guard:delivery-stored-proof
-			return errPromptUnconfirmed
-		}
-		native = func(ctx context.Context, sent string, submit func(context.Context) error) error {
-			return h.acceptCodexPrompt(ctx, h.Acceptance, sent, submit)
-		}
-		if h.GoalReadiness != nil {
-			readiness = func(s promptSnapshot, today string, at time.Time) {
-				h.observeGoalReadiness(s.Agent, s.Stable, today, at) // guard:readiness-structured-only
+		var readiness func(promptSnapshot, string, time.Time)
+		if h.CanonicalCodex && h.RemoteRun != nil {
+			if h.Acceptance == nil || !codexResumeProven(h.RemoteRun) {
+				return errPromptUnconfirmed
+			}
+			if h.codexGoalReadiness(ctx, ready, true).Value != "ready" {
+				return errPromptUnconfirmed
+			}
+			native = func(ctx context.Context, sent string, submit func(context.Context) error) error {
+				if _, err := p.observe(ctx); err != nil {
+					return err
+				}
+				return h.acceptCodexPrompt(ctx, h.Acceptance, sent, submit)
+			}
+			if h.GoalReadiness != nil {
+				readiness = func(s promptSnapshot, today string, at time.Time) {
+					h.observeGoalReadiness(s.Agent, s.Stable, today, at) // guard:readiness-structured-only
+				}
 			}
 		}
-	}
-	return deliverCodexPrompt(ctx, expected, goal, promptCalls{
-		native:    native,
-		readiness: readiness,
-		noConsent: h.CanonicalCodex,
-		observe: func(ctx context.Context) (promptSnapshot, error) {
-			s, err := h.promptSnapshot(ctx, target)
-			if h.RemoteRun != nil && ctx.Err() != nil {
-				return promptSnapshot{}, errPromptUnconfirmed
-			}
-			return s, err
-		},
-		submit: func(ctx context.Context, goal string) error {
-			_, err := h.herdr(ctx, "agent", "prompt", target, goal)
-			return err
-		},
-		enter: func(ctx context.Context) error {
-			_, err := h.herdr(ctx, "pane", "send-keys", target, "Enter")
-			return err
-		},
-		wait: nativePromptWait, now: time.Now,
+		return deliverCodexPrompt(ctx, expected, goal, promptCalls{
+			native: native, readiness: readiness,
+			observe: func(ctx context.Context) (promptSnapshot, error) {
+				a, err := h.agentInfoOf(ctx, target)
+				return promptSnapshot{Agent: a, Stable: err == nil}, err
+			},
+			submit: func(ctx context.Context, goal string) error { return h.send(ctx, expected.Name, goal) },
+			wait:   p.wait,
+		})
 	})
 }

@@ -194,6 +194,7 @@ func TestOpenCodeSessionFreshnessAndCapacity(t *testing.T) {
 func openCodeHostFixture(t *testing.T, mode string) (Host, *Job, func() string) {
 	t.Helper()
 	root := t.TempDir()
+	t.Setenv("PROMPT_FIXTURE_SOCKET", herdrEventFixture(t))
 	bin := filepath.Join(root, ".local", "bin")
 	if err := os.MkdirAll(bin, 0700); err != nil {
 		t.Fatal(err)
@@ -213,11 +214,12 @@ def emit(x):print(json.dumps(x))
 prompted=(root/'prompted').exists()
 if pathlib.Path(sys.argv[0]).name=='herdr':
  if a[:2]==['workspace','create']:emit({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}})
- elif a[:2]==['agent','get']:
-  info={'agent':'opencode','name':os.environ.get('OC_FIXTURE_LABEL','fixture-agent'),'pane_id':'w1:p1','workspace_id':'w1','cwd':cwd,'interactive_ready':True,'agent_status':'working' if prompted else 'idle','state_change_seq':2 if prompted else 1}
+ elif a[:2] in (['agent','get'],['agent','wait']):
+  info={'terminal_id':'fixture-terminal','screen_detection_skipped':True,'agent':'opencode','name':os.environ.get('OC_FIXTURE_LABEL','fixture-agent'),'pane_id':'w1:p1','workspace_id':'w1','cwd':cwd,'interactive_ready':True,'agent_status':'working' if prompted else 'idle','state_change_seq':2 if prompted else 1}
   if mode=='foreign':info['name']='foreign'
   if mode=='changing' and prompted:info['state_change_seq']=sum('get' in x for x in (root/'calls.jsonl').read_text().splitlines())
   emit({'result':{'agent':info}})
+ elif a[:2]==['status','server']:emit({'running':True,'socket':os.environ['PROMPT_FIXTURE_SOCKET']})
  elif a[:2]==['agent','prompt']:
   if os.environ.get('OC_FIXTURE_STATE'):
    saved=json.loads(pathlib.Path(os.environ['OC_FIXTURE_STATE']).read_text())['jobs']['7']['opencode_run']
@@ -237,6 +239,9 @@ elif pathlib.Path(sys.argv[0]).name=='opencode':
     count_file=root/'session-read-count'
     count=int(count_file.read_text())+1 if count_file.exists() else 1
     count_file.write_text(str(count))
+    if mode=='delayed-session' and count==1:
+     import socket
+     sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.connect(os.environ['PROMPT_FIXTURE_SOCKET']);sock.sendall(b'{"method":"fixture.wake"}\n');sock.close()
     if mode!='delayed-session' or count>1:emit([{'id':'ses_fixture','directory':cwd,'created':int((root/'prompted').read_text())}])
  elif a[:1]==['export']:
   now=int((root/'prompted').read_text());sid='ses_fixture'
@@ -339,7 +344,7 @@ func TestOpenCodeGoalSingleEffectAndLoudEmptyFailure(t *testing.T) {
 			h, j, calls := openCodeHostFixture(t, mode)
 			budget := 3 * time.Second // Allow the bounded synthetic CLI subprocesses under CI load.
 			if mode == "changing" {
-				budget = 300 * time.Millisecond
+				budget = 2 * time.Second
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), budget)
 			defer cancel()

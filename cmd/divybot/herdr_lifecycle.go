@@ -100,6 +100,10 @@ func sameNativeSession(a, b json.RawMessage) bool {
 	if len(a) == 0 || strings.TrimSpace(string(a)) == "null" {
 		return true // the original occupant may publish its first session
 	}
-	var first, second struct{ Agent, Kind, Value string }
-	return json.Unmarshal(a, &first) == nil && json.Unmarshal(b, &second) == nil && first == second
+	var first, second struct{ Source, Agent, Kind, Value string }
+	if json.Unmarshal(a, &first) != nil || json.Unmarshal(b, &second) != nil {
+		return false
+	}
+	return first.Agent == second.Agent && first.Kind == second.Kind && first.Value == second.Value &&
+		lifecycleSource(first.Source, first.Agent) && lifecycleSource(second.Source, second.Agent)
 }

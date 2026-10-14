@@ -153,7 +153,12 @@ func openCodeFullGoalSpawn(t *testing.T, mode, confirmFault string, ownerChoice 
 	statePath := filepath.Join(h.Home, "state.json")
 	t.Setenv("OC_FIXTURE_STATE", statePath)
 	fakeSSH := `#!/usr/bin/env python3
-import subprocess,sys
+import os,signal,subprocess,sys
+if '-N' in sys.argv:
+ local,remote=sys.argv[sys.argv.index('-L')+1].split(':',1)
+ os.symlink(remote,local)
+ signal.pause()
+ sys.exit(0)
 script=sys.argv[-1]
 if 'git fetch --depth=1' in script or '.credentials.json' in script or 'SJ="$HOME/.claude/settings.json"' in script:sys.exit(0)
 sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)

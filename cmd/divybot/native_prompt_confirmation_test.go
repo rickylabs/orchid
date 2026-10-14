@@ -11,7 +11,7 @@ import (
 )
 
 func TestNativePromptWaitsPastHerdrShortGateWithoutResubmitting(t *testing.T) {
-	before := AgentInfo{Agent: "codex", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", StateChangeSeq: 7}
+	before := AgentInfo{NativeLifecycle: true, Agent: "codex", Name: "codex-396", PaneID: "w1:p1", WorkspaceID: "w1", AgentStatus: "idle", StateChangeSeq: 7}
 	checks := 0
 	waits := 0
 	err := awaitNativePrompt(context.Background(), before, func(context.Context) (AgentInfo, error) {
@@ -46,47 +46,6 @@ func TestNativePromptWaitsPastHerdrShortGateWithoutResubmitting(t *testing.T) {
 	after.StateChangeSeq++
 	if nativePromptObserved(before, after) {
 		t.Fatal("done without prompt evidence confirmed a turn")
-	}
-}
-
-func TestNativePromptUsesOneUnwaitedSubmission(t *testing.T) {
-	root := t.TempDir()
-	bin := filepath.Join(root, ".local", "bin")
-	if err := os.MkdirAll(bin, 0700); err != nil {
-		t.Fatal(err)
-	}
-	calls := filepath.Join(root, "calls")
-	t.Setenv("PROMPT_FIXTURE_CALLS", calls)
-	script := `#!/usr/bin/env python3
-import json,os,sys
-args=sys.argv[1:]
-path=os.environ['PROMPT_FIXTURE_CALLS']
-with open(path,'a') as f:f.write(' '.join(args[:2])+(' wait' if '--wait' in args else '')+'\n')
-if args[:2]==['agent','get']:
- n=sum(1 for x in open(path) if x.startswith('agent get'))
- a={'agent':'opencode','name':'fixture-opencode','pane_id':'w1:p1','workspace_id':'w1','agent_status':'working' if n>=4 else 'idle','state_change_seq':2 if n>=4 else 1}
- print(json.dumps({'result':{'agent':a}}))
-elif args[:2]==['agent','prompt']:
- if '--wait' in args:
-  print(json.dumps({'error':{'code':'agent_prompt_stalled','message':'five-second gate'}}));sys.exit(1)
- print(json.dumps({'result':{'accepted':True}}))
-else:print(json.dumps({'result':{}}))
-`
-	if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	host := Host{Home: root, Name: "fixture-host"}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	if err := host.injectGoal(ctx, "w1:p1", "read the staged goal", true); err != nil {
-		t.Fatal(err)
-	}
-	log, err := os.ReadFile(calls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(log), "agent prompt") != 1 || strings.Contains(string(log), "wait") {
-		t.Fatalf("native prompt was resubmitted or used Herdr's short wait gate: %q", log)
 	}
 }
 
@@ -173,12 +132,14 @@ func TestPromptSubmissionIsSingleAndTimeoutIsUncertain(t *testing.T) {
 			calls := filepath.Join(root, "calls")
 			t.Setenv("PROMPT_FIXTURE_CALLS", calls)
 			t.Setenv("PROMPT_FIXTURE_FAIL", strconv.FormatBool(fail))
+			t.Setenv("PROMPT_FIXTURE_SOCKET", herdrEventFixture(t))
 			script := `#!/usr/bin/env python3
 import json,os,sys
 args=sys.argv[1:]
 with open(os.environ['PROMPT_FIXTURE_CALLS'],'a') as f:f.write(' '.join(args[:2])+'\n')
-if args[:2]==['agent','get']:
- print(json.dumps({'result':{'agent':{'agent_status':'idle'}}}))
+if args[:2] in (['agent','get'],['agent','wait']):
+ print(json.dumps({'result':{'agent':{'agent':'claude','name':'fixture-agent','terminal_id':'fixture-terminal','pane_id':'w1:p1','workspace_id':'w1','cwd':'/fixture/project','interactive_ready':True,'screen_detection_skipped':True,'agent_status':'idle'}}}))
+elif args[:2]==['status','server']:print(json.dumps({'running':True,'socket':os.environ['PROMPT_FIXTURE_SOCKET']}))
 elif args[:2]==['agent','prompt'] and os.environ['PROMPT_FIXTURE_FAIL']=='true':
  print(json.dumps({'error':{'code':'timeout','message':'delivery uncertain'}}));sys.exit(1)
 else:print(json.dumps({'result':{}}))
