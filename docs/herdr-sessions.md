@@ -12,7 +12,8 @@ binding. Waits use that selected session and Herdr's occupant-pinned API. Input,
 completion, stop and cleanup retain the recorded scope after configuration changes.
 Snapshots from a different scope cannot supply a job's identity. Restore never
 adopts a different terminal into an existing binding; missing legacy scope stays
-in the default session. Changed native identity needs independent verification.
+in the default session and original account, without adopting a newly configured
+saved machine. Changed native identity needs independent verification.
 
 The coordinator must provision role servers and matching observer selection
 separately, then verify reconnect and restore. No role session is started by

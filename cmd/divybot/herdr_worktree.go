@@ -38,9 +38,15 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 		return err == nil && filepath.IsAbs(path) && filepath.Clean(path) == path && real == path
 	}
 	if !canonical(p.RepoRoot) || !canonical(p.WorktreesRoot) || filepath.Base(p.RepoRoot) != "repo" || filepath.Base(p.WorktreesRoot) != "worktrees" || filepath.Dir(p.RepoRoot) != filepath.Dir(p.WorktreesRoot) ||
-		c.WorkspaceID == "" || c.WorkspaceCwd != p.RepoRoot || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") || filepath.Clean(r.Branch) != r.Branch ||
+		c.WorkspaceID == "" || !canonical(c.WorkspaceCwd) || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") || filepath.Clean(r.Branch) != r.Branch ||
 		r.Path == "" || !filepath.IsAbs(r.Path) || filepath.Clean(r.Path) != r.Path || r.Path != filepath.Join(p.WorktreesRoot, r.Branch) {
 		return errWorktreePolicy
+	}
+	if c.WorkspaceCwd != p.RepoRoot {
+		rel, err := filepath.Rel(p.WorktreesRoot, c.WorkspaceCwd)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return errWorktreePolicy
+		}
 	}
 	// All existing ancestors must be real directories. Never follow a symlink,
 	// including one at the explicit destination, even if it resolves inside root.
@@ -69,11 +75,15 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 			Branch string `json:"branch"`
 		} `json:"worktrees"`
 	}
-	if err != nil || len(raw) > 1024*1024 || json.Unmarshal(raw, &listed) != nil || listed.Type != "worktree_list" || listed.Source.RepoRoot != p.RepoRoot || listed.Source.CheckoutPath != c.WorkspaceCwd || listed.Worktrees == nil {
+	if err != nil || len(raw) > 1024*1024 || json.Unmarshal(raw, &listed) != nil || listed.Type != "worktree_list" || listed.Source.RepoRoot != p.RepoRoot || listed.Source.CheckoutPath != p.RepoRoot || listed.Worktrees == nil {
 		return errWorktreePolicy
 	}
 	method := "create"
+	sourceFound := c.WorkspaceCwd == p.RepoRoot
 	for _, tree := range listed.Worktrees {
+		if tree.Path == c.WorkspaceCwd {
+			sourceFound = true
+		}
 		if tree.Path == r.Path || tree.Branch == r.Branch {
 			if tree.Path != r.Path || tree.Branch != r.Branch || !canonical(r.Path) {
 				return errWorktreePolicy
@@ -81,10 +91,15 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 			method = "open"
 		}
 	}
+	if !sourceFound {
+		return errWorktreePolicy
+	}
 	if _, err := os.Lstat(r.Path); err == nil && method != "open" {
 		return errWorktreePolicy
 	}
-	args := []string{"worktree", method, "--workspace", c.WorkspaceID, "--path", r.Path, "--no-focus"}
+	// Discovery accepts linked sources, but native create/open require the
+	// parent checkout. Its provenance was verified against the private policy.
+	args := []string{"worktree", method, "--cwd", p.RepoRoot, "--path", r.Path, "--no-focus"}
 	if method == "create" {
 		args = append(args, "--branch", r.Branch)
 	}

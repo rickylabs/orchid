@@ -12,7 +12,11 @@ directories. There is no implicit policy or destination.
 Invoke the workspace action with selected JSON containing exactly `branch` and
 `path`. The explicitly supplied absolute path must equal the authorized
 worktrees directory joined with that branch. The native workspace context must
-name the policy's repository checkout. Traversal, symlinks and an unregistered
+name the policy's repository checkout or a canonical linked checkout inside its
+authorized worktrees directory. Native discovery must confirm that linked source
+belongs to the same repository. Herdr reports parent checkout provenance for
+linked sources; create and open use that verified policy parent as their explicit
+cwd, as required by the native API. Traversal, symlinks and an unregistered
 existing destination are refused. Native discovery must confirm the repository;
 a branch already checked out elsewhere is refused. An existing checkout at the
 exact authorized path is opened rather than recreated.

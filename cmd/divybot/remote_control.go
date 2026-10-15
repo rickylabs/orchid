@@ -254,6 +254,7 @@ func (h Host) forJob(j *Job) Host {
 	h.NativeJob = j
 	if j != nil {
 		h.HerdrSession = ""
+		h.HerdrMachine = ""
 		if j.HerdrScope != nil {
 			if herdrSession(j.HerdrScope.Session) != "default" {
 				h.HerdrSession = j.HerdrScope.Session
