@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+func TestHerdrLegacyBindingDoesNotAdoptConfiguredMachine(t *testing.T) {
+	h := Host{HerdrSession: "dispatch", HerdrMachine: "fixture-machine"}
+	restored := h.forJob(&Job{})
+	if restored.HerdrMachine != "" || herdrSession(restored.HerdrSession) != "default" {
+		t.Error("legacy job adopted a configured machine or session")
+	}
+	remote := &herdrScope{Session: "default", Machine: "fixture-machine"}
+	if sameHerdrScope(nil, remote) || sameHerdrScope(remote, nil) {
+		t.Error("saved-machine occupant satisfied a legacy account binding")
+	}
+	if !sameHerdrScope(nil, &herdrScope{Session: "default"}) || !sameHerdrScope(nil, nil) {
+		t.Error("legacy default account binding was lost")
+	}
+}
+
 func TestHerdrRoleBindingsSurviveConfigurationChanges(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, ".local", "bin")

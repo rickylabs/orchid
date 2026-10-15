@@ -38,9 +38,15 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 		return err == nil && filepath.IsAbs(path) && filepath.Clean(path) == path && real == path
 	}
 	if !canonical(p.RepoRoot) || !canonical(p.WorktreesRoot) || filepath.Base(p.RepoRoot) != "repo" || filepath.Base(p.WorktreesRoot) != "worktrees" || filepath.Dir(p.RepoRoot) != filepath.Dir(p.WorktreesRoot) ||
-		c.WorkspaceID == "" || c.WorkspaceCwd != p.RepoRoot || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") || filepath.Clean(r.Branch) != r.Branch ||
+		c.WorkspaceID == "" || !canonical(c.WorkspaceCwd) || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") || filepath.Clean(r.Branch) != r.Branch ||
 		r.Path == "" || !filepath.IsAbs(r.Path) || filepath.Clean(r.Path) != r.Path || r.Path != filepath.Join(p.WorktreesRoot, r.Branch) {
 		return errWorktreePolicy
+	}
+	if c.WorkspaceCwd != p.RepoRoot {
+		rel, err := filepath.Rel(p.WorktreesRoot, c.WorkspaceCwd)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return errWorktreePolicy
+		}
 	}
 	// All existing ancestors must be real directories. Never follow a symlink,
 	// including one at the explicit destination, even if it resolves inside root.
@@ -73,13 +79,20 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 		return errWorktreePolicy
 	}
 	method := "create"
+	sourceFound := c.WorkspaceCwd == p.RepoRoot
 	for _, tree := range listed.Worktrees {
+		if tree.Path == c.WorkspaceCwd {
+			sourceFound = true
+		}
 		if tree.Path == r.Path || tree.Branch == r.Branch {
 			if tree.Path != r.Path || tree.Branch != r.Branch || !canonical(r.Path) {
 				return errWorktreePolicy
 			}
 			method = "open"
 		}
+	}
+	if !sourceFound {
+		return errWorktreePolicy
 	}
 	if _, err := os.Lstat(r.Path); err == nil && method != "open" {
 		return errWorktreePolicy

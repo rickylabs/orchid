@@ -9,7 +9,7 @@ import (
 )
 
 func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
-	for _, mode := range []string{"valid", "missing", "outside", "symlink", "existing", "foreign-root", "discovered-elsewhere"} {
+	for _, mode := range []string{"valid", "missing", "outside", "symlink", "existing", "foreign-root", "discovered-elsewhere", "linked-create", "linked-open", "unregistered-source", "outside-source"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			repo := filepath.Join(root, "repo")
@@ -33,6 +33,20 @@ func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
 			case "existing":
 				os.Mkdir(r.Path, 0700)
 			}
+			if strings.HasPrefix(mode, "linked-") || mode == "unregistered-source" || mode == "outside-source" {
+				c.WorkspaceCwd = filepath.Join(worktrees, "source")
+				if mode == "outside-source" {
+					c.WorkspaceCwd = filepath.Join(root, "other")
+				}
+				if err := os.Mkdir(c.WorkspaceCwd, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "linked-open" {
+					if err := os.Mkdir(r.Path, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			creates, opens := 0, 0
 			call := func(_ context.Context, args ...string) (string, error) {
 				if args[1] == "list" {
@@ -41,13 +55,16 @@ func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
 						source = filepath.Join(root, "other")
 					}
 					trees := []map[string]any{}
-					if mode == "existing" {
+					if strings.HasPrefix(mode, "linked-") || mode == "outside-source" {
+						trees = append(trees, map[string]any{"path": c.WorkspaceCwd, "branch": "source"})
+					}
+					if mode == "existing" || mode == "linked-open" {
 						trees = append(trees, map[string]any{"path": r.Path, "branch": r.Branch})
 					}
 					if mode == "discovered-elsewhere" {
 						trees = append(trees, map[string]any{"path": filepath.Join(root, "old"), "branch": r.Branch})
 					}
-					return string(fixtureJSON(t, map[string]any{"result": map[string]any{"type": "worktree_list", "source": map[string]any{"repo_root": source, "source_checkout_path": repo}, "worktrees": trees}})), nil
+					return string(fixtureJSON(t, map[string]any{"result": map[string]any{"type": "worktree_list", "source": map[string]any{"repo_root": source, "source_checkout_path": c.WorkspaceCwd}, "worktrees": trees}})), nil
 				}
 				if args[1] == "create" {
 					creates++
@@ -60,11 +77,11 @@ func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
 				return `{"result":{"type":"fixture"}}`, nil
 			}
 			err := createPolicyWorktree(context.Background(), p, c, r, call)
-			if mode == "valid" {
+			if mode == "valid" || mode == "linked-create" {
 				if err != nil || creates != 1 || opens != 0 {
 					t.Fatal("authorized path failed", err)
 				}
-			} else if mode == "existing" {
+			} else if mode == "existing" || mode == "linked-open" {
 				if err != nil || creates != 0 || opens != 1 {
 					t.Fatal("finished checkout recreated", err)
 				}

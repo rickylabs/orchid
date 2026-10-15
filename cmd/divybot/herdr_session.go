@@ -23,10 +23,10 @@ func sameHerdrScope(a, b *herdrScope) bool {
 		return true
 	}
 	if a == nil {
-		return herdrSession(b.Session) == "default"
+		return herdrSession(b.Session) == "default" && b.Machine == ""
 	}
 	if b == nil {
-		return herdrSession(a.Session) == "default"
+		return herdrSession(a.Session) == "default" && a.Machine == ""
 	}
 	return herdrSession(a.Session) == herdrSession(b.Session) && a.Machine == b.Machine
 }
