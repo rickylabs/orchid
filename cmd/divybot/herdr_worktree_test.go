@@ -64,7 +64,13 @@ func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
 					if mode == "discovered-elsewhere" {
 						trees = append(trees, map[string]any{"path": filepath.Join(root, "old"), "branch": r.Branch})
 					}
-					return string(fixtureJSON(t, map[string]any{"result": map[string]any{"type": "worktree_list", "source": map[string]any{"repo_root": source, "source_checkout_path": c.WorkspaceCwd}, "worktrees": trees}})), nil
+					// Herdr normalizes linked discovery to the parent checkout.
+					return string(fixtureJSON(t, map[string]any{"result": map[string]any{"type": "worktree_list", "source": map[string]any{"repo_root": source, "source_checkout_path": repo}, "worktrees": trees}})), nil
+				}
+				if strings.HasPrefix(mode, "linked-") {
+					if len(args) < 4 || args[2] != "--cwd" || args[3] != repo {
+						t.Fatal("native create/open requires the verified parent checkout")
+					}
 				}
 				if args[1] == "create" {
 					creates++

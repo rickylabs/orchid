@@ -75,7 +75,7 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 			Branch string `json:"branch"`
 		} `json:"worktrees"`
 	}
-	if err != nil || len(raw) > 1024*1024 || json.Unmarshal(raw, &listed) != nil || listed.Type != "worktree_list" || listed.Source.RepoRoot != p.RepoRoot || listed.Source.CheckoutPath != c.WorkspaceCwd || listed.Worktrees == nil {
+	if err != nil || len(raw) > 1024*1024 || json.Unmarshal(raw, &listed) != nil || listed.Type != "worktree_list" || listed.Source.RepoRoot != p.RepoRoot || listed.Source.CheckoutPath != p.RepoRoot || listed.Worktrees == nil {
 		return errWorktreePolicy
 	}
 	method := "create"
@@ -97,7 +97,9 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 	if _, err := os.Lstat(r.Path); err == nil && method != "open" {
 		return errWorktreePolicy
 	}
-	args := []string{"worktree", method, "--workspace", c.WorkspaceID, "--path", r.Path, "--no-focus"}
+	// Discovery accepts linked sources, but native create/open require the
+	// parent checkout. Its provenance was verified against the private policy.
+	args := []string{"worktree", method, "--cwd", p.RepoRoot, "--path", r.Path, "--no-focus"}
 	if method == "create" {
 		args = append(args, "--branch", r.Branch)
 	}
