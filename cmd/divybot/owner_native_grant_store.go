@@ -212,7 +212,7 @@ func newOwnerNativeGrantStore(ctx context.Context, cfg *Config, options ownerNat
 	uid := *options.OperatorUID
 	options.OperatorUID = &uid
 	s := &ownerNativeGrantStore{cfg: copy, options: options, deps: deps, active: map[string]ownerNativeGrantRecord{}, known: map[string]bool{}}
-	for _, name := range []string{"records", "intents", "claims"} {
+	for _, name := range []string{"records", "intents", "claims", "revocations"} {
 		path := filepath.Join(options.StoreRoot, name)
 		if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
 			return nil, errMatrix
@@ -321,7 +321,7 @@ func (s *ownerNativeGrantStore) subjectCurrent(subject ownerNativeSubject, bound
 }
 
 func (s *ownerNativeGrantStore) healthy() bool {
-	return ownerNativePortOptionsValid(s.options) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "intents"), os.Getuid()) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "records"), os.Getuid())
+	return ownerNativePortOptionsValid(s.options) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "intents"), os.Getuid()) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "records"), os.Getuid()) && ownerNativePrivateDir(filepath.Join(s.options.StoreRoot, "revocations"), os.Getuid())
 }
 
 // A plain sentence for the operator log. The wire reason stays the closed
@@ -670,6 +670,9 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 	if !ownerNativeRequestValid(r) {
 		return s.refuse(r.IssueNumber, "", "REFUSED", "override-invalid", "the install request is malformed")
 	}
+	if revoked, err := s.revocationLocked(r.OperationID); err != nil || revoked != nil {
+		return s.refuse(r.IssueNumber, r.OperationID, "REFUSED", "grant-conflict", "this operation is revoked or its revocation cannot be read")
+	}
 	// Detach typed callers too; no caller-owned route pointer enters admission.
 	input, _ := json.Marshal(r)
 	var detached ownerNativeInstallRequest
@@ -764,9 +767,22 @@ func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstal
 }
 
 func (s *ownerNativeGrantStore) readRecordLocked(operation string) (ownerNativeGrantRecord, []byte, error) {
+	if revoked, err := s.revocationLocked(operation); err != nil || revoked != nil {
+		return ownerNativeGrantRecord{}, nil, errMatrix
+	}
+	record, raw, err := s.readBoundRecordLocked(operation)
+	if err != nil || !s.recordValid(record) {
+		return record, nil, errMatrix
+	}
+	return record, raw, nil
+}
+
+// Compensation verifies the immutable record and intent, even if the issue,
+// approval or current configuration no longer allows admission.
+func (s *ownerNativeGrantStore) readBoundRecordLocked(operation string) (ownerNativeGrantRecord, []byte, error) {
 	raw, err := ownerNativePrivateRead(s.recordPath(operation), os.Getuid())
 	var record ownerNativeGrantRecord
-	if err != nil || ownerNativeStrictJSON(raw, &record) != nil || record.Request.OperationID != operation || !s.recordValid(record) {
+	if err != nil || ownerNativeStrictJSON(raw, &record) != nil || record.SchemaVersion != 1 || record.Request.OperationID != operation || !ownerNativeRequestValid(record.Request) {
 		return record, nil, errMatrix
 	}
 	intentRaw, e := ownerNativePrivateRead(filepath.Join(s.subjectDir(s.requestSubject(record.Request)), ownerNativeOperationKey(operation)+".json"), os.Getuid())
@@ -808,6 +824,14 @@ func (s *ownerNativeGrantStore) readStatus(ctx context.Context, operation string
 	defer s.mu.Unlock()
 	if !actionIDPattern.MatchString(operation) {
 		return s.refuse(0, "", "REFUSED", "override-invalid", "the status request is malformed")
+	}
+	if revoked, err := s.revocationLocked(operation); err != nil {
+		return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the revocation could not be read")
+	} else if revoked != nil {
+		if s.confirmRevocationLocked(*revoked) != nil {
+			return s.refuse(0, operation, "UNKNOWN", "override-invalid", "the revocation could not be synced")
+		}
+		return revoked.ack()
 	}
 	return s.ackLocked(ctx, operation, false)
 }
