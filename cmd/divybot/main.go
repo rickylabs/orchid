@@ -109,6 +109,8 @@ type Host struct {
 	// Optional private hook event directory inside this host's agent home.
 	// Only a dispatched Claude pane inherits it.
 	ClaudeChildEventRoot string `json:"claude_child_event_root,omitempty"`
+
+	HerdrRoles map[string]herdrScope `json:"herdr_roles,omitempty"` // explicit role endpoints on this same host
 }
 
 // runsAgent reports whether this host is allowed to place the given agent.
@@ -285,6 +287,9 @@ func loadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("hosts[%d].name duplicated", i)
 		}
 		hostNames[host.Name] = true
+		if !host.validHerdrRoles() {
+			return nil, fmt.Errorf("hosts[%d].herdr_roles invalid", i)
+		}
 		if strings.ContainsAny(host.HerdrMachine+host.HerdrSession, "\x00\r\n") || (host.HerdrMachine != "" && host.SSH == "") {
 			return nil, fmt.Errorf("hosts[%d].herdr_machine invalid", i)
 		}
@@ -2825,8 +2830,17 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 				continue
 			}
 			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
-			if j := jobs[n]; j != nil && !jobRefMatches(ref, j) {
-				continue
+			if j := jobs[n]; j != nil {
+				if !jobRefMatches(ref, j) {
+					continue
+				}
+			} else {
+				// Unrecorded adoption is dispatch admission. Manual-role
+				// observations must neither supply nor obscure its occupant.
+				dispatch, ok := h.forHerdrRole("dispatch")
+				if !ok || !sameHerdrScope(ref.HerdrScope, dispatch.herdrScope()) {
+					continue
+				}
 			}
 			if _, exists := out[n]; exists {
 				out[n] = agentRef{}
@@ -3016,7 +3030,7 @@ func (c *Coord) pickHost(tgt Target, agent string) (Host, bool) {
 	if best == "" {
 		return Host{}, false
 	}
-	return c.hosts[best], true
+	return c.hosts[best].forHerdrRole("dispatch")
 }
 
 // Owner placement attempts a configured capable host even when advisory capacity
@@ -3040,7 +3054,7 @@ func (c *Coord) pickOwnerHost(tgt Target, _ string) (Host, bool) {
 	if best == "" {
 		return Host{}, false
 	}
-	return c.hosts[best], true
+	return c.hosts[best].forHerdrRole("dispatch")
 }
 
 // workerPrompt is the full goal injected into every worker — restored from the
