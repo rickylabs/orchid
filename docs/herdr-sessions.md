@@ -24,6 +24,10 @@ Session selection does not create a server.
 Observers retain the base endpoint, explicitly configured role endpoints and
 any endpoint still recorded by a job, deduplicated by host, session and machine.
 Each distinct endpoint gets an independent subscription and reconnect loop.
+Unrecorded agents are eligible for automatic adoption only in the dispatch
+endpoint, including its machine selector. Manual observations cannot supply or
+obscure an unrecorded dispatch occupant. Existing jobs in other recorded scopes
+remain supervised there; absent role maps retain legacy adoption behavior.
 A launch records its selected server session, saved machine and terminal occupant
 in private dispatch and job state. Native conversation identity remains a separate
 binding. Waits use that selected session and Herdr's occupant-pinned API. Input,

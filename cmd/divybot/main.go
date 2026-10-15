@@ -2830,8 +2830,17 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 				continue
 			}
 			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
-			if j := jobs[n]; j != nil && !jobRefMatches(ref, j) {
-				continue
+			if j := jobs[n]; j != nil {
+				if !jobRefMatches(ref, j) {
+					continue
+				}
+			} else {
+				// Unrecorded adoption is dispatch admission. Manual-role
+				// observations must neither supply nor obscure its occupant.
+				dispatch, ok := h.forHerdrRole("dispatch")
+				if !ok || !sameHerdrScope(ref.HerdrScope, dispatch.herdrScope()) {
+					continue
+				}
 			}
 			if _, exists := out[n]; exists {
 				out[n] = agentRef{}

@@ -155,3 +155,72 @@ func TestHerdrRolesRetryUsesDispatchScope(t *testing.T) {
 		t.Fatalf("dispatch-role retry rejected: %s", result.Reason)
 	}
 }
+
+func TestHerdrRolesAdoptionSeparatesManualAndDispatchOccupants(t *testing.T) {
+	for _, role := range []string{"operator", "diagnostics"} {
+		t.Run(role, func(t *testing.T) {
+			cfg, err := roleConfig(t, roleConfigFields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := cfg.Hosts[0]
+			c := &Coord{cfg: &Config{Targets: []Target{{Label: "fixture", Repo: "example/work"}}}, st: &State{Jobs: map[int]*Job{}}, hosts: map[string]Host{h.Name: h}}
+			c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+			manual, _ := h.forHerdrRole(role)
+			dispatch, _ := h.forHerdrRole("dispatch")
+			a := AgentInfo{Agent: "claude", Name: "claude-7", PaneID: "fixture-pane", WorkspaceID: "fixture-workspace", Cwd: "issue-7"}
+			is := Issue{Number: 7, Labels: []string{"fixture"}}
+			c.fleet.publish(manual.observerKey(), []AgentInfo{a}, true)
+			status, up := c.fleetStatus(context.Background())
+			if !up[manual.observerKey()] {
+				t.Fatal("explicit role observation was lost")
+			}
+			if _, found := status[7]; found {
+				t.Fatal("manual occupant entered dispatch admission")
+			}
+			if _, ok := c.adopt(7, is, status); ok {
+				t.Fatal("manual role was automatically adopted")
+			}
+			c.fleet.publish(dispatch.observerKey(), []AgentInfo{a}, true)
+			status, _ = c.fleetStatus(context.Background())
+			job, ok := c.adopt(7, is, status)
+			if !ok || !sameHerdrScope(job.HerdrScope, dispatch.herdrScope()) {
+				t.Fatal("manual occupant suppressed dispatch recovery")
+			}
+			// Existing recorded manual work remains scoped and supervised after restore.
+			job.HerdrScope = manual.herdrScope()
+			status, _ = c.fleetStatus(context.Background())
+			if !jobRefMatches(status[7], job) {
+				t.Fatal("recorded manual job lost supervision")
+			}
+		})
+	}
+}
+
+func TestHerdrRolesAdoptionMatchesMachineAndPreservesLegacy(t *testing.T) {
+	cfg, err := roleConfig(t, roleConfigFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cfg.Hosts[0]
+	c := &Coord{st: &State{Jobs: map[int]*Job{}}, hosts: map[string]Host{h.Name: h}}
+	c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	a := AgentInfo{Agent: "claude", Cwd: "issue-7"}
+	wrong, _ := h.forHerdrRole("dispatch")
+	wrong.HerdrMachine = "fixture"
+	c.fleet.hosts[wrong.observerKey()] = wrong
+	c.fleet.publish(wrong.observerKey(), []AgentInfo{a}, true)
+	status, _ := c.fleetStatus(context.Background())
+	if _, found := status[7]; found {
+		t.Fatal("another machine supplied dispatch adoption")
+	}
+	legacy := h
+	legacy.HerdrRoles = nil
+	legacy.HerdrSession = "operator"
+	c.fleet.hosts = map[string]Host{legacy.observerKey(): legacy}
+	c.fleet.publish(legacy.observerKey(), []AgentInfo{a}, true)
+	status, _ = c.fleetStatus(context.Background())
+	if ref, found := status[7]; !found || !sameHerdrScope(ref.HerdrScope, legacy.herdrScope()) {
+		t.Fatal("legacy adoption changed without a role map")
+	}
+}
