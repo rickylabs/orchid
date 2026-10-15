@@ -58,6 +58,9 @@ func ownerNativeDecodeRPC(raw []byte) (ownerNativeRPC, error) {
 
 func ownerNativeReadFrame(reader io.Reader) ([]byte, error) {
 	raw, err := bufio.NewReader(io.LimitReader(reader, ownerNativeFrameLimit+1)).ReadBytes('\n')
+	if err == io.EOF && len(raw) == 0 {
+		return nil, io.EOF
+	}
 	if err != nil || len(raw) > ownerNativeFrameLimit {
 		return nil, errMatrix
 	}
@@ -81,6 +84,11 @@ func (s *ownerNativeGrantStore) handle(ctx context.Context, conn *net.UnixConn) 
 		log.Printf("owner grant REFUSED (override-invalid): the private grant store is unhealthy")
 	default:
 		raw, e := ownerNativeReadFrame(conn)
+		// Authenticated readiness checks verify the peer and close without an RPC.
+		// Only clean EOF before any bytes is a probe; partial frames remain refused.
+		if e == io.EOF {
+			return
+		}
 		rpc, e2 := ownerNativeDecodeRPC(raw)
 		if e != nil || e2 != nil {
 			log.Printf("owner grant REFUSED (override-invalid): the request frame is malformed")
