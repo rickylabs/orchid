@@ -1,10 +1,16 @@
 # Herdr role sessions
 
 Set each host's `herdr_session` to the selected persistent server session. Use
-separate host entries for operator, dispatch and diagnostics, with distinct host
-names; each entry gets its own subscription and reconnect loop. A saved machine
-must name the same account and session. Selection does not create a server.
+separate host entries with distinct names only for endpoints eligible to receive
+dispatched work; each entry gets its own subscription and reconnect loop. A saved
+machine must name the same account and session. Selection does not create a server.
 Existing configurations continue to use the default session.
+
+Session selection does not reserve a host for a role. Every configured host is a
+placement candidate: ordinary placement uses capability, agent eligibility and
+free capacity; owner placement uses capability and load, ignoring capacity and
+agent restrictions. Keep endpoints intended only for observation or manual work
+out of the dispatcher host list until explicit placement isolation is available.
 
 A launch records its selected server session, saved machine and terminal occupant
 in private dispatch and job state. Native conversation identity remains a separate

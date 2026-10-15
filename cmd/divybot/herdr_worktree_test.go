@@ -9,16 +9,34 @@ import (
 )
 
 func TestHerdrWorktreePolicyRequiresExactExplicitPath(t *testing.T) {
-	for _, mode := range []string{"valid", "missing", "outside", "symlink", "existing", "foreign-root", "discovered-elsewhere", "linked-create", "linked-open", "unregistered-source", "outside-source"} {
+	for _, repoName := range []string{"repo", "sample-project"} {
+		t.Run(repoName, func(t *testing.T) {
+			testHerdrWorktreePolicy(t, repoName)
+		})
+	}
+}
+
+func testHerdrWorktreePolicy(t *testing.T, repoName string) {
+	t.Helper()
+	for _, mode := range []string{"valid", "missing", "outside", "symlink", "existing", "foreign-root", "discovered-elsewhere", "linked-create", "linked-open", "unregistered-source", "outside-source", "same-root", "nonsibling-root"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
-			repo := filepath.Join(root, "repo")
+			repo := filepath.Join(root, repoName)
 			worktrees := filepath.Join(root, "worktrees")
 			if err := os.Mkdir(repo, 0700); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Mkdir(worktrees, 0700); err != nil {
 				t.Fatal(err)
+			}
+			if mode == "same-root" {
+				repo = worktrees
+			}
+			if mode == "nonsibling-root" {
+				worktrees = filepath.Join(root, "nested", "worktrees")
+				if err := os.MkdirAll(worktrees, 0700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			p := herdrWorktreePolicy{RepoRoot: repo, WorktreesRoot: worktrees}
 			c := herdrPluginContext{WorkspaceID: "w1", WorkspaceCwd: repo}

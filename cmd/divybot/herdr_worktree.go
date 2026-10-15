@@ -37,7 +37,7 @@ func createPolicyWorktree(ctx context.Context, p herdrWorktreePolicy, c herdrPlu
 		real, err := filepath.EvalSymlinks(path)
 		return err == nil && filepath.IsAbs(path) && filepath.Clean(path) == path && real == path
 	}
-	if !canonical(p.RepoRoot) || !canonical(p.WorktreesRoot) || filepath.Base(p.RepoRoot) != "repo" || filepath.Base(p.WorktreesRoot) != "worktrees" || filepath.Dir(p.RepoRoot) != filepath.Dir(p.WorktreesRoot) ||
+	if !canonical(p.RepoRoot) || !canonical(p.WorktreesRoot) || p.RepoRoot == p.WorktreesRoot || filepath.Base(p.WorktreesRoot) != "worktrees" || filepath.Dir(p.RepoRoot) != filepath.Dir(p.WorktreesRoot) ||
 		c.WorkspaceID == "" || !canonical(c.WorkspaceCwd) || !worktreeBranch.MatchString(r.Branch) || strings.Contains(r.Branch, "..") || strings.HasSuffix(r.Branch, ".lock") || strings.HasSuffix(r.Branch, "/") || filepath.Clean(r.Branch) != r.Branch ||
 		r.Path == "" || !filepath.IsAbs(r.Path) || filepath.Clean(r.Path) != r.Path || r.Path != filepath.Join(p.WorktreesRoot, r.Branch) {
 		return errWorktreePolicy

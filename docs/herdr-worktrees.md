@@ -6,8 +6,9 @@ is available in the plugin account. It is separate from existing operator tools.
 
 The owner must supply `checkout-policy.json` with mode 0600 in the plugin's
 Herdr-managed state directory. Its two absolute, canonical directory fields are
-`repoRoot` and `worktreesRoot`, naming a project's sibling `repo` and `worktrees`
-directories. There is no implicit policy or destination.
+`repoRoot` and `worktreesRoot`, naming distinct sibling directories. The
+authorized main checkout may retain its repository name; the destination root
+must be named `worktrees`. There is no implicit policy or destination.
 
 Invoke the workspace action with selected JSON containing exactly `branch` and
 `path`. The explicitly supplied absolute path must equal the authorized
