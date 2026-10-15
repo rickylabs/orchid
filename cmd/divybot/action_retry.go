@@ -242,6 +242,9 @@ func (c *Coord) deliverRetryAction(ctx context.Context, req actionRequest, r *ac
 		return
 	}
 	host, ok := c.hosts[source.Expectation.Dispatch.Host]
+	if ok {
+		host, ok = host.forHerdrRole("dispatch")
+	}
 	if !ok || !sameHerdrScope(source.Expectation.Dispatch.HerdrScope, host.herdrScope()) {
 		r.Outcome, r.Reason = "rejected", "retry_pins_unavailable"
 		return

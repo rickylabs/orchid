@@ -1,12 +1,55 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Server session selection is distinct from an agent's native conversation.
 // Missing scope in old private records means the existing default session.
 type herdrScope struct {
 	Session string `json:"session"`
 	Machine string `json:"machine,omitempty"`
+}
+
+// Role routing changes only the endpoint after physical host selection. A
+// populated map must name dispatch, so it cannot fall back to a manual role.
+func (h Host) forHerdrRole(role string) (Host, bool) {
+	if len(h.HerdrRoles) == 0 {
+		return h, role == "dispatch"
+	}
+	scope, ok := h.HerdrRoles[role]
+	if !ok {
+		return Host{}, false
+	}
+	h.HerdrSession, h.HerdrMachine = scope.Session, scope.Machine
+	return h, true
+}
+
+func (h Host) validHerdrRoles() bool {
+	if len(h.HerdrRoles) == 0 {
+		return true
+	}
+	if _, ok := h.HerdrRoles["dispatch"]; !ok {
+		return false
+	}
+	seen := map[string]bool{}
+	for role, scope := range h.HerdrRoles {
+		if role != "dispatch" && role != "operator" && role != "diagnostics" {
+			return false
+		}
+		if strings.TrimSpace(scope.Session) == "" || strings.TrimSpace(scope.Session) != scope.Session ||
+			strings.ContainsAny(scope.Session+scope.Machine, "\x00\r\n") || (scope.Machine != "" && h.SSH == "") {
+			return false
+		}
+		// Saved-machine selectors can be aliases of the same account. Session
+		// names must differ even when two role selectors appear different.
+		if seen[scope.Session] {
+			return false
+		}
+		seen[scope.Session] = true
+	}
+	return true
 }
 
 func herdrSession(name string) string {
@@ -62,6 +105,11 @@ func (c *Coord) herdrObserverHosts() map[string]Host {
 	hosts := map[string]Host{}
 	for _, h := range c.hosts {
 		hosts[h.observerKey()] = h
+		for role := range h.HerdrRoles {
+			if selected, ok := h.forHerdrRole(role); ok {
+				hosts[selected.observerKey()] = selected
+			}
+		}
 	}
 	c.st.mu.Lock()
 	defer c.st.mu.Unlock()
