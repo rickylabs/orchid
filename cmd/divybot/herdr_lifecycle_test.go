@@ -103,7 +103,7 @@ else:
 				}
 				var native vendorLifecycleEvent
 				data, readErr := os.ReadFile(eventFile)
-				if mode == "ignored-report" {
+				if mode == "ignored-report" && agent != "claude" {
 					if !os.IsNotExist(readErr) {
 						t.Fatal("ignored report retained native proof")
 					}

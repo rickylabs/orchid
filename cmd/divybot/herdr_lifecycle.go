@@ -68,7 +68,11 @@ def run():
    applied=json.loads(subprocess.run([herdr,'agent','get',pane],capture_output=True,timeout=1,check=True).stdout,object_pairs_hook=unique).get('result',{}).get('agent',{})
    bound=applied.get('agent_session',{})
    status=applied.get('agent_status')
-   state_matches=status==states[kind] or states[kind]=='idle' and status=='done'
+   # Claude is outside Herdr's full lifecycle authority allowlist. Its
+   # detected status can still disagree while a native hook runs. Retain the
+   # vendor event after identity verification; consumers gate retirement on
+   # a later stopped occupant AND final delivery. New working hooks replace Stop.
+   state_matches=agent=='claude' or status==states[kind] or states[kind]=='idle' and status=='done'
    if not state_matches or (applied.get('terminal_id'),applied.get('name'),bound.get('source'),bound.get('agent'),bound.get('kind'),bound.get('value'))!=(a.get('terminal_id'),label,source,agent,'id',sid):
     os.unlink(event_file)
  finally:os.close(lock)

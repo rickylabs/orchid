@@ -8,8 +8,12 @@ an older report from overwriting a newer one. `SessionEnd` releases that source.
 OpenCode uses Herdr's official integration, installed before registration.
 
 The reporters use the supported `herdr:claude` and `herdr:codex` sources and
-verify applied state and native identity after reporting. A private, sequenced
-receipt retains the vendor event independently of screen detection. The
+verify native identity after reporting. Codex also verifies applied state. Claude
+is outside Herdr's full lifecycle authority allowlist, so a differing detected
+status must not discard its native hook receipt. A private, sequenced receipt
+retains the vendor event independently of screen detection; a new prompt or tool
+event replaces a previous Stop. Claude retirement still requires a stopped exact
+occupant, confirmed final delivery and satisfied PR gates. The
 `screen_detection_skipped` flag is specific to Herdr's full lifecycle allowlist;
 it is not a universal readiness or provenance flag.
 
