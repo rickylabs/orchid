@@ -24,7 +24,7 @@ Configure the optional `owner_native_grant_port` object once at deployment:
 | `socket` | Absolute clean Unix socket path in an existing mode-0700 private directory owned by `operator_uid`. The listener creates a mode-0600 socket owned by that operator. |
 | `store_root` | Existing absolute private directory owned by the daemon UID; grants and intent indexes live here. |
 | `approval_root` | Existing absolute private directory owned by `operator_uid`; independently issued approvals live here. |
-| `operator_uid` | Required numeric UID authenticated with Linux `SO_PEERCRED` for both port methods. |
+| `operator_uid` | Required numeric UID authenticated with Linux `SO_PEERCRED` for all port methods. |
 
 All directories must have mode 0700, have no symlink components, and be outside
 Git. The endpoint directory and approval root belong to `operator_uid`; the grant
@@ -114,11 +114,11 @@ operator-created replacement socket is refused before sending an authority
 request. The Linux listener holds and validates its created no-follow socket
 inode before ownership/mode changes, and rechecks the endpoint identity after
 preparation. A swapped path never receives privileged changes or becomes the
-registered listener. The CLI emits a private JSON acknowledgement and exits 0 only for LIVE.
+registered listener. The install CLI emits a private JSON acknowledgement and exits 0 only for LIVE.
 It never edits configuration, writes approval records, applies labels or launches
 an agent. It never retries a failed request automatically.
 
-Replies use `state: LIVE`, `UNKNOWN`, or `REFUSED` and fixed reasons
+Replies use `state: LIVE`, `REVOKED`, `UNKNOWN`, or `REFUSED` and fixed reasons
 `override-invalid` or `grant-conflict`. LIVE includes the operation, immutable
 record checksum, inbox/node/issue identity, full brief digest, target, profile,
 full revision pins, and exact route. Keep this proof private. The consumer must
@@ -126,6 +126,43 @@ compare every scope field against the approved operation before treating it as
 triggerable; this CLI does not replace that comparison. Public ownerAuthority
 should expose only minimal state and a plain reason, through a separately reviewed
 Cockpit adapter.
+
+### Revocation for launch compensation
+
+The authenticated channel also accepts `revoke`. Its exact request fields are
+`method: "revoke"`, `operation_id` (the installed UUID), and `record_checksum`
+(the lowercase SHA-256 checksum from that operation's exact LIVE receipt).
+No install payload or additional fields are accepted. The operator CLI is:
+
+```sh
+divybot owner-native-grant revoke -socket "$SOCKET" -operation "$OPERATION" -record-checksum "$RECORD_CHECKSUM"
+```
+
+A confirmed reply contains exactly `schema_version: 1`, `operation_id`,
+`state: "REVOKED"`, and `record_checksum`. The consumer must match both the UUID
+and checksum to its saved install receipt before completing compensation.
+`readStatus` returns the same shape for a revoked operation. The revoke CLI exits
+successfully only for the matching REVOKED acknowledgement; status exits
+successfully for LIVE or REVOKED, so consumers must inspect its state.
+
+Revocation publishes an immutable private tombstone using the store's existing
+file sync, exclusive publication, directory sync, and exact readback. It removes
+the operation from active selection and survives restart. Grant records, intents,
+and comment claims remain immutable history; the retained owner intent continues
+to fence ordinary routing. Reinstalling the revoked operation cannot revive it,
+and another operation for the same brief still conflicts. Other operations are
+unaffected. This is authority compensation, not cancellation of an already
+admitted or running agent.
+
+Identical revocation retries are idempotent. A different checksum is REFUSED with
+`grant-conflict`; a missing or damaged record/intent, damaged tombstone, or failed
+publication is UNKNOWN with `override-invalid`. Neither outcome confirms
+compensation. After an ambiguous reply, read status or retry the same revocation;
+never substitute another operation. A tombstone that has not yet synced cannot
+produce REVOKED. Tombstones take precedence over admission and recovery, including
+when damaged. Compensation verifies the installed immutable record and intent
+without requiring the current issue, approval, or configuration to still permit
+the launch. Once revoked, status does not depend on GitHub or the old approval.
 
 ## Durable publication and admission
 
