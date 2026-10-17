@@ -3614,7 +3614,7 @@ func (c *Coord) completionPass(ctx context.Context, status map[int]agentRef) {
 	for n, j := range finishing {
 		ref, known := status[n]
 		c.observeFinalReport(ctx, j, ref, known)
-		c.retireCompleted(ctx, n, j, ref, known)
+		c.completionOwns(ctx, n, j, ref, known)
 	}
 }
 
@@ -4074,16 +4074,22 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool 
 	}
 	c.st.mu.Lock()
 	defer c.st.mu.Unlock()
+	if !c.stopMissed(j) {
+		return false
+	}
+	log.Printf("issue #%d: native stop unconfirmed after %d attempts; run ended, capacity released", n, j.StopMisses)
+	return true
+}
+
+// stopMissed records one paced, persisted miss of j's stop or absence proof and
+// reports whether the bound is exhausted. Callers hold c.st.mu.
+func (c *Coord) stopMissed(j *Job) bool {
 	if time.Since(j.LastStopMissAt) < stopMissEvery {
 		return false // event bursts must not exhaust the bound
 	}
 	j.LastStopMissAt = time.Now()
 	j.StopMisses++
-	if c.st.saveLocked() != nil || !j.stopUnconfirmed() {
-		return false
-	}
-	log.Printf("issue #%d: native stop unconfirmed after %d attempts; run ended, capacity released", n, j.StopMisses)
-	return true
+	return c.st.saveLocked() == nil && j.stopUnconfirmed()
 }
 
 // stopUnconfirmed reports a run released by the stop bound, not by proof.

@@ -73,3 +73,62 @@ func TestUnconfirmableStopEndsRunAfterBoundAcrossRestart(t *testing.T) {
 		t.Fatal("released capacity returned after restart")
 	}
 }
+
+// A verified completion whose cleanup never observes process absence ends
+// under the same bound: its seat is freed, while its unobserved completion
+// fence remains so the run cannot relaunch, across restarts.
+func TestUnconfirmableCompletionCleanupEndsRunAfterBoundAcrossRestart(t *testing.T) {
+	c, j, seatGone, _, closes := completionFixture(t)
+	ref := completionRef(j)
+	if !c.retireCompleted(context.Background(), j.Issue, j, ref, true) || *closes != 1 {
+		t.Fatal("verified completion did not fence and close")
+	}
+	*seatGone = true // the process absence is never observed
+	n := j.Issue
+	age := func() {
+		raw, err := os.ReadFile(c.st.path)
+		var doc map[string]any
+		if err != nil || json.Unmarshal(raw, &doc) != nil {
+			t.Fatal("state unreadable")
+		}
+		jobs := doc["jobs"].(map[string]any)
+		for key := range jobs {
+			jobs[key].(map[string]any)["last_stop_miss_at"] = time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
+		}
+		raw, _ = json.Marshal(doc)
+		if os.WriteFile(c.st.path, raw, 0600) != nil {
+			t.Fatal("state unwritable")
+		}
+	}
+	released := 0
+	for attempt := 1; attempt <= 10; attempt++ {
+		age()
+		c.st = loadState(c.st.path)
+		if j = c.st.Jobs[n]; j == nil {
+			t.Fatal("restart lost the retained run")
+		}
+		c.completionPass(context.Background(), map[int]agentRef{n: ref})
+		if c.st.Jobs[n] == nil {
+			released = attempt
+			break
+		}
+		c.completionPass(context.Background(), map[int]agentRef{n: ref})
+		if c.st.Jobs[n] == nil {
+			t.Fatal("an event burst exhausted the cleanup bound")
+		}
+	}
+	if released < 2 || released > 6 {
+		t.Fatalf("unconfirmable completion cleanup ended the run at attempt %d, want a bounded retry", released)
+	}
+	c.st = loadState(c.st.path)
+	fence, fenced := c.st.CompletedRuns[n]
+	if c.st.Jobs[n] != nil || !fenced || fence.Phase == "observed" || *closes != 1 {
+		t.Fatalf("bounded release lost its fence or claimed absence: fenced=%v phase=%s closes=%d", fenced, fence.Phase, *closes)
+	}
+	if c.activeByAccount()[j.Agent] != 0 {
+		t.Fatal("released completion still counts against the governor")
+	}
+	if c.st.reserveLaunch(n) {
+		t.Fatal("released completion relaunched")
+	}
+}
