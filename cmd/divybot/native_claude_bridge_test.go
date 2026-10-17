@@ -383,6 +383,38 @@ func TestClaudeBridgeSessionIDForm(t *testing.T) {
 	}
 }
 
+// Pane ids are unique only within one Herdr session: the bridge read and the
+// launch capture ask the job's own session, never the default one or an
+// inherited one, where the same pane id is absent or another process.
+func TestClaudeBridgeReadsTheJobHerdrSession(t *testing.T) {
+	sid := syntheticRemoteRun(t).NativeSessionID
+	self := os.Getpid()
+	start := procStart(t, self)
+	h := claudeBridgeHost(t, []int{self}, map[int]any{self: map[string]any{"pid": self, "sessionId": sid, "procStart": start, "bridgeSessionId": fixtureBridge}})
+	info, _ := json.Marshal(map[string]any{"result": map[string]any{"process_info": map[string]any{"foreground_processes": []map[string]any{{"pid": self, "name": "claude"}}}}})
+	writeFixture(t, filepath.Join(h.Home, ".local", "bin", "herdr"), `#!/bin/sh
+if [ -z "$HERDR_SESSION" ] && [ "$1 $2 $3 $4 $5 $6" = "--session dispatch pane process-info --pane w1:p1" ]; then printf '%s\n' '`+string(info)+`'; exit 0; fi
+printf '%s\n' '{"error":{"code":"pane_not_found","message":"pane not found"}}'; exit 1
+`)
+	if os.Chmod(filepath.Join(h.Home, ".local", "bin", "herdr"), 0700) != nil {
+		t.Fatal("fixture")
+	}
+	t.Setenv("HERDR_SESSION", "operator")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dispatch := h.forJob(&Job{Agent: "claude", HerdrScope: &herdrScope{Session: "dispatch"}})
+	if read, reason := dispatch.claudeBridgeSession(ctx, "w1:p1", sid, "", claudeTranscriptCursor{}); reason != "" || read.PID != self || read.Bridge != fixtureBridge {
+		t.Fatalf("dispatch session read: pid=%d reason=%q", read.PID, reason)
+	}
+	if p := dispatch.claudeLaunchedProcess(ctx, "w1:p1", sid); p == nil || p.PID != self || p.Start != start {
+		t.Fatalf("launch capture in the dispatch session: %+v", p)
+	}
+	// The pane is not in the default session: the link stays withheld.
+	if _, reason := h.forJob(&Job{Agent: "claude"}).claudeBridgeSession(ctx, "w1:p1", sid, "", claudeTranscriptCursor{}); reason != linkProcessUnavailable {
+		t.Fatalf("default session read: reason=%q", reason)
+	}
+}
+
 func TestClaudeLinkStore(t *testing.T) {
 	s := &claudeLinkStore{}
 	now := time.Now()

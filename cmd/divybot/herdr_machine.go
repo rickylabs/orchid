@@ -56,12 +56,18 @@ func (h Host) savedHerdrMachine(ctx context.Context) (savedHerdrMachine, error) 
 	return *found, nil
 }
 
+// herdrSessionArgs selects the host's Herdr server session for a command run
+// in the target account; none is the default session.
+func (h Host) herdrSessionArgs(args ...string) []string {
+	if h.HerdrSession == "" {
+		return args
+	}
+	return append([]string{"--session", h.HerdrSession}, args...)
+}
+
 func (h Host) herdr(ctx context.Context, args ...string) (string, error) {
 	if h.HerdrMachine == "" {
-		if h.HerdrSession != "" {
-			args = append([]string{"--session", h.HerdrSession}, args...)
-		}
-		return h.herdrAccountCommand(ctx, args...)
+		return h.herdrAccountCommand(ctx, h.herdrSessionArgs(args...)...)
 	}
 	profile, err := h.savedHerdrMachine(ctx)
 	if err != nil {
