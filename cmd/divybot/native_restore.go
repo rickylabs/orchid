@@ -29,12 +29,17 @@ func (h Host) ensureNativeRestore(ctx context.Context, agent string) error {
 // Config/install operations are local to the target account and are not
 // supported by --machine. Credential and filesystem operations stay here too.
 func (h Host) herdrAccountCommand(ctx context.Context, args ...string) (string, error) {
+	return h.runRemote(ctx, h.herdrAccountScript(args...))
+}
+
+// herdrAccountScript is the host script for one Herdr command in the target
+// account, with no inherited session or socket selection.
+func (h Host) herdrAccountScript(args ...string) string {
 	q := make([]string, len(args))
 	for i, a := range args {
 		q[i] = shq(a)
 	}
-	script := fmt.Sprintf(`unset HERDR_SESSION HERDR_SOCKET_PATH; export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s`, shq(h.agentHome()), strings.Join(q, " "))
-	return h.runRemote(ctx, script)
+	return fmt.Sprintf(`unset HERDR_SESSION HERDR_SOCKET_PATH; export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s`, shq(h.agentHome()), strings.Join(q, " "))
 }
 
 // AGY's managed launch uses a private app_data_dir. Its integration's default

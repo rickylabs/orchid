@@ -233,8 +233,8 @@ func (h Host) claudeBridgeSession(ctx context.Context, pane, sessionID, cwd stri
 	if !privateNativeID(sessionID) || (cwd != "" && !validRemoteCwd(cwd)) || from.offset < 0 {
 		return none, linkReadFailed
 	}
-	herdr := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; herdr %s %s %s %s`,
-		shq(h.agentHome()), shq("pane"), shq("process-info"), shq("--pane"), shq(pane))
+	// Pane ids are unique only within one Herdr session: ask the job's own.
+	herdr := h.herdrAccountScript(h.herdrSessionArgs("pane", "process-info", "--pane", pane)...)
 	out, err := h.runBounded(ctx, herdr)
 	if err != nil {
 		return none, linkProcessUnavailable
