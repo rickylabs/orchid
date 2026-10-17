@@ -264,6 +264,34 @@ func completionOccupant(agents []AgentInfo, j *Job, native string) (AgentInfo, b
 	return found, count == 1
 }
 
+// completionOwns reports whether completion owns run n. A verified completion
+// whose cleanup cannot confirm the native stop or paired absence is retried
+// under the same persisted bound as teardown; then the run ends and frees its
+// seat. Its completion fence stays, unobserved, so the run never relaunches.
+func (c *Coord) completionOwns(ctx context.Context, n int, j *Job, ref agentRef, known bool) bool {
+	if !c.retireCompleted(ctx, n, j, ref, known) {
+		return false
+	}
+	if c.dry || j == nil {
+		return true
+	}
+	c.st.mu.Lock()
+	_, fenced := c.st.CompletedRuns[n]
+	released := fenced && c.st.Jobs[n] == j && c.stopMissed(j)
+	if released {
+		delete(c.st.Jobs, n)
+		if c.st.saveLocked() != nil {
+			c.st.Jobs[n], released = j, false
+		}
+	}
+	c.st.mu.Unlock()
+	if released {
+		c.clearClaudeWorking(j)
+		log.Printf("issue #%d: completion cleanup unconfirmed after %d attempts; run ended, capacity released", n, j.StopMisses)
+	}
+	return true
+}
+
 func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef, known bool) bool {
 	if j != nil && j.RemoteCleanup != "" {
 		return false

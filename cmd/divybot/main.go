@@ -382,6 +382,11 @@ type Job struct {
 	// consecutive misses before declaring an agent truly gone. Reset on presence.
 	LastMissAt time.Time `json:"last_miss_at,omitempty"`
 	Misses     int       `json:"misses,omitempty"`
+	// StopMisses counts teardown attempts, at least stopMissEvery apart, that
+	// could not confirm the native stop or the paired seat and process absence.
+	// Persisted, so a restart neither resets nor accelerates the bound.
+	LastStopMissAt time.Time `json:"last_stop_miss_at,omitempty"`
+	StopMisses     int       `json:"stop_misses,omitempty"`
 }
 
 type State struct {
@@ -3609,7 +3614,7 @@ func (c *Coord) completionPass(ctx context.Context, status map[int]agentRef) {
 	for n, j := range finishing {
 		ref, known := status[n]
 		c.observeFinalReport(ctx, j, ref, known)
-		c.retireCompleted(ctx, n, j, ref, known)
+		c.completionOwns(ctx, n, j, ref, known)
 	}
 }
 
@@ -4059,7 +4064,38 @@ func checksGreen(v *PRView) bool {
 	return true
 }
 
+// teardown ends a run that is over: its issue closed, its operator timeout
+// passed or its remote cleanup began. An unconfirmable native stop or absence
+// proof is retried on later ticks; after stopMissLimit misses the run ends
+// anyway, so it stops counting against the governor and admission.
 func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool {
+	if c.teardownConfirmed(ctx, n, j, cause) {
+		return true
+	}
+	c.st.mu.Lock()
+	defer c.st.mu.Unlock()
+	if !c.stopMissed(j) {
+		return false
+	}
+	log.Printf("issue #%d: native stop unconfirmed after %d attempts; run ended, capacity released", n, j.StopMisses)
+	return true
+}
+
+// stopMissed records one paced, persisted miss of j's stop or absence proof and
+// reports whether the bound is exhausted. Callers hold c.st.mu.
+func (c *Coord) stopMissed(j *Job) bool {
+	if time.Since(j.LastStopMissAt) < stopMissEvery {
+		return false // event bursts must not exhaust the bound
+	}
+	j.LastStopMissAt = time.Now()
+	j.StopMisses++
+	return c.st.saveLocked() == nil && j.stopUnconfirmed()
+}
+
+// stopUnconfirmed reports a run released by the stop bound, not by proof.
+func (j *Job) stopUnconfirmed() bool { return j.StopMisses >= stopMissLimit }
+
+func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause string) bool {
 	host, ok := c.hosts[j.Host]
 	host = host.forJob(j)
 	if !ok {
@@ -4076,7 +4112,7 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool 
 	nativeErr := host.stopRemoteRun(nativeCtx, j)
 	nativeDone()
 	if nativeErr != nil {
-		log.Printf("issue #%d: native stop unconfirmed; capacity retained", n)
+		log.Printf("issue #%d: native stop unconfirmed reason=%s; capacity retained", n, closedGoalReason(nativeErr))
 		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
@@ -4208,6 +4244,13 @@ func (c *Coord) partialMerge(ctx context.Context, j *Job) (ref string, refNum, p
 // divybot declares it gone and respawns — debounce against herdr's screen-scrape
 // detection transiently dropping a live agent. At the 30s poll that's ~90s.
 const deadMissThreshold = 3
+
+// A teardown that cannot confirm its stop is retried at most stopMissLimit
+// times, at least stopMissEvery apart, before the run ends without that proof.
+const (
+	stopMissLimit = 5
+	stopMissEvery = time.Minute
+)
 
 const fanoutGraceWindow = 4 * time.Minute
 
