@@ -294,6 +294,17 @@ func provenRun(t *testing.T) *remoteControlRun {
 // exactly one pinned codex-tui connection, which then proceeded past a
 // successful resume. Rows are synthetic, in the daemon's real shapes.
 func TestRemoteCodexResumeIdentityFromNativeRecord(t *testing.T) {
+	for _, shape := range []struct{ name, prefix string }{
+		{"legacy", "resume_thread_with_history:thread_spawn{}:"},
+		{"codex-0.163", `thread_spawn{otel.name="thread_spawn"}:`},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			testRemoteCodexResumeIdentityFromNativeRecord(t, shape.prefix)
+		})
+	}
+}
+
+func testRemoteCodexResumeIdentityFromNativeRecord(t *testing.T, spawnPrefix string) {
 	const p, q = "pid:7:canonical", "pid:9:embedded"
 	run := syntheticRemoteRun(t)
 	run.ClientVersion = "9.1.0"
@@ -328,7 +339,11 @@ func TestRemoteCodexResumeIdentityFromNativeRecord(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("CODEX_HOME", "")
 			if tc.rows != nil {
-				writeTrace(t, home, tc.rows...)
+				rows := append([]traceRow(nil), tc.rows...)
+				for i := range rows {
+					rows[i].Body = strings.Replace(rows[i].Body, "resume_thread_with_history:thread_spawn{}:", spawnPrefix, 1)
+				}
+				writeTrace(t, home, rows...)
 			}
 			r := *run
 			ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)

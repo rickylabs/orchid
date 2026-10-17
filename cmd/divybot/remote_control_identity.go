@@ -200,6 +200,8 @@ func codexResumeProven(run *remoteControlRun) bool {
 //     connection, which the TUI sends only after a successful resume response.
 //
 // Any codex-tui resume of the thread by another producer or connection refuses.
+// Codex 0.163 emits thread_spawn directly beneath thread/resume; older clients
+// retain the resume_thread_with_history wrapper. Both keep the same native join.
 const codexResumeRecordPython = `import hashlib,json,os,re,sqlite3,sys
 tid,ver,creator=sys.argv[1],sys.argv[2],sys.argv[3]
 def out(state,**k):
@@ -219,7 +221,7 @@ for i,ts,pu,tgt,b in c.execute("select id,ts,process_uuid,target,feedback_log_bo
  m=resume.match(b)
  if m and m.group(2)=='codex-tui':
   tui.add((pu,m.group(1)))
-  if tgt=='codex_core::shell_snapshot' and b[m.end():].startswith('resume_thread_with_history:thread_spawn'):spawned.append((i,ts,pu,m.group(1),m.group(3)))
+  if tgt=='codex_core::shell_snapshot' and b[m.end():].startswith(('resume_thread_with_history:thread_spawn','thread_spawn{otel.name="thread_spawn"}:')):spawned.append((i,ts,pu,m.group(1),m.group(3)))
 if len(creators)>1 or len(tui)>1:out('refused')
 if not creators or not spawned:out('pending')
 p=next(iter(creators))
