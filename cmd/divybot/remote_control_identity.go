@@ -22,7 +22,8 @@ try:
  pid=int(sys.argv[1])
  owner=subprocess.check_output(['ps','-p',str(pid),'-o','uid='],timeout=2).decode().strip()
  info=subprocess.check_output(['ps','-p',str(pid),'-o','lstart=','-o','command='],timeout=2)
- if int(owner)!=os.getuid() or not info.strip() or len(info)>16384:raise ValueError()
+ # Managed launches repeat the lifecycle hook config in argv (over 16 KiB).
+ if int(owner)!=os.getuid() or not info.strip() or len(info)>1048576:raise ValueError()
  print(json.dumps({'fingerprint':hashlib.sha256(info.strip()).hexdigest()}))
 except Exception:sys.exit(2)
 `
