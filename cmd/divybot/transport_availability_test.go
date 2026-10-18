@@ -186,6 +186,29 @@ func TestTransportAvailabilityFailedPublishClears(t *testing.T) {
 	}
 }
 
+// Ticks run on Herdr fleet events or every fleetRecoveryEvery. The snapshot
+// must outlive a quiet interval, or readers see availability as unknown
+// between ticks.
+func TestTransportAvailabilityOutlivesQuietTick(t *testing.T) {
+	root := privateTestRoot(t)
+	now := time.Date(2026, 10, 18, 2, 28, 0, 0, time.UTC)
+	c := &Coord{cfg: &Config{PollInterval: "30s", Matrix: MatrixConfig{ReceiptRoot: root}}}
+	c.gov.q = map[string]quota{}
+	c.publishTransportAvailability(map[string]int{"claude": 1}, transportSeats{}, now, nil)
+	raw, err := os.ReadFile(transportAvailabilityPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot transportAvailabilitySnapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	until, err := time.Parse(time.RFC3339, snapshot.ValidUntil)
+	if err != nil || until.Before(now.Add(2*fleetRecoveryEvery)) {
+		t.Fatalf("snapshot expires before two quiet ticks: validUntil=%s", snapshot.ValidUntil)
+	}
+}
+
 // The tick's admission budget is where the snapshot is published: every tick
 // that computes a budget leaves the availability it will act on.
 func TestAdmissionBudgetPublishesTransportAvailability(t *testing.T) {

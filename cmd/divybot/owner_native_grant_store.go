@@ -352,6 +352,9 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 		// same UID that owns the approval root, so a file adds no authority. The
 		// approval is bound to the current inbox and pins, as a file would be.
 		target := s.cfg.Matrix.TargetRevisions[r.Target]
+		if !s.targetEnabled(r.Target) {
+			return "", ownerNativeWhy("the target is not configured or is disabled")
+		}
 		if !sourceRevision.MatchString(s.cfg.Matrix.Revision) || !sourceRevision.MatchString(target) {
 			return "", ownerNativeWhy("the matrix or target revision is not pinned")
 		}
@@ -369,6 +372,16 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 		return "", ownerNativeWhy("an operator approval file exists for this launch and does not match it")
 	}
 	return shaText(raw), nil
+}
+
+// targetEnabled: the repository is a configured, enabled target.
+func (s *ownerNativeGrantStore) targetEnabled(repo string) bool {
+	for _, t := range s.cfg.Targets {
+		if t.Repo == repo && !t.Disabled {
+			return true
+		}
+	}
+	return false
 }
 
 // The Go reader binds the whole title/body and also verifies inert issue state.
