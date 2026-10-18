@@ -67,6 +67,9 @@ func TestMatrixConfigCLI(t *testing.T) {
 	if len(p) > 0 || cfg.Matrix.Revision != source.Revision || cfg.Matrix.Grants[0].BriefDigest != briefDigest(is) || cfg.Matrix.BudgetDefaults["feature"]["leaf"] != 12000 || !strings.Contains(string(raw["extension"]), "synthetic-private-canary") {
 		t.Fatal("candidate lost resolved pins, grant or unrelated config")
 	}
+	if len(cfg.Matrix.TargetRevisions) != 0 {
+		t.Fatal("matrix build wrote a target pin; a launch reads the default-branch head")
+	}
 	st, _ := os.Stat(candidate)
 	if st.Mode().Perm() != 0600 {
 		t.Fatal("candidate is not private")
@@ -86,7 +89,7 @@ func TestMatrixConfigCLI(t *testing.T) {
 		t.Fatal("existing output changed")
 	}
 	diagnostic.Reset()
-	if code := invokeMatrixConfigCLI([]string{"validate", "-config", cfgPath}, &out, &diagnostic); code == 0 || !strings.Contains(diagnostic.String(), "matrix.source") || !strings.Contains(diagnostic.String(), "matrix.revision") || !strings.Contains(diagnostic.String(), "matrix.receipt_root") || !strings.Contains(diagnostic.String(), "matrix.target_revisions") {
+	if code := invokeMatrixConfigCLI([]string{"validate", "-config", cfgPath}, &out, &diagnostic); code == 0 || !strings.Contains(diagnostic.String(), "matrix.source") || !strings.Contains(diagnostic.String(), "matrix.revision") || !strings.Contains(diagnostic.String(), "matrix.receipt_root") || strings.Contains(diagnostic.String(), "matrix.target_revisions") {
 		t.Fatal("missing block not explained before coordinator startup")
 	}
 }
@@ -96,7 +99,7 @@ func TestMatrixConfigRequiredFields(t *testing.T) {
 	base.ReceiptRoot = privateTestRoot(t)
 	base.TargetRevisions = map[string]string{"example/project": strings.Repeat("c", 40)}
 	base.BudgetDefaults = map[string]map[string]int64{"feature": {"leaf": 0}}
-	for _, name := range []string{"valid", "source", "revision", "receipt_root", "target_revisions", "pins", "budget-tier", "budget-profile", "budget-negative", "budget-overflow", "grant-digest", "grant-authority", "override-pin"} {
+	for _, name := range []string{"valid", "source", "revision", "receipt_root", "target_revisions", "target_revisions-absent", "pins", "budget-tier", "budget-profile", "budget-negative", "budget-overflow", "grant-digest", "grant-authority", "override-pin"} {
 		t.Run(name, func(t *testing.T) {
 			raw, _ := json.Marshal(base)
 			var m MatrixConfig
@@ -109,7 +112,9 @@ func TestMatrixConfigRequiredFields(t *testing.T) {
 			case "receipt_root":
 				m.ReceiptRoot = "relative"
 			case "target_revisions":
-				m.TargetRevisions = nil
+				m.TargetRevisions = map[string]string{"example/project": "main"} // a present pin must be a full commit
+			case "target_revisions-absent":
+				m.TargetRevisions = nil // a pin is optional: the launch reads the default-branch head
 			case "pins":
 				m.Pins = map[string]MatrixPin{"synthetic": {}}
 			case "budget-tier":
@@ -129,7 +134,7 @@ func TestMatrixConfigRequiredFields(t *testing.T) {
 			}
 			cfg := &Config{Inbox: "example/inbox", Targets: []Target{{Repo: "example/project"}}, Matrix: m}
 			p := validateMatrixConfig(context.Background(), cfg)
-			if (len(p) == 0) != (name == "valid") {
+			if (len(p) == 0) != (name == "valid" || name == "target_revisions-absent") {
 				t.Fatal("configuration guard verdict incorrect")
 			}
 		})

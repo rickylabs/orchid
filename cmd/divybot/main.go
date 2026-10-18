@@ -59,6 +59,8 @@ type Config struct {
 	ProviderBudgets         *ProviderBudgetConfig    `json:"provider_budgets,omitempty"`
 	UnmeteredTransports     UnmeteredTransportLimits `json:"unmetered_transports,omitempty"`
 	Memory                  Mem                      `json:"memory"`
+	// cockpit is the shared cockpit target list; copies of the config share it.
+	cockpit *cockpitTargetSource
 }
 
 // Mem configures the git-backed shared memory. Reuses the inbox repo
@@ -162,6 +164,8 @@ type Target struct {
 	// then launches. Off by default, because bot_login may be the owner's own
 	// account, and assigning yourself an issue must not launch an agent.
 	MirrorAssignments bool `json:"mirror_assignments"`
+	// cockpit marks a target the cockpit published; its Agents is an allow-list.
+	cockpit bool
 }
 
 // Gov holds the quota-pacing knobs (the governor — paces against the Max
@@ -1506,7 +1510,7 @@ func (c *Coord) assignmentTick(ctx context.Context) {
 		log.Printf("assignments: inbox list failed, skipping feed: %v", err)
 		return
 	}
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		if !t.MirrorAssignments || t.Repo == "" || t.Repo == c.cfg.Inbox || t.Label == "" {
 			continue
 		}
@@ -1540,7 +1544,7 @@ func (c *Coord) assignmentTick(ctx context.Context) {
 
 // mirrorsAssignments reports whether any target opted into the feeder.
 func (c *Config) mirrorsAssignments() bool {
-	for _, t := range c.Targets {
+	for _, t := range c.effectiveTargets() {
 		if t.MirrorAssignments {
 			return true
 		}
@@ -1802,7 +1806,7 @@ func accountKey(agent string) string {
 func (c *Config) accounts() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range c.Targets {
+	for _, t := range c.effectiveTargets() {
 		for _, a := range t.agentList() {
 			if !seen[a] {
 				seen[a] = true
@@ -2238,6 +2242,9 @@ func newCoord(cfg *Config) *Coord {
 	for _, h := range cfg.Hosts {
 		hosts[h.Name] = h
 	}
+	if cfg.cockpit == nil {
+		cfg.cockpit = &cockpitTargetSource{}
+	}
 	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID(), claudeLinks: &claudeLinkStore{}}
 }
 
@@ -2479,6 +2486,8 @@ func (c *Coord) activeHosts() []Host {
 }
 
 func (c *Coord) tick(ctx context.Context) {
+	// The cockpit's target list first, so every step of this tick reads it.
+	c.refreshCockpitTargets()
 	c.actionTick(ctx)
 	c.teardownObservePending(ctx)
 	// Feeder first: mirror any newly bot-assigned upstream issues into the
@@ -2691,7 +2700,7 @@ func (c *Coord) tick(ctx context.Context) {
 		acct, launched := c.matrixAttempt(ctx, n, is, tgt, budget, matrixAttemptDeps{
 			report: func(r matrixRefusal) { c.reportIssueMatrixRefusal(ctx, n, is, r, postMatrixComment) },
 			read:   readRoutingFile, resolve: resolveMatrix, persist: persistMatrixReceipt,
-			host: c.pickHost, ownerHost: c.pickOwnerHost, launch: c.spawn,
+			host: c.pickHost, ownerHost: c.pickOwnerHost, launch: c.spawn, head: readTargetHead,
 		})
 		if launched {
 			budget[acct]--
@@ -2722,7 +2731,12 @@ func (c *Coord) pollIssues(ctx context.Context) (open map[int]Issue, all map[int
 	open = map[int]Issue{}
 	all = map[int]bool{}
 	ok = true
-	for _, tgt := range c.cfg.Targets {
+	polled := map[string]bool{}
+	for _, tgt := range c.cfg.effectiveTargets() {
+		if tgt.Label == "" || polled[tgt.Label] {
+			continue // a cockpit target has no inbox label; each label is polled once
+		}
+		polled[tgt.Label] = true
 		issues, err := ghIssues(ctx, c.cfg.Inbox, tgt.Label)
 		if err != nil {
 			log.Printf("poll %s/%s: %v", c.cfg.Inbox, tgt.Label, err)
@@ -2924,7 +2938,7 @@ var bindingSourceRef = regexp.MustCompile(`^\[([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#
 //   - Without it, the label target applies, unless the title names a different
 //     source repository; that binding refuses instead of working elsewhere.
 func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
-	return resolveTargetIn(c.cfg.Targets, is)
+	return resolveTargetIn(c.cfg.effectiveTargets(), is)
 }
 
 // resolveTargetIn is resolveTarget over a target list, shared with the owner
@@ -2932,12 +2946,14 @@ func (c *Coord) resolveTarget(is Issue) (Target, string, bool) {
 func resolveTargetIn(targets []Target, is Issue) (Target, string, bool) {
 	var labelled *Target
 	for i, tgt := range targets {
-		if contains(is.Labels, tgt.Label) {
+		if tgt.Label != "" && contains(is.Labels, tgt.Label) {
 			labelled = &targets[i]
 			break
 		}
 	}
-	if labelled == nil {
+	// A comment binding is Orchid's by its trigger: it resolves by its own
+	// repository, which a cockpit target (no inbox label) may be.
+	if labelled == nil && is.Source == nil {
 		return Target{}, "", false
 	}
 	o := parseOverrides(is.Body)
@@ -3334,6 +3350,12 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	label := fmt.Sprintf("%s-%d", agent, n)
 
 	// 2. Worktree (clone + branch) before the agent runs.
+	// The checkout is exactly the base the launch recorded; without a matrix
+	// receipt (never a production launch) it is the optional pin.
+	base := receipt.baseRevision()
+	if base == "" {
+		base = c.cfg.Matrix.TargetRevisions[tgt.Repo]
+	}
 	pctx, pcancel := context.WithTimeout(ctx, 120*time.Second)
 	prep := fmt.Sprintf(`set -e
 mkdir -p %s; cd %s
@@ -3342,7 +3364,7 @@ o=$(git config --get remote.origin.url || true); o=${o%%.git}; o=${o%%/}
 [ "$(printf %%s "$o" | tr A-Z a-z)" = "$(printf %%s %s | tr A-Z a-z)" ] || exit %d
 git fetch --depth=1 origin %s >/dev/null 2>&1
 git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
-		shq(workdir), shq(workdir), tgt.Repo, shq("https://github.com/"+tgt.Repo), worktreeOriginMismatch, shq(c.cfg.Matrix.TargetRevisions[tgt.Repo]), shq(branch))
+		shq(workdir), shq(workdir), tgt.Repo, shq("https://github.com/"+tgt.Repo), worktreeOriginMismatch, shq(base), shq(branch))
 	if _, err := host.runRemote(pctx, prep); err != nil {
 		attempt.contextEnded(pctx)
 		// The checkout must prove it is the resolved repository before any agent
@@ -3981,7 +4003,7 @@ func prShortState(v *PRView) string {
 
 // autoMergeEnabled reports whether the target for this repo opted into auto-merge.
 func (c *Coord) autoMergeEnabled(repo string) bool {
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		if t.Repo == repo {
 			return t.AutoMerge
 		}
@@ -3997,7 +4019,7 @@ func (c *Coord) autoMergeEnabled(repo string) bool {
 // progress, and per-job draft-promote handles the worker-is-idle case.
 func (c *Coord) sweepBotPRs(ctx context.Context) {
 	done := map[string]bool{}
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		if !t.AutoMerge || done[t.Repo] {
 			continue
 		}
@@ -4366,7 +4388,7 @@ func (c *Coord) maybeContinue(ctx context.Context, j *Job) {
 
 // labelFor returns the inbox label configured for a target repo ("" if none).
 func (c *Coord) labelFor(repo string) string {
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		if t.Repo == repo {
 			return t.Label
 		}

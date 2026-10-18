@@ -455,7 +455,7 @@ func sourceIssueNumber(issueURL string) int {
 func (c *Coord) sourceRepos() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		key := strings.ToLower(t.Repo)
 		if !repositoryName.MatchString(t.Repo) || seen[key] {
 			continue
@@ -1221,9 +1221,11 @@ func (b sourceBinding) author() int64 {
 
 func (b sourceBinding) issue(c *Coord) Issue {
 	is := Issue{ID: b.IssueID, Number: int(b.Comment), Title: b.Title, Body: b.Body, Source: &issueSource{Repo: b.Repo, Number: b.Issue, Author: b.author()}}
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		if strings.EqualFold(t.Repo, b.Repo) {
-			is.Labels = []string{t.Label}
+			if t.Label != "" {
+				is.Labels = []string{t.Label}
+			}
 			break
 		}
 	}

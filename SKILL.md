@@ -129,7 +129,13 @@ the required `need_cap`, or every account out of budget this tick.
 
 ## Tune targets without code
 
-All live in the config `targets[]`, restart to apply:
+Which repositories agents may work in is set in the Cockpit app: it publishes the
+enabled repositories and their allowed agents as `targets.json` in the private
+action spool, and orchid reads it every tick (no restart; the last good list is
+kept if the file is unreadable). A Cockpit target has no inbox label and refuses
+a route whose agent it does not allow. The static `targets[]` stay as a bootstrap
+fallback and win over a Cockpit entry for the same repository; they live in the
+config, restart to apply:
 
 - `disabled: true` — pause NEW spawns for a target; live jobs keep running and
   issues are still polled (so they aren't torn down). Use to halt a target without
