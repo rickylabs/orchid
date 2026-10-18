@@ -515,6 +515,16 @@ func (c *Coord) scanSourceRepo(ctx context.Context, repo string, now time.Time, 
 		c.st.SourceScans = map[string]sourceScan{}
 	}
 	cursor, started := c.st.SourceCursors[repo]
+	// A cockpit repository starts where agents were turned on, never before: its
+	// first scan reads from then in this same scan, so a /swarm posted between
+	// the switch and the scan launches; a re-enable moves the start forward.
+	since, enabled := c.cfg.sourceSince(repo)
+	since = since.Truncate(time.Second) // GitHub times are whole seconds
+	if enabled && (!started || since.After(c.st.SourceStarts[repo])) {
+		cursor, started = since.Add(-time.Second), true // GitHub's since is exclusive
+		c.st.SourceCursors[repo], c.st.SourceStarts[repo] = cursor, since
+		delete(c.st.SourceScans, repo)
+	}
 	if !started { // guard:source-first-start
 		c.st.SourceCursors[repo] = now
 		c.st.SourceStarts[repo] = now

@@ -130,9 +130,6 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 			bad(fmt.Sprintf("hosts[%d].claude_child_event_root", i), "absolute-clean-home-path-required")
 		}
 	}
-	if len(cfg.Targets) == 0 {
-		bad("targets", "at-least-one-target-required")
-	}
 	// A target needs no pin: without one a launch starts from the default-branch
 	// head. A pin present in matrix.target_revisions must still be a full commit.
 	for i, t := range cfg.Targets {

@@ -11,16 +11,20 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // The cockpit owns which repositories agents may work in. It publishes the
 // enabled list as one atomic snapshot in the private action spool, which the
-// coordinator already reads every tick. The static targets block stays a
-// bootstrap fallback: a static target always wins over a cockpit one.
+// coordinator already reads every tick. The static targets block is only a
+// bootstrap fallback until the first valid snapshot; after that the cockpit
+// list alone decides which repositories agents may work in.
 const (
 	cockpitTargetsFile  = "targets.json"
 	cockpitTargetsLimit = 64 * 1024
 	cockpitTargetsMax   = 256
+	// cockpitSinceSkew bounds how far in the future a snapshot's since may be.
+	cockpitSinceSkew = 5 * time.Minute
 )
 
 // cockpitTargetAgents are the transports a cockpit target may allow.
@@ -33,6 +37,7 @@ type cockpitTargetSource struct {
 	mu   sync.Mutex // one refresh at a time; guards the fields below
 	seen string     // digest of the last snapshot bytes handled, good or bad
 	told string     // the last problem logged, so each distinct reason logs once
+	off  string     // the static repositories last logged as not enabled
 }
 
 type cockpitTargetsSnapshot struct {
@@ -40,36 +45,51 @@ type cockpitTargetsSnapshot struct {
 	Targets       []struct {
 		Repo   string   `json:"repo"`
 		Agents []string `json:"agents"`
+		Since  string   `json:"since"`
 	} `json:"targets"`
 }
 
-// effectiveTargets is the static targets followed by every cockpit target whose
-// repository is not already a static target (case-insensitive).
+// effectiveTargets is the static targets until a valid cockpit snapshot has
+// loaded. From then on it is exactly the cockpit list (an empty list means no
+// targets): a static entry for the same repository (case-insensitive) only
+// lends its metadata, never authorization.
 func (c *Config) effectiveTargets() []Target {
 	if c.cockpit == nil {
 		return c.Targets
 	}
 	loaded := c.cockpit.list.Load()
-	if loaded == nil || len(*loaded) == 0 {
+	if loaded == nil {
 		return c.Targets
 	}
-	out := make([]Target, 0, len(c.Targets)+len(*loaded))
-	out = append(out, c.Targets...)
-	for _, t := range *loaded {
-		if !targetsHaveRepo(c.Targets, t.Repo) {
-			out = append(out, t) // a loaded list is never modified in place
-		}
+	out := make([]Target, 0, len(*loaded))
+	for _, t := range *loaded { // a loaded list is never modified in place
+		out = append(out, withStaticMetadata(t, c.Targets))
 	}
 	return out
 }
 
-func targetsHaveRepo(targets []Target, repo string) bool {
-	for _, t := range targets {
-		if strings.EqualFold(t.Repo, repo) {
-			return true
+// withStaticMetadata copies the operator metadata of the static entry for the
+// same repository onto a cockpit target. Repo, agents and the cockpit mark stay.
+func withStaticMetadata(t Target, static []Target) Target {
+	for _, s := range static {
+		if strings.EqualFold(s.Repo, t.Repo) {
+			t.Label, t.NeedCap, t.AutoMerge, t.Priority = s.Label, s.NeedCap, s.AutoMerge, s.Priority
+			t.PromptHint, t.MirrorAssignments, t.Disabled = s.PromptHint, s.MirrorAssignments, s.Disabled
+			break
 		}
 	}
-	return false
+	return t
+}
+
+// sourceSince is when agents were last turned on for a cockpit repository; the
+// source scanner never starts that repository before it.
+func (c *Config) sourceSince(repo string) (time.Time, bool) {
+	for _, t := range c.effectiveTargets() {
+		if t.cockpit && !t.since.IsZero() && strings.EqualFold(t.Repo, repo) {
+			return t.since, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // allowsTransport: a cockpit target's agents are an allow-list; a static
@@ -93,10 +113,10 @@ func (c *Coord) refreshCockpitTargets() {
 	if c.cfg.ActionRequestRoot == "" || c.cfg.cockpit == nil {
 		return
 	}
-	c.cfg.cockpit.refresh(c.cfg.ActionRequestRoot)
+	c.cfg.cockpit.refresh(c.cfg.ActionRequestRoot, c.cfg.Targets, time.Now())
 }
 
-func (s *cockpitTargetSource) refresh(root string) {
+func (s *cockpitTargetSource) refresh(root string, static []Target, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	raw, problem := readCockpitTargets(root)
@@ -113,7 +133,7 @@ func (s *cockpitTargetSource) refresh(root string) {
 		return
 	}
 	s.seen = digest
-	list, problem := parseCockpitTargets(raw)
+	list, problem := parseCockpitTargets(raw, now)
 	if problem != "" {
 		s.problem(problem)
 		return
@@ -128,6 +148,20 @@ func (s *cockpitTargetSource) refresh(root string) {
 		repos[i] = t.Repo
 	}
 	log.Printf("dispatch targets from cockpit: %d (%s)", len(list), strings.Join(repos, ", "))
+	var off []string
+	for _, t := range static {
+		enabled := false
+		for _, e := range list {
+			enabled = enabled || strings.EqualFold(e.Repo, t.Repo)
+		}
+		if !enabled && !containsString(off, t.Repo) {
+			off = append(off, t.Repo)
+		}
+	}
+	if key := strings.Join(off, ", "); key != s.off {
+		s.off = key
+		log.Printf("static targets not enabled in the cockpit: %d (%s)", len(off), key)
+	}
 }
 
 func (s *cockpitTargetSource) problem(reason string) {
@@ -180,7 +214,7 @@ func readCockpitTargets(root string) ([]byte, string) {
 }
 
 // parseCockpitTargets validates the whole snapshot; one bad entry refuses it.
-func parseCockpitTargets(raw []byte) ([]Target, string) {
+func parseCockpitTargets(raw []byte, now time.Time) ([]Target, string) {
 	var snap cockpitTargetsSnapshot
 	if len(bytes.TrimSpace(raw)) == 0 || strictJSON(raw, &snap) != nil {
 		return nil, "invalid-json"
@@ -212,7 +246,11 @@ func parseCockpitTargets(raw []byte) ([]Target, string) {
 			}
 			agents[a] = true
 		}
-		list = append(list, Target{Repo: entry.Repo, Agents: append([]string(nil), entry.Agents...), cockpit: true})
+		since, err := time.Parse(time.RFC3339Nano, entry.Since)
+		if err != nil || since.IsZero() || since.After(now.Add(cockpitSinceSkew)) {
+			return nil, "invalid-since"
+		}
+		list = append(list, Target{Repo: entry.Repo, Agents: append([]string(nil), entry.Agents...), cockpit: true, since: since.UTC()})
 	}
 	return list, ""
 }

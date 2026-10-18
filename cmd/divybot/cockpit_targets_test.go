@@ -51,20 +51,23 @@ func TestCockpitTargetsSnapshotLoadSwapKeepLastGoodMissing(t *testing.T) {
 	if cockpitRepos(cfg.effectiveTargets()) != "" || logs.Len() != 0 {
 		t.Fatalf("missing snapshot produced a list or a log: %q", logs.String())
 	}
-	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["claude","codex"]}]}`, 0600)
+	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["claude","codex"],"since":"2026-01-01T00:00:00.000Z"}]}`, 0600)
 	c.refreshCockpitTargets()
 	c.refreshCockpitTargets() // unchanged: no second log
-	writeCockpitTargets(t, root, `{ "schema_version": 1, "targets": [ {"repo": "example/project", "agents": ["claude", "codex"]} ] }`, 0600)
+	writeCockpitTargets(t, root, `{ "schema_version": 1, "targets": [ {"repo": "example/project", "agents": ["claude", "codex"], "since": "2026-01-01T00:00:00.000Z"} ] }`, 0600)
 	c.refreshCockpitTargets() // other bytes, same list: no swap log
 	if cockpitRepos(cfg.effectiveTargets()) != "example/project" || count("dispatch targets from cockpit: 1 (example/project)") != 1 {
 		t.Fatalf("valid snapshot not loaded once: %q", logs.String())
 	}
 	for _, bad := range []struct{ name, body, reason string }{
-		{"agent", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude","invented"]}]}`, "invalid-agents"},
-		{"no-agents", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":[]}]}`, "invalid-agents"},
-		{"duplicate", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude"]},{"repo":"Example/Canary-Private","agents":["codex"]}]}`, "duplicate-repository"},
-		{"repo", `{"schema_version":1,"targets":[{"repo":"canary-private","agents":["claude"]}]}`, "invalid-repository"},
+		{"agent", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude","invented"],"since":"2026-01-01T00:00:00.000Z"}]}`, "invalid-agents"},
+		{"no-agents", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":[],"since":"2026-01-01T00:00:00.000Z"}]}`, "invalid-agents"},
+		{"duplicate", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude"],"since":"2026-01-01T00:00:00.000Z"},{"repo":"Example/Canary-Private","agents":["codex"],"since":"2026-01-01T00:00:00.000Z"}]}`, "duplicate-repository"},
+		{"repo", `{"schema_version":1,"targets":[{"repo":"canary-private","agents":["claude"],"since":"2026-01-01T00:00:00.000Z"}]}`, "invalid-repository"},
 		{"schema", `{"schema_version":2,"targets":[]}`, "schema-version-or-targets"},
+		{"no-since", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude"]}]}`, "invalid-since"},
+		{"bad-since", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude"],"since":"yesterday"}]}`, "invalid-since"},
+		{"future-since", `{"schema_version":1,"targets":[{"repo":"example/canary-private","agents":["claude"],"since":"` + time.Now().Add(time.Hour).UTC().Format("2006-01-02T15:04:05.000Z") + `"}]}`, "invalid-since"},
 		{"unknown-field", `{"schema_version":1,"targets":[],"canary-private":true}`, "invalid-json"},
 	} {
 		writeCockpitTargets(t, root, bad.body, 0600)
@@ -77,7 +80,7 @@ func TestCockpitTargetsSnapshotLoadSwapKeepLastGoodMissing(t *testing.T) {
 	if count("unusable (invalid-agents)") != 1 {
 		t.Fatalf("one reason logged more than once in a row: %q", logs.String())
 	}
-	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["claude"]}]}`, 0644)
+	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["claude"],"since":"2026-01-01T00:00:00.000Z"}]}`, 0644)
 	c.refreshCockpitTargets()
 	big := `{"schema_version":1,"targets":[],"pad":"` + strings.Repeat("x", cockpitTargetsLimit) + `"}`
 	writeCockpitTargets(t, root, big, 0600)
@@ -96,10 +99,10 @@ func TestCockpitTargetsSnapshotLoadSwapKeepLastGoodMissing(t *testing.T) {
 		t.Fatal("snapshot contents reached the log")
 	}
 	_ = os.Remove(filepath.Join(root, cockpitTargetsFile))
-	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[{"repo":"example/other","agents":["agy"]},{"repo":"example/project","agents":["codex","opencode"]}]}`, 0660)
+	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[{"repo":"example/other","agents":["agy"],"since":"2026-01-01T00:00:00.000Z"},{"repo":"example/project","agents":["codex","opencode"],"since":"2026-01-01T00:00:00.000Z"}]}`, 0660)
 	c.refreshCockpitTargets()
 	got := cfg.effectiveTargets()
-	if cockpitRepos(got) != "example/other,example/project" || count("dispatch targets from cockpit: 2 (example/other, example/project)") != 1 || got[2].Label != "" || strings.Join(got[2].Agents, ",") != "codex,opencode" {
+	if cockpitRepos(got) != "example/other,example/project" || count("dispatch targets from cockpit: 2 (example/other, example/project)") != 1 || len(got) != 2 || got[1].Label != "" || strings.Join(got[1].Agents, ",") != "codex,opencode" {
 		t.Fatalf("changed snapshot not swapped: %+v %q", got, logs.String())
 	}
 	_ = os.Remove(filepath.Join(root, cockpitTargetsFile)) // removed after a load: keep the last good list
@@ -110,29 +113,60 @@ func TestCockpitTargetsSnapshotLoadSwapKeepLastGoodMissing(t *testing.T) {
 	}
 	writeCockpitTargets(t, root, `{"schema_version":1,"targets":[]}`, 0600)
 	c.refreshCockpitTargets()
-	if cockpitRepos(cfg.effectiveTargets()) != "" || count("dispatch targets from cockpit: 0 ()") != 1 {
+	if len(cfg.effectiveTargets()) != 0 || count("dispatch targets from cockpit: 0 ()") != 1 || count("static targets not enabled in the cockpit: 1 (example/inbox)") != 1 {
 		t.Fatalf("an empty list did not turn every cockpit target off: %q", logs.String())
 	}
 }
 
-func TestEffectiveTargetsStaticWinsAndEmptyLabelIsNeverPolled(t *testing.T) {
+func TestEffectiveTargetsCockpitListIsAuthoritativeOnceLoaded(t *testing.T) {
 	cfg := &Config{Inbox: "example/inbox", Targets: []Target{
 		{Label: "harness", Repo: "example/inbox"},
-		{Label: "proj", Repo: "Example/Project", AutoMerge: true},
+		{Label: "proj", Repo: "Example/Project", AutoMerge: true, Priority: 3, NeedCap: "build", PromptHint: "hint", MirrorAssignments: true, Agents: []string{"claude", "codex"}},
 		{Label: "proj", Repo: "example/project-mirror"},
 	}}
+	if got := cfg.effectiveTargets(); len(got) != 3 || cockpitRepos(got) != "" {
+		t.Fatal("without a snapshot the static list is not the fallback")
+	}
 	setCockpitTargets(cfg, Target{Repo: "example/project", Agents: []string{"codex"}}, Target{Repo: "example/other", Agents: []string{"claude"}})
 	got := cfg.effectiveTargets()
-	if len(got) != 4 || got[1].Repo != "Example/Project" || got[1].cockpit || !got[1].AutoMerge || got[3].Repo != "example/other" || !got[3].cockpit || got[3].Label != "" {
-		t.Fatalf("effective list is not static then new cockpit repos: %+v", got)
+	p := got[0]
+	if len(got) != 2 || cockpitRepos(got) != "example/project,example/other" || p.Label != "proj" || !p.AutoMerge || p.Priority != 3 || p.NeedCap != "build" || p.PromptHint != "hint" || !p.MirrorAssignments || strings.Join(p.Agents, ",") != "codex" || got[1].Label != "" {
+		t.Fatalf("loaded list is not exactly the cockpit repositories with static metadata: %+v", got)
+	}
+	// A repository the cockpit turned off is no target, even though it is static.
+	if _, _, ok := resolveTargetIn(got, Issue{Labels: []string{"harness"}}); ok {
+		t.Fatal("a static repository missing from the cockpit list still resolves")
+	}
+	// The cockpit allow-list binds a static repository too: codex only refuses claude.
+	c, deps, refusal, _ := unpinnedAttemptFixture(t, strings.Repeat("e", 40))
+	c.cfg.Targets, c.cfg.cockpit = cfg.Targets, cfg.cockpit
+	deps.preflight = true
+	tgt, reason, ok := c.resolveTarget(Issue{Labels: []string{"proj"}, Body: attemptIssue.Body})
+	if !ok || reason != "" || !tgt.cockpit {
+		t.Fatalf("static label did not resolve to the cockpit target: %+v %q", tgt, reason)
+	}
+	if _, launched := c.matrixAttempt(context.Background(), 1, attemptIssue, tgt, map[string]int{"claude": 1}, deps); launched || refusal.ReasonCode != "harness-conflict" {
+		t.Fatalf("a codex-only repository launched claude: %+v", *refusal)
+	}
+	setCockpitTargets(cfg)
+	if len(cfg.effectiveTargets()) != 0 {
+		t.Fatal("an empty loaded list left targets")
+	}
+	if problems := validateMatrixConfig(context.Background(), &Config{Inbox: "example/inbox", Matrix: cfg.Matrix}); len(problems) > 0 {
+		for _, p := range problems {
+			if p.Field == "targets" {
+				t.Fatal("config validation still requires a static target")
+			}
+		}
 	}
 	// A config copy, as the owner-grant store keeps, reads the same live list.
+	setCockpitTargets(cfg, Target{Repo: "example/other", Agents: []string{"claude"}})
 	clone, err := cloneOwnerNativeConfig(cfg)
 	if err != nil || cockpitRepos(clone.effectiveTargets()) != "example/other" {
 		t.Fatal("the grant store copy lost the cockpit list")
 	}
-	setCockpitTargets(cfg, Target{Repo: "example/third", Agents: []string{"agy"}})
-	if cockpitRepos(clone.effectiveTargets()) != "example/third" {
+	setCockpitTargets(cfg, Target{Repo: "example/project", Agents: []string{"agy"}}, Target{Repo: "example/third", Agents: []string{"agy"}})
+	if cockpitRepos(clone.effectiveTargets()) != "example/project,example/third" {
 		t.Fatal("the grant store copy did not see the swap")
 	}
 	bin := t.TempDir()
@@ -141,13 +175,14 @@ func TestEffectiveTargetsStaticWinsAndEmptyLabelIsNeverPolled(t *testing.T) {
 	writeFixture(t, filepath.Join(bin, "gh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_CALLS\"\nprintf '[]'\n")
 	_ = os.Chmod(filepath.Join(bin, "gh"), 0700)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	c := &Coord{cfg: cfg, st: loadState(filepath.Join(t.TempDir(), "state.json")), source: newFakeSource()}
-	if _, _, ok := c.pollIssues(context.Background()); !ok {
+	cfg.Targets = append(cfg.Targets, Target{Label: "proj", Repo: "example/third"})
+	pc := &Coord{cfg: cfg, st: loadState(filepath.Join(t.TempDir(), "state.json")), source: newFakeSource()}
+	if _, _, ok := pc.pollIssues(context.Background()); !ok {
 		t.Fatal("poll failed")
 	}
 	raw, _ := os.ReadFile(calls)
-	if strings.Count(string(raw), "--label harness ") != 1 || strings.Count(string(raw), "--label proj ") != 1 || strings.Contains(string(raw), "--label  ") || strings.Count(string(raw), "issue list") != 2 {
-		t.Fatalf("inbox poll is not one call per distinct non-empty label: %q", raw)
+	if strings.Count(string(raw), "--label proj ") != 1 || strings.Contains(string(raw), "--label harness ") || strings.Contains(string(raw), "--label  ") || strings.Count(string(raw), "issue list") != 1 {
+		t.Fatalf("inbox poll is not one call per distinct non-empty label of an enabled target: %q", raw)
 	}
 }
 
@@ -337,5 +372,76 @@ func TestOwnerGrantWithoutTargetPinBindsTheHeadAtInstall(t *testing.T) {
 	other.OperationID = "22222222-2222-4222-8222-222222222222"
 	if refused := s.install(context.Background(), other); refused.State != "REFUSED" || !strings.Contains(logs.String(), "the matrix or target revision is not pinned") {
 		t.Fatalf("an unreadable head was granted: %+v %q", refused, logs.String())
+	}
+}
+
+// Enabling a repository in the cockpit and posting /swarm before the first scan
+// launches it; a comment from before the switch never does. A re-enable moves
+// the start forward.
+func TestCockpitRepositoryScanStartsAtSince(t *testing.T) {
+	c, f, _ := sourceFixture(t)
+	c.cfg.Targets = c.cfg.Targets[:1]
+	now := time.Now().UTC()
+	enabled := now.Add(-4 * time.Minute)
+	setCockpitTargets(c.cfg, Target{Repo: "example/inbox", Agents: []string{"codex"}, since: enabled}, Target{Repo: sourceRepo, Agents: []string{"codex"}, since: enabled})
+	f.post(sourceRepo, 2063, 3100000050, ownerGitHubID, sourceTrigger, enabled.Add(-time.Minute)) // before agents were on
+	f.post(sourceRepo, 2063, 3100000051, ownerGitHubID, sourceTrigger, enabled.Add(time.Minute))  // after, before the first scan
+	c.sourceTick(context.Background())
+	if c.st.SourceBindings[3100000051] == nil || c.st.SourceBindings[3100000050] != nil {
+		t.Fatalf("first scan did not start at since: %+v", c.st.SourceBindings)
+	}
+	if got := c.st.SourceStarts[sourceRepo]; !got.Equal(enabled.Truncate(time.Second)) {
+		t.Fatalf("start %v, want since", got)
+	}
+	again := now.Add(-time.Minute) // turned off, then on again
+	setCockpitTargets(c.cfg, Target{Repo: "example/inbox", Agents: []string{"codex"}, since: enabled}, Target{Repo: sourceRepo, Agents: []string{"codex"}, since: again})
+	f.issues[sourceRepo+"#2064"] = sourceIssueView{NodeID: "I_source_2064", Title: "Fix more", State: "OPEN"}
+	f.post(sourceRepo, 2064, 3100000052, ownerGitHubID, sourceTrigger, again.Add(-20*time.Second)) // while it was off
+	c.sourceTick(context.Background())
+	if c.st.SourceBindings[3100000052] != nil || !c.st.SourceStarts[sourceRepo].Equal(again.Truncate(time.Second)) {
+		t.Fatalf("a re-enable did not move the start forward: start=%v bindings=%d", c.st.SourceStarts[sourceRepo], len(c.st.SourceBindings))
+	}
+}
+
+// A persisted LIVE comment grant for a repository only the cockpit lists is
+// recovered on restart, because the snapshot loads before grant recovery.
+func TestOwnerGrantForCockpitRepositoryRecoversAfterRestart(t *testing.T) {
+	s, r, _ := ownerPortFixture(t, "claude")
+	_ = os.Remove(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"))
+	r.Trigger = ownerNativeCommentTrigger
+	r.ExpectedBriefDigest = shaText([]byte("/swarm\nharness: claude\nrepo: example/project\n\nFix it."))
+	r.NativeOverride.Route = ownerNativeRoute{Harness: "claude", Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}
+	spool := privateTestRoot(t)
+	writeCockpitTargets(t, spool, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["claude"],"since":"2026-01-01T00:00:00.000Z"}]}`, 0600)
+	boot := func() *Config {
+		cfg, err := cloneOwnerNativeConfig(s.cfg)
+		if err != nil {
+			t.Fatal("config copy")
+		}
+		cfg.Targets, cfg.ActionRequestRoot, cfg.OwnerNativeGrantPort = nil, spool, &s.options
+		cfg.cockpit = &cockpitTargetSource{}
+		return cfg
+	}
+	first := boot()
+	(&Coord{cfg: first}).refreshCockpitTargets()
+	store, err := newOwnerNativeGrantStore(context.Background(), first, s.options, s.deps)
+	if err != nil {
+		t.Fatal("store")
+	}
+	if ack := store.install(context.Background(), r); ack.State != "LIVE" {
+		t.Fatalf("cockpit-only comment grant not LIVE: %+v", ack)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &Coord{cfg: boot()} // a restart: a fresh, empty cockpit source
+	c.startOwnerGrantsWithTargets(ctx)
+	if c.ownerGrants == nil {
+		t.Fatal("grant store not started")
+	}
+	c.ownerGrants.mu.Lock()
+	_, recovered := c.ownerGrants.active[r.OperationID]
+	c.ownerGrants.mu.Unlock()
+	if !recovered {
+		t.Fatal("persisted cockpit grant not recovered")
 	}
 }

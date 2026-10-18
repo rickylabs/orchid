@@ -132,10 +132,11 @@ the required `need_cap`, or every account out of budget this tick.
 Which repositories agents may work in is set in the Cockpit app: it publishes the
 enabled repositories and their allowed agents as `targets.json` in the private
 action spool, and orchid reads it every tick (no restart; the last good list is
-kept if the file is unreadable). A Cockpit target has no inbox label and refuses
-a route whose agent it does not allow. The static `targets[]` stay as a bootstrap
-fallback and win over a Cockpit entry for the same repository; they live in the
-config, restart to apply:
+kept if the file is unreadable). Once a snapshot has loaded it is authoritative:
+a repository turned off in the app is no target, and a route whose agent the app
+does not allow is refused. The static `targets[]` are only a bootstrap fallback
+before the first snapshot; afterwards they lend metadata (label, priority,
+automerge, ...) to the same repository. They live in the config, restart to apply:
 
 - `disabled: true` — pause NEW spawns for a target; live jobs keep running and
   issues are still polled (so they aren't torn down). Use to halt a target without

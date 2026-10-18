@@ -164,8 +164,10 @@ type Target struct {
 	// then launches. Off by default, because bot_login may be the owner's own
 	// account, and assigning yourself an issue must not launch an agent.
 	MirrorAssignments bool `json:"mirror_assignments"`
-	// cockpit marks a target the cockpit published; its Agents is an allow-list.
+	// cockpit marks a target the cockpit published; its Agents is an allow-list
+	// and since is when agents were last turned on for the repository.
 	cockpit bool
+	since   time.Time
 }
 
 // Gov holds the quota-pacing knobs (the governor — paces against the Max
@@ -2248,8 +2250,15 @@ func newCoord(cfg *Config) *Coord {
 	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID(), claudeLinks: &claudeLinkStore{}}
 }
 
-func (c *Coord) run(ctx context.Context) {
+// startOwnerGrantsWithTargets loads the cockpit targets before the owner-grant
+// store recovers, so a saved grant for a cockpit repository is valid on restart.
+func (c *Coord) startOwnerGrantsWithTargets(ctx context.Context) {
+	c.refreshCockpitTargets()
 	c.startOwnerNativeGrants(ctx)
+}
+
+func (c *Coord) run(ctx context.Context) {
+	c.startOwnerGrantsWithTargets(ctx)
 	if c.cfg.OwnerNativeGrantPort != nil {
 		if c.ownerGrants == nil {
 			log.Printf("owner-native-grant-port UNKNOWN reason=override-invalid")
@@ -4540,8 +4549,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	if cfg.Inbox == "" || len(cfg.Hosts) == 0 || len(cfg.Targets) == 0 {
-		log.Fatalf("config: inbox, hosts, and targets are required")
+	if cfg.Inbox == "" || len(cfg.Hosts) == 0 {
+		log.Fatalf("config: inbox and hosts are required") // targets may come from the cockpit alone
 	}
 	log.Printf("divybot: inbox=%s hosts=%d targets=%d governor=%v", cfg.Inbox, len(cfg.Hosts), len(cfg.Targets), cfg.Governor.Enabled)
 
