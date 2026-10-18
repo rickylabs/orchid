@@ -20,7 +20,7 @@ The Cockpit also publishes which repositories agents may work in, as one snapsho
 {"schema_version":1,"targets":[{"repo":"example/project","agents":["claude","codex"],"since":"2026-01-01T00:00:00.000Z"}]}
 ```
 
-The file must be a regular, nonsymlink file with mode `0600` or `0660`, at most 64 KiB. `repo` is `owner/name`, unique ignoring case, at most 256 entries; `agents` is a non-empty, duplicate-free subset of `claude`, `codex`, `agy`, `opencode`; `since` is when agents were last turned on for the repository, an ISO UTC time no more than a few minutes in the future. An empty `targets` list turns every repository off.
+The file must be a regular, nonsymlink file with mode `0600` or `0660`, at most 64 KiB. `repo` is `owner/name`, unique ignoring case, at most 256 entries; `agents` is a non-empty, duplicate-free subset of `claude`, `codex`, `agy`, `opencode`; `since` is when agents were last turned on for the repository, an ISO UTC time no more than a few minutes in the future. An empty `targets` list turns every repository off for new work. Existing workers remain supervised until their issue closes or their normal completion/stop path finishes. Inbox jobs missing from the enabled-target poll are read individually; an unreadable or unknown issue state makes the poll incomplete and prevents teardown.
 
 Divybot reads the snapshot at the start of every tick, before the action requests, the source scan and admission; no restart is needed. A missing file before the first load means no Cockpit list yet. An unreadable or invalid snapshot keeps the last good list and logs the problem once per distinct reason, never with the file contents. A changed valid list is swapped atomically and logged as `dispatch targets from cockpit: N (<repos>)`.
 

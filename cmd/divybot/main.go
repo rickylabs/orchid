@@ -2760,7 +2760,48 @@ func (c *Coord) pollIssues(ctx context.Context) (open map[int]Issue, all map[int
 	if !c.pollSourceBindings(ctx, open, all) {
 		ok = false
 	}
+	if !c.pollRunningInboxJobs(ctx, open, all) {
+		ok = false
+	}
 	return open, all, ok
+}
+
+// A target switch only controls new work. Keep supervising existing inbox jobs
+// even when their repository is no longer in the cockpit list. Source bindings
+// have their own checks above. Read only jobs absent from the target poll, and
+// treat an unreadable issue as an incomplete poll, never proof of closure.
+func (c *Coord) pollRunningInboxJobs(ctx context.Context, open map[int]Issue, all map[int]bool) bool {
+	c.st.mu.Lock()
+	var missing []int
+	for n := range c.st.Jobs {
+		if _, source := c.st.SourceBindings[n]; !source && !all[n] {
+			missing = append(missing, n)
+		}
+	}
+	c.st.mu.Unlock()
+	sort.Ints(missing)
+	ok := true
+	for _, n := range missing {
+		var v struct {
+			ID, Title, Body, State string
+			Number                 int
+			Labels                 []struct{ Name string }
+		}
+		err := ghJSON(ctx, &v, "issue", "view", strconv.Itoa(n), "--repo", c.cfg.Inbox, "--json", "id,number,title,body,labels,state")
+		if err != nil || v.Number != n || v.ID == "" || (v.State != "OPEN" && v.State != "CLOSED") {
+			log.Printf("poll running inbox issue #%d: state unconfirmed; preserving job", n)
+			ok = false
+			continue
+		}
+		if v.State == "OPEN" {
+			is := Issue{ID: v.ID, Number: n, Title: v.Title, Body: v.Body}
+			for _, label := range v.Labels {
+				is.Labels = append(is.Labels, label.Name)
+			}
+			open[n], all[n] = is, true
+		}
+	}
+	return ok
 }
 
 // agentRef is a live herdr agent resolved to an issue number, with the handles

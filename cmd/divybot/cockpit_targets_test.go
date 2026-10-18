@@ -445,3 +445,65 @@ func TestOwnerGrantForCockpitRepositoryRecoversAfterRestart(t *testing.T) {
 		t.Fatal("persisted cockpit grant not recovered")
 	}
 }
+
+// The cockpit list controls admission, not the lifetime of an existing worker.
+// An unrelated open issue must not make a dropped repository look closed.
+func TestCockpitTargetsKeepRunningInboxJobsInPoll(t *testing.T) {
+	for _, tc := range []struct {
+		name, state string
+		partial     bool
+		wantOpen    bool
+		wantOK      bool
+	}{
+		{"partial-open", "OPEN", true, true, true},
+		{"empty-open", "OPEN", false, true, true},
+		{"partial-closed", "CLOSED", true, false, true},
+		{"partial-unreadable", "error", true, false, false},
+		{"partial-unknown", "UNKNOWN", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Inbox: "example/inbox", Targets: []Target{{Label: "old", Repo: "example/old"}, {Label: "kept", Repo: "example/kept"}}}
+			setCockpitTargets(cfg)
+			if tc.partial {
+				setCockpitTargets(cfg, Target{Repo: "example/kept", Agents: []string{"claude"}})
+			}
+			c := &Coord{cfg: cfg, st: loadState(filepath.Join(t.TempDir(), "state.json")), source: newFakeSource()}
+			c.st.Jobs[395] = &Job{Repo: "example/old"}
+			if tc.partial {
+				c.st.Jobs[396] = &Job{Repo: "example/kept"}
+			}
+			bin := t.TempDir()
+			calls := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("GH_CALLS", calls)
+			t.Setenv("GH_STATE", tc.state)
+			writeFixture(t, filepath.Join(bin, "gh"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GH_CALLS"
+case "$1 $2" in
+"issue list") printf '%s' '[{"id":"I_396","number":396,"title":"Other","body":"","labels":[{"name":"kept"}]}]' ;;
+"issue view")
+  [ "$GH_STATE" != error ] || exit 1
+  printf '{"id":"I_395","number":395,"title":"Running","body":"Existing brief","labels":[{"name":"old"}],"state":"%s"}' "$GH_STATE" ;;
+*) exit 1 ;;
+esac
+`)
+			_ = os.Chmod(filepath.Join(bin, "gh"), 0700)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			open, all, ok := c.pollIssues(context.Background())
+			if ok != tc.wantOK || all[395] != tc.wantOpen || (open[395].Number == 395) != tc.wantOpen {
+				t.Fatalf("poll ok=%v all=%v open=%v; want ok=%v tracked=%v", ok, all, open, tc.wantOK, tc.wantOpen)
+			}
+			if tc.wantOpen {
+				if teardownEligible(context.Background(), 395, all, ok, func(context.Context, int) string { return "OPEN" }) {
+					t.Fatal("target removal made an open job eligible for teardown")
+				}
+				if _, _, authorized := c.resolveTarget(open[395]); authorized {
+					t.Fatal("keeping a running job restored target authorization")
+				}
+			}
+			raw, _ := os.ReadFile(calls)
+			if strings.Count(string(raw), "issue view 395 ") != 1 || strings.Contains(string(raw), "issue view 396 ") || strings.Contains(string(raw), "--label old ") {
+				t.Fatalf("poll must read only the tracked issue in a dropped target: %s", raw)
+			}
+		})
+	}
+}
