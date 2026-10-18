@@ -919,6 +919,13 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 			return deliveryRefused("multiple-new-turns")
 		}
 		t := page.Turns[0]
+		// The app-server lists a new turn before its user message item: still pending.
+		if t.Status == "inProgress" && t.Items == 0 { // guard:candidate-materializing
+			if !goalSleep(ctx, a.every) {
+				return deliveryRefused("deadline")
+			}
+			continue
+		}
 		if reason := candidateRefusal(t, r.receipt.Digest, r.receipt.Length); reason != "" {
 			return deliveryRefused(reason)
 		}

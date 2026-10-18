@@ -128,6 +128,21 @@ func TestAcceptanceExactInputShape(t *testing.T) {
 	}
 }
 
+// Live: the new turn is listed in progress with no items before its user message lands.
+func TestAcceptanceWaitsForMaterializingTurn(t *testing.T) {
+	h := newAccHarness(t)
+	empty := 2
+	h.f.page = func(f *accFixture, i int) ([]any, any) {
+		turns, cursor := accDefaultPage(f, i)
+		if f.getSent() != "" && empty > 0 {
+			empty--
+			turns[0] = accTurn(accNewTurn, "inProgress")
+		}
+		return turns, cursor
+	}
+	accAccepted(t, h, h.accept(accSent))
+}
+
 // R13: the same goal under another nonce is a different command.
 func TestAcceptanceExactDigestOnly(t *testing.T) {
 	other := strings.ReplaceAll(accSent, "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210")
