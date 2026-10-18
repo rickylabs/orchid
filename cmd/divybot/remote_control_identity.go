@@ -116,6 +116,10 @@ func (h Host) preGoalRemoteIdentity(ctx context.Context, kind, label string, run
 		return goalError("remote-control-identity-unconfirmed")
 	}
 	run.TUIProcess = process
+	if !run.HookConfirmed {
+		// Observers only: the launch never depends on this identity being published.
+		_ = publishCodexSession(ctx, label, run, location, h.herdr, time.Now().UnixNano()) // guard:codex-session-publish
+	}
 	return nil
 }
 
