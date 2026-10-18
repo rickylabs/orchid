@@ -130,17 +130,11 @@ func validateMatrixConfig(ctx context.Context, cfg *Config) []matrixConfigProble
 			bad(fmt.Sprintf("hosts[%d].claude_child_event_root", i), "absolute-clean-home-path-required")
 		}
 	}
-	if len(cfg.Targets) == 0 {
-		bad("targets", "at-least-one-target-required")
-	}
+	// A target needs no pin: without one a launch starts from the default-branch
+	// head. A pin present in matrix.target_revisions must still be a full commit.
 	for i, t := range cfg.Targets {
-		field := fmt.Sprintf("targets[%d].repo", i)
 		if !repositoryName.MatchString(t.Repo) {
-			bad(field, "repository-required")
-			continue
-		}
-		if !sourceRevision.MatchString(m.TargetRevisions[t.Repo]) {
-			bad(fmt.Sprintf("matrix.target_revisions (target %d)", i), "full-lowercase-commit-required")
+			bad(fmt.Sprintf("targets[%d].repo", i), "repository-required")
 		}
 	}
 	if m.ProfileRevision != "" && !sourceRevision.MatchString(m.ProfileRevision) { // guard:profile-revision-config
@@ -214,10 +208,11 @@ type matrixConfigDeps struct {
 	command func(context.Context, string, string, []byte, ...string) ([]byte, error)
 	read    func(context.Context, string, string, string) (string, error)
 	resolve func(context.Context, MatrixConfig, matrixRequest) (matrixRoute, error)
+	head    func(context.Context, string) (string, error) // default-branch head; nil = unreadable
 }
 
 func configDeps() matrixConfigDeps {
-	return matrixConfigDeps{matrixCommand, readRoutingFile, resolveMatrix}
+	return matrixConfigDeps{matrixCommand, readRoutingFile, resolveMatrix, readTargetHead}
 }
 
 func fetchMatrixIssue(ctx context.Context, cfg *Config, n int, d matrixConfigDeps) (Issue, []matrixConfigProblem) {
@@ -241,13 +236,14 @@ func fetchMatrixIssue(ctx context.Context, cfg *Config, n int, d matrixConfigDep
 // This is policy preflight with hypothetical native eligibility, NOT quota or
 // placement admission. It never constructs a coordinator, reserves or launches.
 func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string, d matrixConfigDeps) []matrixConfigProblem {
-	found := false
-	for _, t := range cfg.Targets {
+	var target *Target
+	for _, t := range cfg.effectiveTargets() {
 		if t.Repo == repo {
-			found = true
+			target = &t
+			break
 		}
 	}
-	if !found {
+	if target == nil {
 		return configProblem("target", "repository-not-configured")
 	}
 	o := parseOverrides(is.Body)
@@ -268,7 +264,11 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 		return configProblem("matrix.profile_revision", "profile-unavailable")
 	}
 	if req.Override != nil {
-		req.WorklogText, err = d.read(ctx, repo, cfg.Matrix.TargetRevisions[repo], req.Override.WorklogPath)
+		revision, ok := targetBase(ctx, cfg.Matrix, repo, d.head)
+		if !ok {
+			return configProblem(matrixReasons["target-revision-invalid"].field, "target-revision-invalid")
+		}
+		req.WorklogText, err = d.read(ctx, repo, revision, req.Override.WorklogPath)
 		if err != nil {
 			return configProblem("matrix.grants.ownerMatrixOverride.worklogPath", "override-worklog-unavailable")
 		}
@@ -291,6 +291,9 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 		return configProblem("issue.router", string(routerErr.(matrixReason)))
 	}
 	if o.Harness != "" && o.Harness != route.Transport && !(req.owner && (o.Harness == "codex-run" && route.Transport == "codex" || o.Harness == "opencode-run" && route.Transport == "opencode")) {
+		return configProblem("issue.harness", "harness-conflict")
+	}
+	if !target.allowsTransport(route.Transport) {
 		return configProblem("issue.harness", "harness-conflict")
 	}
 	if _, _, err := resolveRouteBudget(cfg.Matrix, route.Tier, profile, o); err != nil {
@@ -324,21 +327,11 @@ func buildMatrixConfig(ctx context.Context, cfg *Config, source, receipt string,
 		return configProblem("matrix.revision", "existing-pin-mismatch-not-overwritten")
 	}
 	cfg.Matrix.Revision = revision
-	if cfg.Matrix.TargetRevisions == nil {
-		cfg.Matrix.TargetRevisions = map[string]string{}
-	}
+	// Target pins are optional overrides the operator sets; the build writes none.
 	for _, t := range cfg.Targets {
 		if !repositoryName.MatchString(t.Repo) {
 			return configProblem("targets.repo", "repository-required")
 		}
-		if cfg.Matrix.TargetRevisions[t.Repo] != "" {
-			continue
-		}
-		b, err := d.command(ctx, "", "gh", nil, "api", "repos/"+t.Repo+"/commits/HEAD", "--jq", ".sha")
-		if err != nil {
-			return configProblem("matrix.target_revisions", "target-head-read-failed")
-		}
-		cfg.Matrix.TargetRevisions[t.Repo] = strings.TrimSpace(string(b))
 	}
 	if cfg.Matrix.Pins == nil {
 		cfg.Matrix.Pins = map[string]MatrixPin{}

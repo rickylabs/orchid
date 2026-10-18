@@ -199,7 +199,7 @@ func (c *Coord) retryAttempt(ctx context.Context, is Issue, target Target, expec
 	var refusal matrixRefusal
 	_, launched := c.matrixAttempt(ctx, is.Number, is, target, budget, matrixAttemptDeps{
 		report: func(r matrixRefusal) { refusal = r }, read: readRoutingFile, resolve: resolveMatrix,
-		persist: persistMatrixReceipt, host: c.pickHost, launch: c.spawn,
+		persist: persistMatrixReceipt, host: c.pickHost, launch: c.spawn, head: readTargetHead,
 		retry: &expected, preflight: preflight,
 	})
 	return launched, refusal

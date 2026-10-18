@@ -455,7 +455,7 @@ func sourceIssueNumber(issueURL string) int {
 func (c *Coord) sourceRepos() []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		key := strings.ToLower(t.Repo)
 		if !repositoryName.MatchString(t.Repo) || seen[key] {
 			continue
@@ -515,6 +515,16 @@ func (c *Coord) scanSourceRepo(ctx context.Context, repo string, now time.Time, 
 		c.st.SourceScans = map[string]sourceScan{}
 	}
 	cursor, started := c.st.SourceCursors[repo]
+	// A cockpit repository starts where agents were turned on, never before: its
+	// first scan reads from then in this same scan, so a /swarm posted between
+	// the switch and the scan launches; a re-enable moves the start forward.
+	since, enabled := c.cfg.sourceSince(repo)
+	since = since.Truncate(time.Second) // GitHub times are whole seconds
+	if enabled && (!started || since.After(c.st.SourceStarts[repo])) {
+		cursor, started = since.Add(-time.Second), true // GitHub's since is exclusive
+		c.st.SourceCursors[repo], c.st.SourceStarts[repo] = cursor, since
+		delete(c.st.SourceScans, repo)
+	}
 	if !started { // guard:source-first-start
 		c.st.SourceCursors[repo] = now
 		c.st.SourceStarts[repo] = now
@@ -1221,9 +1231,11 @@ func (b sourceBinding) author() int64 {
 
 func (b sourceBinding) issue(c *Coord) Issue {
 	is := Issue{ID: b.IssueID, Number: int(b.Comment), Title: b.Title, Body: b.Body, Source: &issueSource{Repo: b.Repo, Number: b.Issue, Author: b.author()}}
-	for _, t := range c.cfg.Targets {
+	for _, t := range c.cfg.effectiveTargets() {
 		if strings.EqualFold(t.Repo, b.Repo) {
-			is.Labels = []string{t.Label}
+			if t.Label != "" {
+				is.Labels = []string{t.Label}
+			}
 			break
 		}
 	}

@@ -571,7 +571,16 @@ type durableMatrixReceipt struct {
 	owner    *receiptOwner
 	dispatch *dispatchBinding
 	profile  *workerProfile
+	base     string         // the target commit recorded as BaseRevision; the checkout uses it
 	attempt  *launchAttempt // nil outside a matrix launch
+}
+
+// baseRevision is the recorded launch base, or "" without a matrix launch.
+func (r *durableMatrixReceipt) baseRevision() string {
+	if r == nil {
+		return ""
+	}
+	return r.base
 }
 
 // workerProfile is the Harness profile the dispatcher read and pinned for this launch.
@@ -756,8 +765,38 @@ type matrixAttemptDeps struct {
 	launch    func(context.Context, int, Issue, Host, string, Overrides, *durableMatrixReceipt) error
 	host      func(Target, string) (Host, bool)
 	ownerHost func(Target, string) (Host, bool)
+	head      func(context.Context, string) (string, error) // default-branch head; nil = unreadable
 	retry     *retryExpectation
 	preflight bool
+}
+
+// readTargetHead reads a repository's default-branch head commit.
+func readTargetHead(ctx context.Context, repo string) (string, error) {
+	if !repositoryName.MatchString(repo) {
+		return "", matrixSite("target-head.arguments", errMatrix)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, e := matrixCommand(ctx, "", "gh", nil, "api", "repos/"+repo+"/commits/HEAD", "--jq", ".sha")
+	if e != nil {
+		return "", matrixSite("target-head.command", e)
+	}
+	return string(out), nil
+}
+
+// targetBase is the commit a launch starts from: the optional pin in
+// matrix.target_revisions, else the default-branch head read now. ok=false when
+// the pin is not a full lowercase commit or the head cannot be read.
+func targetBase(ctx context.Context, m MatrixConfig, repo string, head func(context.Context, string) (string, error)) (string, bool) {
+	if pin, pinned := m.TargetRevisions[repo]; pinned {
+		return pin, sourceRevision.MatchString(pin)
+	}
+	if head == nil || !repositoryName.MatchString(repo) {
+		return "", false
+	}
+	read, e := head(ctx, repo)
+	read = strings.TrimSpace(read)
+	return read, e == nil && sourceRevision.MatchString(read)
 }
 
 type retryExpectation struct {
@@ -810,8 +849,20 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		report(refusalFor(e))
 		return "", false
 	}
-	revision := cfg.TargetRevisions[target.Repo]
-	if !sourceRevision.MatchString(revision) {
+	// The base commit is the pin when one is set, else the default-branch head,
+	// read once per attempt only when it is needed.
+	revision, based := "", false
+	base := func() bool {
+		if !based {
+			var ok bool
+			if revision, ok = targetBase(ctx, cfg, target.Repo, d.head); !ok {
+				revision = ""
+			}
+			based = true
+		}
+		return revision != ""
+	}
+	if pin, pinned := cfg.TargetRevisions[target.Repo]; pinned && !sourceRevision.MatchString(pin) {
 		return refuse("target-revision-invalid")
 	}
 	// leaf.md itself declares the unnamed-profile default; its routing still comes from Markdown.
@@ -833,6 +884,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		return "", false
 	}
 	if req.Override != nil {
+		if !base() {
+			return refuse("target-revision-invalid")
+		}
 		req.WorklogText, e = d.read(ctx, target.Repo, revision, req.Override.WorklogPath)
 		if e != nil {
 			report(refusalWithReason(e, "override-worklog-unavailable"))
@@ -879,6 +933,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	}
 	if err := routeRouterError(route, o); err != nil {
 		return refuse(string(err.(matrixReason)))
+	}
+	if !target.allowsTransport(route.Transport) {
+		return refuse("harness-conflict") // the cockpit does not allow this agent here
 	}
 	var openCodeProvider string
 	if agent == "opencode" {
@@ -931,6 +988,9 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 	if d.retry != nil && !retryPinsMatch(*d.retry, cfg, o.Profile, route, host) {
 		return refuse("retry-pins-unavailable")
 	}
+	if !base() {
+		return refuse("target-revision-invalid")
+	}
 	if c.dry || d.preflight {
 		return route.Transport, true
 	}
@@ -938,7 +998,8 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		IssueID, Repo, BriefDigest, ProfileRevision, ProfileDigest, Host string
 		Request                                                          matrixRequest
 		Route                                                            matrixRoute
-	}{is.ID, target.Repo, briefDigest(is), profileRevision, shaText([]byte(req.ProfileText)), host.Name, req, route}
+		BaseRevision                                                     string
+	}{is.ID, target.Repo, briefDigest(is), profileRevision, shaText([]byte(req.ProfileText)), host.Name, req, route, revision}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
 	if d.retry != nil {
@@ -965,6 +1026,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		Provider: route.Provider, Model: route.Model, Role: route.Role, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	handle.profile = &workerProfile{Name: o.Profile, Revision: profileRevision, Text: req.ProfileText} // guard:worker-profile
+	handle.base = revision
 	if e := handle.writeDispatch("reserved", nil); e != nil {
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
 		return "", false

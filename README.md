@@ -28,7 +28,9 @@ GH_TOKEN=$(gh auth token) ./divybot -config divybot.json
 
 Config is one JSON file (inbox repo, hosts, targets, governor) — see
 [divybot.example.json](cmd/divybot/divybot.example.json). Open work with
-`gh issue create --label <target>`.
+`gh issue create --label <target>`. Once the Cockpit publishes `targets.json` in
+the action spool (read every tick), it decides which repositories are targets
+([action delivery](docs/action-delivery.md#cockpit-dispatch-targets)).
 
 ## Interactive startup deadline
 

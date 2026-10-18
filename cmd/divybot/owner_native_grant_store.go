@@ -195,6 +195,7 @@ func cloneOwnerNativeConfig(cfg *Config) (*Config, error) {
 	if json.Unmarshal(raw, &copy) != nil {
 		return nil, errMatrix
 	}
+	copy.cockpit = cfg.cockpit // the cockpit target list is shared, never copied
 	return &copy, nil
 }
 
@@ -341,7 +342,9 @@ func ownerNativeExplain(err error, fallback string) string {
 // still fences a record that the file approved.
 const ownerNativeAppApproval = "owner-app-approval-v1\x00"
 
-func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, error) {
+// approval binds the request to the current inbox, the matrix revision and the
+// target revision the record carries: the optional pin, or the head read at install.
+func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest, revision string) (string, error) {
 	if !s.healthy() || !ownerNativeRequestValid(r) {
 		return "", ownerNativeWhy("the private grant store is unhealthy or the request is malformed")
 	}
@@ -350,15 +353,14 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 		// Owner rule (Eric, 2026-10-04): the verified owner's Approve in Cockpit is
 		// the approval. Only the operator peer reaches this endpoint, and it is the
 		// same UID that owns the approval root, so a file adds no authority. The
-		// approval is bound to the current inbox and pins, as a file would be.
-		target := s.cfg.Matrix.TargetRevisions[r.Target]
+		// approval is bound to the current inbox and revisions, as a file would be.
 		if !s.targetEnabled(r.Target) {
 			return "", ownerNativeWhy("the target is not configured or is disabled")
 		}
-		if !sourceRevision.MatchString(s.cfg.Matrix.Revision) || !sourceRevision.MatchString(target) {
+		if !sourceRevision.MatchString(s.cfg.Matrix.Revision) || !s.revisionAllowed(r.Target, revision) {
 			return "", ownerNativeWhy("the matrix or target revision is not pinned")
 		}
-		raw, err := json.Marshal(ownerNativeApproval{SchemaVersion: 1, Authorizer: ownerNativeAuthorizer(r), Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: target, Request: r})
+		raw, err := json.Marshal(ownerNativeApproval{SchemaVersion: 1, Authorizer: ownerNativeAuthorizer(r), Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: revision, Request: r})
 		if err != nil {
 			return "", errMatrix
 		}
@@ -368,15 +370,45 @@ func (s *ownerNativeGrantStore) approval(r ownerNativeInstallRequest) (string, e
 	var a ownerNativeApproval
 	if err != nil || ownerNativeStrictJSON(raw, &a) != nil || a.SchemaVersion != 1 || a.Authorizer != ownerNativeAuthorizer(r) || a.Inbox != s.cfg.Inbox ||
 		!sourceRevision.MatchString(a.MatrixRevision) || a.MatrixRevision != s.cfg.Matrix.Revision ||
-		!sourceRevision.MatchString(a.TargetRevision) || a.TargetRevision != s.cfg.Matrix.TargetRevisions[r.Target] || !reflect.DeepEqual(a.Request, r) {
+		a.TargetRevision != revision || !s.revisionAllowed(r.Target, a.TargetRevision) || !reflect.DeepEqual(a.Request, r) {
 		return "", ownerNativeWhy("an operator approval file exists for this launch and does not match it")
 	}
 	return shaText(raw), nil
 }
 
+// revisionAllowed: a full lowercase commit, equal to the target's pin when one is set.
+func (s *ownerNativeGrantStore) revisionAllowed(target, revision string) bool {
+	pin, pinned := s.cfg.Matrix.TargetRevisions[target]
+	return sourceRevision.MatchString(revision) && (!pinned || pin == revision)
+}
+
+// installRevision is the target revision a new record carries: the pin when one
+// is set, else the default-branch head read now. A retried install keeps the
+// revision its first attempt recorded, so one operation never binds two bases.
+// "" when the head cannot be read.
+func (s *ownerNativeGrantStore) installRevision(ctx context.Context, r ownerNativeInstallRequest) string {
+	if pin, pinned := s.cfg.Matrix.TargetRevisions[r.Target]; pinned {
+		return pin
+	}
+	if !s.targetEnabled(r.Target) {
+		return "" // refused by the approval; no read for a target Orchid does not serve
+	}
+	if raw, err := ownerNativePrivateRead(s.recordPath(r.OperationID), os.Getuid()); err == nil {
+		var prior ownerNativeGrantRecord
+		if ownerNativeStrictJSON(raw, &prior) == nil && reflect.DeepEqual(prior.Request, r) && sourceRevision.MatchString(prior.TargetRevision) {
+			return prior.TargetRevision
+		}
+	}
+	head, ok := targetBase(ctx, s.cfg.Matrix, r.Target, s.deps.head)
+	if !ok {
+		return ""
+	}
+	return head
+}
+
 // targetEnabled: the repository is a configured, enabled target.
 func (s *ownerNativeGrantStore) targetEnabled(repo string) bool {
-	for _, t := range s.cfg.Targets {
+	for _, t := range s.cfg.effectiveTargets() {
 		if t.Repo == repo && !t.Disabled {
 			return true
 		}
@@ -429,7 +461,7 @@ const ownerNativeTrigger = "harness"
 // the plain reason it resolves to none.
 func (s *ownerNativeGrantStore) targetResolution(is Issue, labels []string) (Target, string) {
 	is.Labels = append(append([]string{}, labels...), ownerNativeTrigger) // guard:grant-target-trigger-label
-	tgt, reason, ok := resolveTargetIn(s.cfg.Targets, is)
+	tgt, reason, ok := resolveTargetIn(s.cfg.effectiveTargets(), is)
 	if !ok {
 		return Target{}, "no-target-label"
 	}
@@ -447,12 +479,13 @@ func ownerNativeIssueMatches(bound ownerNativeIssue, current ownerNativeIssue, i
 }
 
 func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeInstallRequest) (ownerNativeGrantRecord, error) {
-	digest, err := s.approval(r)
+	revision := s.installRevision(ctx, r)
+	digest, err := s.approval(r, revision)
 	if err != nil {
 		return ownerNativeGrantRecord{}, err
 	}
 	if r.Trigger == ownerNativeCommentTrigger {
-		return s.makeCommentRecord(ctx, r, digest)
+		return s.makeCommentRecord(ctx, r, digest, revision)
 	}
 	is, err := s.fetchIssue(ctx, r.IssueNumber)
 	switch {
@@ -474,7 +507,7 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue does not launch in the approved target (" + reason + ")")
 	}
 	found := false
-	for _, t := range s.cfg.Targets {
+	for _, t := range s.cfg.effectiveTargets() {
 		if t.Repo == r.Target && !t.Disabled {
 			found = true
 		}
@@ -511,13 +544,13 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 	if problems := validateMatrixIssue(ctx, copy, is.Issue, r.Target, s.deps); len(problems) > 0 {
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue cannot launch on this route (" + problems[0].Field + ": " + problems[0].Reason + ")")
 	}
-	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: s.cfg.Matrix.TargetRevisions[r.Target], ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
+	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: revision, ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
 }
 
 // makeCommentRecord binds a grant to a source issue before the owner posts the
 // trigger. The comment does not exist yet, so its brief is bound by digest only;
 // route and profile are checked against the comment when it is admitted.
-func (s *ownerNativeGrantStore) makeCommentRecord(ctx context.Context, r ownerNativeInstallRequest, digest string) (ownerNativeGrantRecord, error) {
+func (s *ownerNativeGrantStore) makeCommentRecord(ctx context.Context, r ownerNativeInstallRequest, digest, revision string) (ownerNativeGrantRecord, error) {
 	is, err := s.fetchIssueIn(ctx, r.Target, r.IssueNumber)
 	switch {
 	case err != nil:
@@ -544,14 +577,14 @@ func (s *ownerNativeGrantStore) makeCommentRecord(ctx context.Context, r ownerNa
 	if problems := validateMatrixConfig(ctx, copy); len(problems) > 0 {
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the matrix config refuses the grant (" + problems[0].Field + ": " + problems[0].Reason + ")")
 	}
-	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: s.cfg.Matrix.TargetRevisions[r.Target], ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
+	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: revision, ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
 }
 
 // commentGrant is the grant a comment request binds: the source issue, the
 // configured target repository and the digest of the comment to come.
 func (s *ownerNativeGrantStore) commentGrant(r ownerNativeInstallRequest, source Issue) (MatrixGrant, bool) {
 	found := false
-	for _, t := range s.cfg.Targets {
+	for _, t := range s.cfg.effectiveTargets() {
 		if t.Repo == r.Target && !t.Disabled {
 			found = true
 		}
@@ -567,7 +600,7 @@ func (s *ownerNativeGrantStore) recordValid(record ownerNativeGrantRecord) bool 
 		return s.commentRecordValid(record)
 	}
 	found := false
-	for _, target := range s.cfg.Targets {
+	for _, target := range s.cfg.effectiveTargets() {
 		if target.Repo == record.Request.Target && !target.Disabled {
 			found = true
 		}
@@ -579,11 +612,11 @@ func (s *ownerNativeGrantStore) recordValid(record ownerNativeGrantRecord) bool 
 	if !found || profile != record.Request.Profile || !s.targetMatches(record.Issue.Issue, record.Issue.Labels, record.Request.Target) {
 		return false
 	}
-	if record.SchemaVersion != 1 || record.Inbox != s.cfg.Inbox || record.MatrixRevision != s.cfg.Matrix.Revision || record.TargetRevision != s.cfg.Matrix.TargetRevisions[record.Request.Target] || !ownerNativeRequestValid(record.Request) ||
+	if record.SchemaVersion != 1 || record.Inbox != s.cfg.Inbox || record.MatrixRevision != s.cfg.Matrix.Revision || !s.revisionAllowed(record.Request.Target, record.TargetRevision) || !ownerNativeRequestValid(record.Request) ||
 		record.Issue.Issue.Number != record.Request.IssueNumber || record.Issue.Issue.ID != record.Request.ExpectedIssueID || record.Grant.BriefDigest != record.Request.ExpectedBriefDigest || !ownerNativeIssueMatches(record.Issue, record.Issue, true) {
 		return false
 	}
-	approval, err := s.approval(record.Request)
+	approval, err := s.approval(record.Request, record.TargetRevision)
 	if err != nil || approval != record.ApprovalDigest {
 		return false
 	}
@@ -599,11 +632,11 @@ func (s *ownerNativeGrantStore) recordValid(record ownerNativeGrantRecord) bool 
 
 func (s *ownerNativeGrantStore) commentRecordValid(record ownerNativeGrantRecord) bool {
 	r := record.Request
-	if record.SchemaVersion != 1 || record.Inbox != s.cfg.Inbox || record.MatrixRevision != s.cfg.Matrix.Revision || record.TargetRevision != s.cfg.Matrix.TargetRevisions[r.Target] || !ownerNativeRequestValid(r) ||
+	if record.SchemaVersion != 1 || record.Inbox != s.cfg.Inbox || record.MatrixRevision != s.cfg.Matrix.Revision || !s.revisionAllowed(r.Target, record.TargetRevision) || !ownerNativeRequestValid(r) ||
 		record.Issue.Issue.Number != r.IssueNumber || record.Issue.Issue.ID != r.ExpectedIssueID || record.Issue.State != "OPEN" || record.Grant.BriefDigest != r.ExpectedBriefDigest {
 		return false
 	}
-	approval, err := s.approval(r)
+	approval, err := s.approval(r, record.TargetRevision)
 	if err != nil || approval != record.ApprovalDigest {
 		return false
 	}

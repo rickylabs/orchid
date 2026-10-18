@@ -116,13 +116,13 @@ func TestPolicyGrantInstallRefusals(t *testing.T) {
 
 func TestPolicyAndOwnerApprovalsNeverShareADigest(t *testing.T) {
 	s, r, _ := policyGrantFixture(t, 3100000074, policyBody)
-	policy, err := s.approval(r)
+	policy, err := s.approval(r, s.cfg.Matrix.TargetRevisions[r.Target])
 	if err != nil {
 		t.Fatal(err)
 	}
 	owner := r
 	owner.Policy = nil
-	plain, err := s.approval(owner)
+	plain, err := s.approval(owner, s.cfg.Matrix.TargetRevisions[owner.Target])
 	if err != nil || plain == policy {
 		t.Fatalf("policy and owner approvals share a digest: %v", err)
 	}
@@ -135,11 +135,11 @@ func TestPolicyAndOwnerApprovalsNeverShareADigest(t *testing.T) {
 		}
 	}
 	write("eric")
-	if _, err := s.approval(r); err == nil {
+	if _, err := s.approval(r, s.cfg.Matrix.TargetRevisions[r.Target]); err == nil {
 		t.Fatal("an owner-authorized file approved a policy grant")
 	}
 	write("policy")
-	if _, err := s.approval(r); err != nil {
+	if _, err := s.approval(r, s.cfg.Matrix.TargetRevisions[r.Target]); err != nil {
 		t.Fatalf("a policy-authorized file was refused: %v", err)
 	}
 }

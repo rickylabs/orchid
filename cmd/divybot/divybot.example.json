@@ -3,9 +3,7 @@
     "source": "<ABSOLUTE_CLEAN_HARNESS_CHECKOUT>",
     "revision": "<FULL_HARNESS_COMMIT>",
     "receipt_root": "<ABSOLUTE_PRIVATE_RECEIPT_DIRECTORY>",
-    "target_revisions": {
-      "<TARGET_OWNER>/<TARGET_REPOSITORY>": "<FULL_TARGET_COMMIT>"
-    },
+    "target_revisions": {},
     "pins": {},
     "budget_defaults": {
       "feature": { "leaf": 12000 }

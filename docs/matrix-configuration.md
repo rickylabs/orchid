@@ -18,9 +18,7 @@ never commit the resolved file. Copying the example unchanged is not a working d
     "source": "<ABSOLUTE_CLEAN_HARNESS_CHECKOUT>",
     "revision": "<FULL_HARNESS_COMMIT>",
     "receipt_root": "<ABSOLUTE_PRIVATE_RECEIPT_DIRECTORY>",
-    "target_revisions": {
-      "<TARGET_OWNER>/<TARGET_REPOSITORY>": "<FULL_TARGET_COMMIT>"
-    },
+    "target_revisions": {},
     "pins": {},
     "grants": []
   }
@@ -29,8 +27,11 @@ never commit the resolved file. Copying the example unchanged is not a working d
 
 `source` must be a clean checkout, including no untracked files, with the first-party
 runtime files and Deno available. `revision` is its exact lowercase 40-character HEAD.
-Each configured target repository needs its own exact target commit; profiles and owner
-worklog entries are read from that revision. `receipt_root` must already exist, mode 0700,
+A target needs no pinned commit: a launch starts from the repository's default-branch head,
+read at launch (`gh api repos/<TARGET_REPOSITORY>/commits/HEAD --jq .sha`) and recorded as
+`BaseRevision` in the run's private `binding.json`; owner worklog entries are read at that
+commit. An entry in `target_revisions` is an optional pin that overrides the head; it must be
+a full lowercase commit. `receipt_root` must already exist, mode 0700,
 outside any Git worktree, with no symlink aliases. Config and output directories are private.
 
 `pins` and `grants` may be empty. There is **no unconditional grant requirement** for an
@@ -63,10 +64,9 @@ If preparing an existing matrix block, keep valid pins or deliberately remove on
 you intend to resolve again from the private input copy.
 
 The command canonicalizes the checkout location, reads `git rev-parse HEAD`, verifies clean
-source, and fills missing target revisions with the result of
-`gh api repos/<TARGET_REPOSITORY>/commits/HEAD --jq .sha`. Existing target pins are retained.
-It fetches the entire inbox issue using `gh issue view --json id,number,title,body`, reads its
-profile at the target pin, then invokes the real bridge. GitHub access is read-only. Native
+source, and writes no target pins (existing optional pins are retained). It fetches the entire
+inbox issue using `gh issue view --json id,number,title,body`, reads its profile at the Harness
+profile revision, then invokes the real bridge. GitHub access is read-only. Native
 transport eligibility is hypothetical during this check; it is not a quota observation.
 
 The candidate is created exclusively with mode 0600; an existing output file is never
@@ -108,7 +108,8 @@ pin, configure `pins` privately and include `ownerMatrixOverride` in the grant i
 
 That object is the value of `ownerMatrixOverride`, not a standalone grant. Its authorizer must
 be `owner`; `pin` names the configured pin, whose values must match the authorized route.
-The exact first-party owner-override worklog entry must already exist at the target revision.
+The exact first-party owner-override worklog entry must already exist at the target's base
+commit (its pin, or the default-branch head).
 Issue prose cannot create it. Privileged-tier authorization is a separate requirement.
 
 The builder calls production `briefDigest`: SHA-256 of `json.Marshal` of the Go struct with
@@ -129,7 +130,7 @@ An edited issue needs a new matching grant if its route requires authority.
 Exit 0 means configuration and selected-issue policy preflight passed. Exit 2 names a fixed
 field and reason, such as `matrix.revision: full-lowercase-commit-required`; no input values
 or subprocess diagnostics are echoed. Duplicate/unknown matrix JSON fields, missing source,
-dirty or mismatched revisions, unsafe receipt roots, missing target pins, malformed grants,
+dirty or mismatched revisions, unsafe receipt roots, malformed optional target pins, malformed grants,
 and selected-issue authorization/profile errors refuse. Arbitrary model/effort policy remains
 owned by the pinned Harness source. Unused pins/grants receive structural checks; selected
 issue policy is resolved by the bridge unless a matching owner-native grant selects the route.

@@ -730,7 +730,7 @@ func TestOwnerNativeLiveGrantRecoveredScopeGuards(t *testing.T) {
 			case "profile":
 				record.Request.Profile = "other-profile"
 				ownerPortWriteApproval(t, s, record.Request)
-				approval, _ := s.approval(record.Request)
+				approval, _ := s.approval(record.Request, record.TargetRevision)
 				record.ApprovalDigest = approval
 			case "static-conflict":
 				s.cfg.Matrix.Grants = []MatrixGrant{record.Grant}
