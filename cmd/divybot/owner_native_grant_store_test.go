@@ -357,6 +357,8 @@ func TestOwnerNativeLiveGrantRefusalsLogOnePlainReason(t *testing.T) {
 		"mismatched-file": "an operator approval file exists for this launch and does not match it",
 		"wrong-profile":   "the brief's profile is not the approved profile",
 		"static-conflict": "a startup grant already covers this issue and brief",
+		// A repository Orchid has no target for is named as such, not as a missing pin.
+		"unconfigured-target": "the target is not configured or is disabled",
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, r, _ := ownerPortFixture(t, "claude")
@@ -371,6 +373,9 @@ func TestOwnerNativeLiveGrantRefusalsLogOnePlainReason(t *testing.T) {
 				r.Profile = "other-profile"
 			case "static-conflict":
 				s.cfg.Matrix.Grants = []MatrixGrant{{IssueID: "synthetic-node", Repo: r.Target, BriefDigest: r.ExpectedBriefDigest, NativeOverride: r.NativeOverride}}
+			case "unconfigured-target":
+				_ = os.Remove(filepath.Join(s.options.ApprovalRoot, r.ApprovalRef+".json"))
+				r.Target = "other/project"
 			}
 			var logs bytes.Buffer
 			prior := log.Writer()

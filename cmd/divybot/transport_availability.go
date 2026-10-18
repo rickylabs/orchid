@@ -58,6 +58,14 @@ func buildTransportAvailability(budget map[string]int, quotas map[string]quota, 
 		Transports: rows}
 }
 
+// transportAvailabilityValidFor covers two tick intervals, so one missed tick
+// does not blank the snapshot. A tick runs on a Herdr fleet event or, without
+// one, every fleetRecoveryEvery; a snapshot valid for only two poll intervals
+// expired between quiet ticks and readers saw availability as unknown.
+func transportAvailabilityValidFor(cfg *Config) time.Duration {
+	return 2 * max(durOr(cfg.PollInterval, 30*time.Second), fleetRecoveryEvery)
+}
+
 // publishTransportAvailability replaces the snapshot, or removes it when this
 // tick cannot publish one, so a reader never keeps a decision past its tick.
 func publishTransportAvailability(receiptRoot string, owner *receiptOwner, snapshot transportAvailabilitySnapshot) error {
@@ -91,9 +99,8 @@ func (c *Coord) publishTransportAvailability(budget map[string]int, seats transp
 			quotas[transport] = c.gov.q[transport]
 		}
 		c.gov.mu.Unlock()
-		// Valid for two poll intervals: one missed tick does not blank it.
 		snapshot := buildTransportAvailability(budget, quotas, now, c.cfg.Governor.sampleIntervalDur(),
-			c.cfg.Governor.WeeklyCeiling, 2*durOr(c.cfg.PollInterval, 30*time.Second), c.cfg.UnmeteredTransports, pools)
+			c.cfg.Governor.WeeklyCeiling, transportAvailabilityValidFor(c.cfg), c.cfg.UnmeteredTransports, pools)
 		snapshot.ProviderBudgets, err = buildProviderBudgetDecisions(c.cfg.ProviderBudgets, now, snapshot.ValidUntil)
 		if c.cfg.Matrix.TransportCapacity { // guard:capacity-reader-first
 			snapshot.TransportCapacity = buildTransportCapacity(seats, c.cfg, pools, quotas, now)
