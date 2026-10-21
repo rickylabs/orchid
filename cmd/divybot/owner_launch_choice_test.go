@@ -71,7 +71,7 @@ func TestOwnerArbitraryChoiceReachesLaunch(t *testing.T) {
 }
 
 func TestOwnerOpenCodeCatalogIsAdvisoryBeforeSeat(t *testing.T) {
-	for _, mode := range []string{"missing-model", "missing-variant", "fallback-agent"} {
+	for _, mode := range []string{"missing-model", "missing-variant"} {
 		t.Run(mode, func(t *testing.T) {
 			h, j, calls := openCodeHostFixture(t, mode)
 			o := Overrides{Model: j.OpenCode.Route.qualifiedModel(), Effort: readOwnerChoices(t).Choices[3].Effort}
@@ -81,13 +81,11 @@ func TestOwnerOpenCodeCatalogIsAdvisoryBeforeSeat(t *testing.T) {
 			if err != nil || pane != j.Pane || workspace != j.Workspace {
 				t.Fatal("catalog withheld owner seat", err)
 			}
-			if !strings.Contains(calls(), `"bin": "herdr"`) || strings.Contains(calls(), `"models"`) || strings.Contains(calls(), `"debug"`) {
+			if !strings.Contains(calls(), `"bin": "herdr"`) || strings.Contains(calls(), `"model.list"`) {
 				t.Fatal("owner launch still used catalog admission")
 			}
-			raw, err := os.ReadFile(j.OpenCode.Cwd + "/.divybot-opencode/state/opencode/model.json")
-			var state struct{ Variant map[string]string }
-			if err != nil || json.Unmarshal(raw, &state) != nil || state.Variant[o.Model] != o.Effort {
-				t.Fatal("requested variant was not staged", err)
+			if !strings.Contains(calls(), `\"model\":\"`+o.Model+`#`+o.Effort+`\"`) {
+				t.Fatal("requested variant was not staged in the 2.x model ID")
 			}
 		})
 	}

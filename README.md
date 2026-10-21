@@ -105,8 +105,16 @@ allowlist. Off-matrix overrides and evaluator restrictions remain enforced.
 Opt in to provider seats in private dispatcher configuration, for example:
 
 ```json
-{"opencode":{"providers":{"example-provider":{"max_active":2}}}}
+{"opencode":{"binary":"$HOME/.local/bin/opencode","database_prefix":"opencode-v2-","providers":{"example-provider":{"max_active":2}}}}
 ```
+
+`binary` is the host's OpenCode 2.x CLI; it must be named `opencode`, because Herdr
+starts the canonical executable from the pane `PATH`, so its directory is put first
+on that `PATH`. A leading `$HOME/` is expanded by the host shell. Without it, no
+OpenCode seat is created. `database_prefix` (default `opencode-v2-`) names each
+run's own database, `<prefix><session ID>.db` in OpenCode's data directory: no 2.x
+run opens the 1.x `opencode.db` or a database shared with other runs, and every
+OpenCode command runs `--standalone`, on a private server that exits with it.
 
 Each provider limit is an integer from 0 through 256; omitted or zero disables
 that pool. This is a concurrency ceiling for registered seats, not a vendor credit
@@ -118,18 +126,22 @@ and have free host capacity. Trusted owner-native requests may also select
 Owner-native requests attempt the exact CLI choice regardless of pool or declared
 host capacity.
 
-For autonomous `opencode` launches, read-only native catalog and resolved-agent commands
-confirm the provider, exact model, and requested variant before seat creation.
+For autonomous `opencode` launches, the 2.x `model.list` API on a private in-memory
+host confirms the provider, exact model, and requested variant before seat creation.
 Trusted owner-native launches attempt the requested model and variant directly;
-catalog membership and discovery failures are informational. The full TUI receives a
-process-local model overlay and a private `.divybot-opencode/` state tree with the
-variant seeded explicitly; provider default seeds an empty selection. This avoids
-the native TUI's unavailable-model fallback and inherited variant preferences.
+catalog membership and discovery failures are informational. The full TUI starts with
+`--standalone --session <ID>`, a session ID chosen before launch, and a process-local
+overlay naming the `build` agent and the 2.x model ID `provider/model#variant`
+(provider default omits the variant). A private `.divybot-opencode/` state tree keeps
+the TUI's recent-model choices from replacing the route.
 Existing permission rules remain in effect; no standing user configuration changes.
 
 Goal delivery uses one Herdr prompt and the existing durable registration fence.
-Bounded native session/export reads must agree on the exact occupant, checkout,
-fresh session, first prompt, variant, and assistant provider/model. Native API
+Bounded read-only reads of the run's own database (SQLite `mode=ro`, `query_only`,
+never a second OpenCode host, which would resume the run's claimed session) must
+agree on the exact occupant, checkout, fresh session, first prompt, variant,
+`build` agent and assistant provider/model; completion also needs the session's
+own `succeeded` idle record. Prompt text never leaves the host, only its digest. Native API
 response attestation is not inferred from argv or the startup display. A completed
 empty/whitespace answer, provider error, route mismatch, or missing terminal
 evidence blocks the run loudly and durably. Blocked runs keep the issue open and
@@ -223,15 +235,13 @@ and certifies a session. The dispatcher sends that prompt once and re-reads insi
 the existing 120-second budget. An expired or canceled read cannot confirm the
 goal or write a private native binding, including a late positive result.
 
-The fresh per-run TUI state disables paste summaries: OpenCode 1.18.34 expands a
-long-paste placeholder while retaining an extra trailing space. Literal pastes
-preserve the full goal. Terminal line endings are canonicalized before hashing
-and sending; the native stored prompt must still match that single exact digest.
-The original staged goal remains available, and global TUI settings are unchanged.
-The behavior is defined by the [pinned native paste implementation](https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/tui/src/component/prompt/index.tsx).
+Terminal line endings are canonicalized before hashing and sending; the stored
+prompt must match that single exact digest, allowing only the one trailing space
+the 2.1.2 TUI appends to a paste. The original staged goal remains available, and
+global TUI settings are unchanged.
 
 After durable first-goal confirmation, the dispatcher can publish its certified
-OpenCode session ID only in the reservation's private binding. The native export
+OpenCode session ID only in the reservation's private binding. The run's store
 must still match the full prompt digest, exact selected route and fresh session;
 registered occupant, state sequence and durable receipt are checked around the
 read. Missing or changed evidence stays unbound, and an existing identity is

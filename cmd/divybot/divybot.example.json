@@ -55,6 +55,11 @@
     { "label": "v8x", "repo": "littledivy/v8x", "agents": ["claude", "codex"], "automerge": true, "mirror_assignments": true }
   ],
 
+  "opencode": {
+    "binary": "$HOME/.local/bin/opencode",
+    "database_prefix": "opencode-v2-",
+    "providers": {}
+  },
   "governor": {
     "enabled": true,
     "weekly_ceiling_pct": 92,

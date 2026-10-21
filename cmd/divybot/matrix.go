@@ -573,6 +573,8 @@ type durableMatrixReceipt struct {
 	profile  *workerProfile
 	base     string         // the target commit recorded as BaseRevision; the checkout uses it
 	attempt  *launchAttempt // nil outside a matrix launch
+	// The OpenCode session ID this launch pre-assigned (`--session`), if any.
+	openCodeSession string
 }
 
 // baseRevision is the recorded launch base, or "" without a matrix launch.

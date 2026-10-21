@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,18 +14,19 @@ import (
 
 func TestOpenCodeRouteAndCatalogFailClosed(t *testing.T) {
 	route := openCodeRoute{"fixture-provider", "fixture-model", "high"}
-	good := []byte("fixture-provider/fixture-model\n" + `{"id":"fixture-model","providerID":"fixture-provider","variants":{"high":{}}}` + "\n")
+	good := []byte(`{"location":{"directory":"/fixture/checkout"},"data":[{"id":"fixture-model","providerID":"fixture-provider","variants":[{"id":"high","settings":{}}]},{"id":"other","providerID":"fixture-provider","variants":[]}]}`)
 	if err := validateOpenCodeCatalog(good, route); err != nil {
 		t.Fatal("independent native route should be available", err)
 	}
 	for _, tc := range []struct{ name, raw, reason string }{
-		{"wrong provider", strings.ReplaceAll(string(good), `"providerID":"fixture-provider"`, `"providerID":"foreign"`), "opencode-catalog-unavailable"},
-		{"wrong model", strings.ReplaceAll(string(good), `"id":"fixture-model"`, `"id":"foreign"`), "opencode-catalog-unavailable"},
+		{"wrong provider", strings.ReplaceAll(string(good), `"providerID":"fixture-provider"`, `"providerID":"foreign"`), "opencode-model-unavailable"},
+		{"invalid provider", strings.Replace(string(good), `"providerID":"fixture-provider"`, `"providerID":"Foreign Provider"`, 1), "opencode-catalog-unavailable"},
 		{"missing model", strings.ReplaceAll(string(good), "fixture-model", "other-model"), "opencode-model-unavailable"},
-		{"missing variant", strings.ReplaceAll(string(good), `"high":{}`, `"low":{}`), "opencode-variant-unavailable"},
-		{"bad variant", strings.ReplaceAll(string(good), `"high":{}`, `"high":null`), "opencode-variant-unavailable"},
-		{"duplicate model", string(good) + string(good), "opencode-catalog-unavailable"},
+		{"missing variant", strings.ReplaceAll(string(good), `"id":"high"`, `"id":"low"`), "opencode-variant-unavailable"},
+		{"bad variants", strings.ReplaceAll(string(good), `[{"id":"high","settings":{}}]`, `{"high":{}}`), "opencode-variant-unavailable"},
+		{"duplicate model", strings.Replace(string(good), `{"id":"other"`, `{"id":"fixture-model"`, 1), "opencode-catalog-unavailable"},
 		{"duplicate field", strings.ReplaceAll(string(good), `"id":"fixture-model"`, `"id":"fixture-model","id":"fixture-model"`), "opencode-catalog-unavailable"},
+		{"empty catalog", `{"location":{},"data":[]}`, "opencode-catalog-unavailable"},
 		{"oversized", string(good) + strings.Repeat(" ", 1024*1024), "opencode-catalog-unavailable"},
 		{"native diagnostics", "PRIVATE-OPENCODE-CANARY\n" + string(good), "opencode-catalog-unavailable"},
 	} {
@@ -59,120 +61,31 @@ func TestOpenCodeRouteAndCatalogFailClosed(t *testing.T) {
 	}
 }
 
-// Native-shaped synthetic data only. No API request or real agent is executed.
-func openCodeExportFixture(run *openCodeRun, answer string) []byte {
-	created := int64(2000)
-	user := map[string]any{"id": "fixture-user", "sessionID": run.SessionID, "role": "user", "time": map[string]any{"created": created},
-		"model": map[string]any{"providerID": run.Route.Provider, "modelID": run.Route.Model, "variant": run.Route.Variant}}
-	assistant := map[string]any{"id": "fixture-assistant", "sessionID": run.SessionID, "parentID": "fixture-user", "role": "assistant",
-		"providerID": run.Route.Provider, "modelID": run.Route.Model, "variant": run.Route.Variant, "time": map[string]any{"created": created + 1, "completed": created + 2}, "finish": "stop"}
-	part := func(id, text string) []any {
-		return []any{map[string]any{"type": "text", "sessionID": run.SessionID, "messageID": id, "text": text}}
+func TestOpenCodeRunDatabaseAndCapacity(t *testing.T) {
+	h := Host{OpenCodeCLI: &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode", DatabasePrefix: "opencode-v2-"}}
+	first, err := newOpenCodeSessionID()
+	second, _ := newOpenCodeSessionID()
+	if err != nil || first == second || !openCodeSessionPattern.MatchString(first) {
+		t.Fatal("pre-assigned session IDs are not fresh 2.x IDs")
 	}
-	data, _ := json.Marshal(map[string]any{"info": map[string]any{"id": run.SessionID, "directory": run.Cwd, "time": map[string]any{"created": created}},
-		"messages": []any{map[string]any{"info": user, "parts": part("fixture-user", runPointer)}, map[string]any{"info": assistant, "parts": part("fixture-assistant", answer)}}})
-	return data
-}
-
-func TestOpenCodeNativeExportRequiresRoutePromptAndNonemptyAnswer(t *testing.T) {
-	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000}
-	run.ExpectedPromptDigest = shaText([]byte(runPointer))
-	good := string(openCodeExportFixture(run, "OK"))
-	if confirmed, complete, err := inspectOpenCodeExport([]byte(good), run); !confirmed || !complete || err != nil {
-		t.Fatal("native answer was not confirmed", err)
+	if db, err := h.openCodeRunDatabase(first); err != nil || db != "opencode-v2-"+first+".db" {
+		t.Fatal("run database is not named by its own session", db, err)
 	}
-	for _, tc := range []struct{ name, raw, reason string }{
-		{"empty", string(openCodeExportFixture(run, "")), "opencode-empty-answer"},
-		{"whitespace", string(openCodeExportFixture(run, " \n\t")), "opencode-empty-answer"},
-		{"reasoning only", strings.Replace(good, `"text":"OK","type":"text"`, `"text":"OK","type":"reasoning"`, 1), "opencode-empty-answer"},
-		{"synthetic text", strings.Replace(good, `"text":"OK"`, `"synthetic":true,"text":"OK"`, 1), "opencode-empty-answer"},
-		{"wrong session", strings.Replace(good, `"id":"ses_fixture"`, `"id":"ses_foreign"`, 1), "opencode-output-unconfirmed"},
-		{"wrong cwd", strings.Replace(good, "/fixture/checkout", "/fixture/foreign", 1), "opencode-output-unconfirmed"},
-		{"wrong provider", strings.Replace(good, `"providerID":"fixture-provider"`, `"providerID":"foreign"`, 1), "opencode-route-mismatch"},
-		{"wrong model", strings.Replace(good, `"modelID":"fixture-model"`, `"modelID":"foreign"`, 1), "opencode-route-mismatch"},
-		{"wrong variant", strings.Replace(good, `"variant":"high"`, `"variant":"low"`, 1), "opencode-route-mismatch"},
-		{"wrong assistant variant", strings.Replace(good, `"created":2001},"variant":"high"`, `"created":2001},"variant":"low"`, 1), "opencode-route-mismatch"},
-		{"wrong assistant provider", strings.Replace(good, `"parentID":"fixture-user","providerID":"fixture-provider"`, `"parentID":"fixture-user","providerID":"foreign"`, 1), "opencode-route-mismatch"},
-		{"wrong assistant model", strings.Replace(good, `"finish":"stop","id":"fixture-assistant","modelID":"fixture-model"`, `"finish":"stop","id":"fixture-assistant","modelID":"foreign"`, 1), "opencode-route-mismatch"},
-		{"wrong parent", strings.Replace(good, `"parentID":"fixture-user"`, `"parentID":"foreign"`, 1), "opencode-route-mismatch"},
-		{"wrong prompt", strings.Replace(good, runPointer, "different prompt", 1), "opencode-output-unconfirmed"},
-		{"provider error", strings.Replace(good, `"finish":"stop"`, `"error":{"name":"PRIVATE-OPENCODE-CANARY"},"finish":"stop"`, 1), "opencode-provider-error"},
-		{"duplicate field", strings.Replace(good, `"finish":"stop"`, `"finish":"stop","finish":"stop"`, 1), "opencode-output-unconfirmed"},
-		{"oversized", good + strings.Repeat(" ", 1024*1024), "opencode-output-unconfirmed"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			confirmed, complete, err := inspectOpenCodeExport([]byte(tc.raw), run)
-			if confirmed || complete || err != matrixReason(tc.reason) {
-				t.Fatalf("bad native evidence passed: confirmed=%v completed=%v err=%v", confirmed, complete, err)
-			}
-		})
+	for _, bad := range []string{"", "ses_../x", "ses_a/b", "other_x"} {
+		if _, err := h.openCodeRunDatabase(bad); err == nil {
+			t.Fatal("unsafe run database name accepted", bad)
+		}
 	}
-	stale := *run
-	stale.NotBefore = 3000
-	if _, _, err := inspectOpenCodeExport([]byte(good), &stale); err == nil {
-		t.Fatal("old export confirmed a new launch")
+	if bin, err := h.openCodeBinary(); err != nil || bin != `"$HOME"/'.local/bin/opencode'` {
+		t.Fatal("configured binary not rendered for the host shell", bin, err)
 	}
-	stale.NotBefore = 0
-	if _, _, err := inspectOpenCodeExport([]byte(good), &stale); err == nil {
-		t.Fatal("missing native freshness baseline was accepted")
+	if dir, err := h.openCodeBinaryDir(); err != nil || dir != `"$HOME"/'.local/bin'` {
+		t.Fatal("configured binary directory not rendered for the host shell", dir, err)
 	}
-	stale.NotBefore, stale.CreatedAt = run.NotBefore, 9999
-	if _, _, err := inspectOpenCodeExport([]byte(good), &stale); err == nil {
-		t.Fatal("export replaced the bound session creation time")
-	}
-	// A currently streaming answer can confirm submission, never completion.
-	streaming := strings.Replace(good, `"completed":2002`, `"completed":0`, 1)
-	if confirmed, complete, err := inspectOpenCodeExport([]byte(streaming), run); !confirmed || complete || err != nil {
-		t.Fatal("streaming turn got completion or lost acceptance")
-	}
-	var multiple map[string]any
-	if json.Unmarshal([]byte(good), &multiple) != nil {
-		t.Fatal("invalid synthetic export")
-	}
-	var next map[string]any
-	if json.Unmarshal([]byte(streaming), &next) != nil {
-		t.Fatal("invalid streaming export")
-	}
-	messages := next["messages"].([]any)
-	assistant := messages[1].(map[string]any)
-	assistant["info"].(map[string]any)["id"] = "fixture-later-assistant"
-	assistant["parts"].([]any)[0].(map[string]any)["messageID"] = "fixture-later-assistant"
-	multiple["messages"] = append(multiple["messages"].([]any), assistant)
-	later, _ := json.Marshal(multiple)
-	if confirmed, complete, err := inspectOpenCodeExport(later, run); !confirmed || complete || err != nil {
-		t.Fatal("earlier answer completed a later streaming response")
-	}
-	// A real older parent still cannot complete a newly submitted user turn.
-	var oldParent map[string]any
-	_ = json.Unmarshal([]byte(good), &oldParent)
-	previous := oldParent["messages"].([]any)
-	var followup map[string]any
-	_ = json.Unmarshal([]byte(good), &followup)
-	newUser := followup["messages"].([]any)[0].(map[string]any)
-	newUser["info"].(map[string]any)["id"] = "fixture-new-user"
-	newUser["parts"].([]any)[0].(map[string]any)["messageID"] = "fixture-new-user"
-	oldParent["messages"] = []any{previous[0], newUser, previous[1]}
-	wrongTurn, _ := json.Marshal(oldParent)
-	if confirmed, complete, err := inspectOpenCodeExport(wrongTurn, run); confirmed || complete || err != matrixReason("opencode-route-mismatch") {
-		t.Fatal("an earlier parent completed a different current user turn")
-	}
-}
-
-func TestOpenCodeSessionFreshnessAndCapacity(t *testing.T) {
-	if empty, err := decodeOpenCodeSessions(nil); err != nil || len(empty) != 0 {
-		t.Fatal("native empty index was not recognized without session evidence")
-	}
-	run := &openCodeRun{Cwd: "/fixture/checkout", NotBefore: 2000, ExcludedIDs: []string{"ses_excluded"}}
-	sessions := []openCodeSession{{"ses_old", run.Cwd, 1000}, {"ses_foreign", "/fixture/foreign", 3000}, {"ses_excluded", run.Cwd, 3000}, {"ses_new", run.Cwd, 3000}}
-	if id, err := selectOpenCodeSession(sessions, run); err != nil || id != "ses_new" {
-		t.Fatal("exact fresh session not selected")
-	}
-	if _, err := selectOpenCodeSession(append(sessions, openCodeSession{"ses_ambiguous", run.Cwd, 3000}), run); err == nil {
-		t.Fatal("ambiguous sessions were guessed")
-	}
-	run.SessionID = "ses_other"
-	if _, err := selectOpenCodeSession(sessions, run); err == nil {
-		t.Fatal("a bound native session was replaced")
+	for _, bad := range []string{"", "opencode", "$HOME/../opencode", "/usr/bin/opencode2", "~/bin/opencode", "$HOME/bin/$(x)/opencode", "/a/./opencode"} {
+		if _, err := (Host{OpenCodeCLI: &OpenCodeConfig{Binary: bad}}).openCodeBinary(); err == nil {
+			t.Fatal("unsafe or unconfigured binary accepted", bad)
+		}
 	}
 	config := OpenCodeConfig{Providers: map[string]OpenCodeProvider{"first": {2}, "second": {1}}}
 	jobs := map[int]*Job{1: {Agent: "opencode", OpenCode: &openCodeRun{Route: openCodeRoute{Provider: "first"}}}, 2: {Agent: "codex"}}
@@ -206,12 +119,32 @@ func openCodeHostFixture(t *testing.T, mode string) (Host, *Job, func() string) 
 	t.Setenv("OC_FIXTURE_CWD", cwd)
 	t.Setenv("OC_FIXTURE_MODE", mode)
 	t.Setenv("OC_FIXTURE_POINTER", runPointer)
+	t.Setenv("OC_FIXTURE_SESSION", "ses_fixture")
+	t.Setenv("XDG_DATA_HOME", "")
 	script := `#!/usr/bin/env python3
 import hashlib,json,os,sys,time,pathlib
 root=pathlib.Path(os.environ['OC_FIXTURE_ROOT']);cwd=os.environ['OC_FIXTURE_CWD'];mode=os.environ['OC_FIXTURE_MODE'];a=sys.argv[1:]
 with (root/'calls.jsonl').open('a') as f:f.write(json.dumps({'bin':pathlib.Path(sys.argv[0]).name,'args':a})+'\n')
 def emit(x):print(json.dumps(x))
 prompted=(root/'prompted').exists()
+def store(now):
+ # The two 2.1.2 tables the observer reads; the TUI appends one space to a paste.
+ if mode=='no-session':return
+ import sqlite3
+ data=root/'.local'/'share'/'opencode';data.mkdir(parents=True,exist_ok=True)
+ sid=(root/'session-id').read_text() if (root/'session-id').exists() else os.environ['OC_FIXTURE_SESSION']
+ text=(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER']
+ db=sqlite3.connect(str(data/('opencode-v2-'+sid+'.db')))
+ db.execute('create table if not exists session_v2(id text primary key,directory text,time_created integer,parent_id text)')
+ db.execute('create table if not exists session_message(id text primary key,session_id text,type text,seq integer,time_created integer,data text)')
+ db.execute('insert or replace into session_v2 values(?,?,?,null)',(sid,cwd,now))
+ answer={'time':{'created':now} if mode=='streaming' else {'created':now,'completed':now},'agent':'build','finish':'stop',
+  'model':{'id':'fixture-model','providerID':'foreign' if mode=='wrong-provider' else 'fixture-provider','variant':'high'},
+  'content':[{'type':'text','text':'' if mode=='empty' else 'OK'}]}
+ rows=[('msg_user','user',{'time':{'created':now},'text':text+' ','files':[]}),('msg_answer','assistant',answer)]
+ if mode!='streaming':rows.append(('msg_idle','idle',{'time':{'created':now},'outcome':'succeeded'}))
+ for i,(mid,kind,d) in enumerate(rows):db.execute('insert or replace into session_message values(?,?,?,?,?,?)',(mid,sid,kind,i+1,now,json.dumps(d)))
+ db.commit();os.chmod(str(data/('opencode-v2-'+sid+'.db')),0o600)
 if pathlib.Path(sys.argv[0]).name=='herdr':
  if a[:2]==['workspace','create']:emit({'result':{'workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}})
  elif a[:2] in (['agent','get'],['agent','wait']):
@@ -225,41 +158,15 @@ if pathlib.Path(sys.argv[0]).name=='herdr':
    saved=json.loads(pathlib.Path(os.environ['OC_FIXTURE_STATE']).read_text())['jobs']['7']['opencode_run']
    if saved.get('expectedPromptDigest')!=hashlib.sha256(a[3].encode()).hexdigest() or saved.get('notBefore',0)<1:sys.exit(1)
    (root/'persisted-before-prompt').write_text('yes')
-  (root/'submitted-prompt').write_text(a[3]);(root/'prompted').write_text(str(int(time.time()*1000)));emit({'result':{'accepted':True}})
+  (root/'submitted-prompt').write_text(a[3]);now=int(time.time()*1000);(root/'prompted').write_text(str(now));store(now);emit({'result':{'accepted':True}})
+ elif a[:1]==['fixture-store']:store(int(a[1]))
+ elif a[:2]==['agent','start'] and '--session' in a:(root/'session-id').write_text(a[a.index('--session')+1]);emit({'result':{}})
  else:emit({'result':{}})
 elif pathlib.Path(sys.argv[0]).name=='opencode':
- a=[x for x in a if x!='--pure']
- if a[:1]==['models']:
+ if a[:3]==['api','--standalone','model.list'] and os.environ.get('OPENCODE_DB')==':memory:':
   model='other-model' if mode=='missing-model' else 'fixture-model'
-  print('fixture-provider/'+model);emit({'id':model,'providerID':'fixture-provider','variants':{'low' if mode=='missing-variant' else 'high':{}}})
- elif a[:2]==['debug','agent']:
-  emit({'name':'build','mode':'primary','model':{'providerID':'fixture-provider','modelID':'foreign' if mode=='fallback-agent' else 'fixture-model'}})
- elif a[:2]==['session','list']:
-   if prompted and mode!='no-session':
-    count_file=root/'session-read-count'
-    count=int(count_file.read_text())+1 if count_file.exists() else 1
-    count_file.write_text(str(count))
-    if mode=='delayed-session' and count==1:
-     import socket
-     sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.connect(os.environ['PROMPT_FIXTURE_SOCKET']);sock.sendall(b'{"method":"fixture.wake"}\n');sock.close()
-    if mode!='delayed-session' or count>1:emit([{'id':'ses_fixture','directory':cwd,'created':int((root/'prompted').read_text())}])
- elif a[:1]==['export']:
-  now=int((root/'prompted').read_text());sid='ses_fixture'
-  def stored_prompt():
-   text=(root/'submitted-prompt').read_text() if (root/'submitted-prompt').exists() else os.environ['OC_FIXTURE_POINTER']
-   if mode=='native-terminal' and text.endswith('\n'):text=text[:-1]+' '
-   if mode in ['native-summary','native-summary-startup']:
-    kv_file=pathlib.Path(os.environ['XDG_STATE_HOME'])/'opencode'/'kv.json'
-    kv=json.loads(kv_file.read_text()) if kv_file.exists() and mode!='native-summary-startup' else {}
-    config=json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT','{}'))
-    summary_default=not config.get('experimental',{}).get('disable_paste_summary',False)
-    text=text.replace('\r\n','\n').replace('\r','\n')
-    if kv.get('paste_summary_enabled',summary_default) and (text.strip().count('\n')>=2 or len(text.strip())>150):text=text.strip()+' '
-   return text
-  part=lambda mid,text:{'type':'text','text':text,'sessionID':sid,'messageID':mid}
-  emit({'info':{'id':sid,'directory':cwd,'time':{'created':now}},'messages':[
-   {'info':{'id':'fixture-user','sessionID':sid,'role':'user','time':{'created':now},'model':{'providerID':'fixture-provider','modelID':'fixture-model','variant':'high'}},'parts':[part('fixture-user',stored_prompt())]},
-    {'info':{'id':'fixture-assistant','sessionID':sid,'role':'assistant','parentID':'fixture-user','providerID':'foreign' if mode=='wrong-provider' else 'fixture-provider','modelID':'fixture-model','variant':'high','time':{'created':now,'completed':0 if mode=='streaming' else now},'finish':'stop'},'parts':[part('fixture-assistant','' if mode=='empty' else 'OK')]}]})
+  emit({'location':{'directory':cwd},'data':[{'id':model,'providerID':'fixture-provider','variants':[{'id':'low' if mode=='missing-variant' else 'high'}]}]})
+ else:sys.exit(1)
 elif pathlib.Path(sys.argv[0]).name=='gh':
  if '--body-file' in a:
   with (root/'calls.jsonl').open('a') as f:f.write(json.dumps({'body':pathlib.Path(a[a.index('--body-file')+1]).read_text()})+'\n')
@@ -272,8 +179,9 @@ else:sys.exit(1)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	job := &Job{Issue: 7, Agent: "opencode", Label: "fixture-agent", Pane: "w1:p1", Workspace: "w1", Host: "fixture-host",
-		OpenCode: &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, ExpectedPromptDigest: shaText([]byte(runPointer))}}
-	return Host{Home: root, Name: job.Host}, job, func() string {
+		OpenCode: &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, SessionID: "ses_fixture", ExpectedPromptDigest: shaText([]byte(runPointer))}}
+	cli := &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode", DatabasePrefix: "opencode-v2-"}
+	return Host{Home: root, Name: job.Host, OpenCodeCLI: cli}, job, func() string {
 		b, _ := os.ReadFile(log)
 		return string(b)
 	}
@@ -291,31 +199,25 @@ func TestOpenCodeRegisteredLaunchCatalogBeforeSeatAndIsolatedVariant(t *testing.
 	if strings.Contains(log, "export HARNESS_CLAUDE_CHILD_EVENT_ROOT=") {
 		t.Fatal("Claude child event root escaped into the OpenCode pane")
 	}
-	if !strings.HasPrefix(log, `{"bin": "opencode"`) || !strings.Contains(log, `"--agent", "build", "--model", "fixture-provider/fixture-model"`) || strings.Contains(log, `"prompt"`) {
+	if !strings.HasPrefix(log, `{"bin": "opencode", "args": ["api", "--standalone", "model.list"]}`) || strings.Contains(log, `"prompt"`) {
 		t.Fatal("catalog did not precede registration or startup sent a goal")
 	}
-	statePath := filepath.Join(j.OpenCode.Cwd, ".divybot-opencode", "state", "opencode", "model.json")
-	data, err := os.ReadFile(statePath)
-	var state struct{ Variant map[string]string }
-	if err != nil || json.Unmarshal(data, &state) != nil || state.Variant[j.OpenCode.Route.qualifiedModel()] != "high" {
-		t.Fatal("explicit variant was dropped")
+	// A private --standalone server and a session chosen before launch, in its own database.
+	if !strings.Contains(log, `"--kind", "opencode", "--pane", "w1:p1", "--timeout"`) || !strings.Contains(log, `"--", "--standalone", "--session", "ses_`) ||
+		strings.Contains(log, `"--model"`) || strings.Contains(log, `"--pure"`) {
+		t.Fatal("2.x TUI was not started standalone on a pre-assigned session", log)
 	}
-	kvPath := filepath.Join(filepath.Dir(statePath), "kv.json")
-	kv, kvErr := os.ReadFile(kvPath)
-	if kvErr != nil || string(kv) != `{"paste_summary_enabled":false}` {
-		t.Fatal("launch inherited summary placeholder expansion")
+	if !strings.Contains(log, `export OPENCODE_DB='opencode-v2-ses_`) || !strings.Contains(log, `export PATH=\"$HOME\"/'.local/bin':\"$PATH\"; `) ||
+		!strings.Contains(log, `\"model\":\"fixture-provider/fixture-model#high\"`) || strings.Contains(log, "."+"opencode"+"/bin") {
+		t.Fatal("pane lacks its own database, the configured CLI or the 2.x model ID", log)
 	}
-	kvStat, kvErr := os.Stat(kvPath)
-	if kvErr != nil || kvStat.Mode().Perm() != 0600 {
-		t.Fatal("paste state is not private")
-	}
-	stat, _ := os.Stat(statePath)
-	if stat.Mode().Perm() != 0600 {
-		t.Fatal("launch state is not private")
+	if _, err := os.Stat(filepath.Join(j.OpenCode.Cwd, ".divybot-opencode", "state")); err != nil {
+		t.Fatal("isolated TUI state was not created", err)
 	}
 	env, err := openCodeEnvironment(j.OpenCode.Cwd, j.OpenCode.Route)
-	if err != nil || strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "permission") || env["XDG_STATE_HOME"] == "" || !strings.Contains(env["OPENCODE_CONFIG_CONTENT"], `"disable_paste_summary":true`) {
-		t.Fatal("route changed permission rules or inherited shared state")
+	if err != nil || strings.Contains(env["OPENCODE_CONFIG_CONTENT"], "permission") || env["XDG_STATE_HOME"] == "" ||
+		env["OPENCODE_CONFIG_CONTENT"] != `{"default_agent":"build","model":"fixture-provider/fixture-model#high","share":"disabled"}` {
+		t.Fatal("route changed permission rules or inherited shared state", env)
 	}
 	// Never overwrite a prior state tree (including repository-supplied symlinks).
 	if err := h.prepareOpenCodeLaunch(context.Background(), j.OpenCode.Cwd, j.OpenCode.Route, env); err != matrixReason("opencode-state-unavailable") {
@@ -324,9 +226,12 @@ func TestOpenCodeRegisteredLaunchCatalogBeforeSeatAndIsolatedVariant(t *testing.
 }
 
 func TestOpenCodeCatalogFailureNeverCreatesSeatOrDeliversGoal(t *testing.T) {
-	for _, mode := range []string{"missing-model", "missing-variant", "fallback-agent"} {
+	for _, mode := range []string{"missing-model", "missing-variant", "unconfigured"} {
 		t.Run(mode, func(t *testing.T) {
 			h, j, calls := openCodeHostFixture(t, mode)
+			if mode == "unconfigured" {
+				h.OpenCodeCLI = &OpenCodeConfig{DatabasePrefix: "opencode-v2-"}
+			}
 			o := Overrides{Model: j.OpenCode.Route.qualifiedModel(), Effort: "high"}
 			if _, _, err := h.spawnAgent(context.Background(), j.Label, j.OpenCode.Cwd, nil, "opencode", o, registrationReceipt(t, "opencode", o)); err == nil {
 				t.Fatal("missing native capability was launched")
@@ -384,6 +289,7 @@ func TestOpenCodeEmptyAnswerBlockSurvivesRestartBeforeCompletionActions(t *testi
 	if err := os.WriteFile(filepath.Join(h.Home, "prompted"), []byte("2000"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	openCodeFixtureStore(t, h, 2000)
 	status := map[int]agentRef{j.Issue: {Host: h.Name, Agent: "opencode", Pane: j.Pane, Workspace: j.Workspace, Status: "done"}}
 	c.supervise(context.Background(), j.Issue, j, status, Issue{})
 	reloaded := loadState(statePath)
@@ -416,6 +322,7 @@ func TestOpenCodeUnfinishedOutputNeverCompletesAtDeadline(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(h.Home, "prompted"), []byte("2000"), 0600); err != nil {
 					t.Fatal(err)
 				}
+				openCodeFixtureStore(t, h, 2000)
 				status := map[int]agentRef{j.Issue: {Host: h.Name, Agent: "opencode", Pane: j.Pane, Workspace: j.Workspace, Status: "working"}}
 				c.supervise(context.Background(), j.Issue, j, status, Issue{})
 				if (j.OpenCode.Failure != "") != expired || (expired && j.OpenCode.Failure != "opencode-output-unconfirmed") {
@@ -503,5 +410,12 @@ func TestOpenCodeMatrixProviderAdmissionAndFence(t *testing.T) {
 				t.Fatal("launch ambiguity refunded provider capacity")
 			}
 		})
+	}
+}
+
+func openCodeFixtureStore(t *testing.T, h Host, at int64) {
+	t.Helper()
+	if out, err := exec.Command(filepath.Join(h.Home, ".local", "bin", "herdr"), "fixture-store", strconv.FormatInt(at, 10)).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
 	}
 }

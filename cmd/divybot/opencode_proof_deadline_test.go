@@ -72,17 +72,15 @@ func TestOpenCodePromptWaitDeadlineCannotConfirm(t *testing.T) {
 }
 
 func TestOpenCodeObservationExpiredCannotBindSession(t *testing.T) {
-	for _, phase := range []string{"", "entry", "before", "sessions", "export", "after"} {
+	for _, phase := range []string{"", "entry", "before", "store", "after"} {
 		t.Run(phase, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			route := openCodeRoute{"fixture-provider", "fixture-model", "high"}
 			prompt := "Synthetic full goal and helper."
-			run := &openCodeRun{Route: route, Cwd: "/fixture/checkout", NotBefore: 1000, ExpectedPromptDigest: shaText([]byte(prompt))}
+			run := &openCodeRun{Route: route, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000, ExpectedPromptDigest: shaText([]byte(prompt))}
 			j := &Job{Agent: "opencode", Label: "fixture-agent", Pane: "fixture-pane", Workspace: "fixture-workspace", OpenCode: run}
-			native := *run
-			native.SessionID = "ses_fixture"
-			raw := fixtureExportPrompt(t, &native, prompt)
+			raw := fixtureExportPrompt(t, run, prompt)
 			reads := 0
 			calls := openCodeObservationCalls{
 				agent: func(context.Context, string) (AgentInfo, error) {
@@ -92,14 +90,8 @@ func TestOpenCodeObservationExpiredCannotBindSession(t *testing.T) {
 					}
 					return AgentInfo{Agent: j.Agent, Name: j.Label, PaneID: j.Pane, WorkspaceID: j.Workspace, Cwd: run.Cwd, InteractiveReady: true, StateChangeSeq: 1}, nil
 				},
-				sessions: func(context.Context, *openCodeRun) ([]openCodeSession, error) {
-					if phase == "sessions" {
-						cancel()
-					}
-					return []openCodeSession{{"ses_fixture", run.Cwd, 2000}}, nil
-				},
-				export: func(context.Context, *openCodeRun, string) ([]byte, error) {
-					if phase == "export" {
+				store: func(context.Context, *openCodeRun) ([]byte, error) {
+					if phase == "store" {
 						cancel()
 					}
 					return raw, nil
@@ -113,7 +105,7 @@ func TestOpenCodeObservationExpiredCannotBindSession(t *testing.T) {
 				if !confirmed || !completed || err != nil || run.SessionID != "ses_fixture" || run.CreatedAt != 2000 {
 					t.Fatal("positive native store proof was lost", confirmed, completed, err)
 				}
-			} else if confirmed || completed || err != matrixReason("opencode-output-unconfirmed") || run.SessionID != "" || run.CreatedAt != 0 {
+			} else if confirmed || completed || err != matrixReason("opencode-output-unconfirmed") || run.CreatedAt != 0 {
 				t.Fatal("canceled proof accepted or wrote native identity", confirmed, completed, err, run.SessionID)
 			}
 			if phase == "entry" && reads != 0 {

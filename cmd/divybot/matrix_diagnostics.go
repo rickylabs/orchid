@@ -283,6 +283,7 @@ var matrixSites = map[string]bool{
 	"launch.remote-control-binding":       true,
 
 	"spawn.opencode-route": true, "spawn.opencode-environment": true, "spawn.opencode-preflight": true, "launch.opencode-route": true,
+	"spawn.opencode-binary": true, "spawn.opencode-path": true, "spawn.opencode-session": true, "launch.opencode-session": true,
 	"spawn.native-store-binding": true, "spawn.agy-trust": true, "spawn.agy-readiness": true,
 	"attempt.command-render": true, "spawn.command-render": true, "spawn.registration-budget": true,
 	"spawn.registration-render": true, "spawn.native-integration": true,

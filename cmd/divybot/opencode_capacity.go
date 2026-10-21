@@ -5,10 +5,14 @@ import (
 	"strings"
 )
 
-// This is an explicit operator concurrency limit, not a subscription/credit
+// Providers is an explicit operator concurrency limit, not a subscription/credit
 // meter. No provider is enabled implicitly and OpenCode never borrows Codex quota.
+// Binary is the host's OpenCode 2.x CLI; DatabasePrefix names each run's own
+// database (prefix + session ID + ".db") inside OpenCode's data directory.
 type OpenCodeConfig struct {
-	Providers map[string]OpenCodeProvider `json:"providers"`
+	Providers      map[string]OpenCodeProvider `json:"providers"`
+	Binary         string                      `json:"binary,omitempty"`
+	DatabasePrefix string                      `json:"database_prefix,omitempty"`
 }
 type OpenCodeProvider struct {
 	MaxActive int `json:"max_active"`

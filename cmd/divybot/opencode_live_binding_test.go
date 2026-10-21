@@ -12,42 +12,20 @@ import (
 func TestOpenCodeOnlyFinalStopWithoutContinuationCanComplete(t *testing.T) {
 	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000, ExpectedPromptDigest: shaText([]byte(runPointer))}
 	for _, finish := range []string{"unknown", "length", "content-filter", "tool-calls", ""} {
-		raw := strings.Replace(string(openCodeExportFixture(run, "OK")), `"finish":"stop"`, `"finish":"`+finish+`"`, 1)
-		if confirmed, done, err := inspectOpenCodeExport([]byte(raw), run); !confirmed || done || err != nil {
+		raw := strings.Replace(string(openCodeStoreFixture(run, runPointer, "OK")), `"finish":"stop"`, `"finish":"`+finish+`"`, 1)
+		if confirmed, done, err := inspectStoreFixture([]byte(raw), run); !confirmed || done || err != nil {
 			t.Fatal("nonfinal native finish became completion or lost prompt confirmation", finish)
 		}
 	}
-	var record map[string]any
-	_ = json.Unmarshal(openCodeExportFixture(run, "OK"), &record)
-	assistant := record["messages"].([]any)[1].(map[string]any)
-	assistant["parts"] = append(assistant["parts"].([]any), map[string]any{"type": "tool", "sessionID": run.SessionID, "messageID": "fixture-assistant", "state": map[string]any{"status": "completed"}})
-	raw, _ := json.Marshal(record)
-	if confirmed, done, err := inspectOpenCodeExport(raw, run); !confirmed || done || err != nil {
-		t.Fatal("stop with completed continuation tool passed as final")
+	for _, status := range []string{"streaming", "running", ""} {
+		raw := strings.Replace(string(openCodeStoreFixture(run, runPointer, "OK")), `"content":[`, `"content":[{"type":"tool","status":"`+status+`"},`, 1)
+		if confirmed, done, err := inspectStoreFixture([]byte(raw), run); !confirmed || done || err != nil {
+			t.Fatal("stop with an unfinished tool passed as final", status)
+		}
 	}
-	tool := assistant["parts"].([]any)[1].(map[string]any)
-	tool["metadata"] = map[string]any{"providerExecuted": true}
-	raw, _ = json.Marshal(record)
-	if confirmed, done, err := inspectOpenCodeExport(raw, run); !confirmed || !done || err != nil {
-		t.Fatal("native provider-executed tool blocked a final stop")
-	}
-	delete(tool, "metadata")
-	tool["state"] = map[string]any{"status": "error", "metadata": map[string]any{"interrupted": true}}
-	raw, _ = json.Marshal(record)
-	if confirmed, done, err := inspectOpenCodeExport(raw, run); !confirmed || !done || err != nil {
-		t.Fatal("native cleanup orphan blocked a final stop")
-	}
-	summary := strings.Replace(string(openCodeExportFixture(run, "OK")), `"finish":"stop"`, `"summary":true,"finish":"stop"`, 1)
-	if confirmed, done, err := inspectOpenCodeExport([]byte(summary), run); !confirmed || done || err != nil {
-		t.Fatal("compaction summary became final answer")
-	}
-	badClock := strings.Replace(string(openCodeExportFixture(run, "OK")), `"completed":2002`, `"completed":2000`, 1)
-	if _, done, err := inspectOpenCodeExport([]byte(badClock), run); done || err == nil {
+	badClock := strings.Replace(string(openCodeStoreFixture(run, runPointer, "OK")), `"completed":2002`, `"completed":2000`, 1)
+	if _, done, err := inspectStoreFixture([]byte(badClock), run); done || err == nil {
 		t.Fatal("completion precedes native assistant start")
-	}
-	ignored := strings.Replace(string(openCodeExportFixture(run, "OK")), `"text":"OK"`, `"ignored":true,"text":"OK"`, 1)
-	if _, done, err := inspectOpenCodeExport([]byte(ignored), run); done || err != matrixReason("opencode-empty-answer") {
-		t.Fatal("ignored text passed as an answer")
 	}
 }
 
@@ -86,7 +64,7 @@ func TestOpenCodeNativeIdentityRemainsPrivate(t *testing.T) {
 }
 
 func TestOpenCodeLateBindingAuthorityAndOccupantGuards(t *testing.T) {
-	for _, change := range []string{"", "pending", "run-mode", "missing-digest", "excluded", "wrong-source", "wrong-host", "wrong-reservation", "wrong-route", "wrong-job-route", "wrong-occupant", "not-ready", "changed-sequence", "unconfirmed", "native-error", "changed-native", "changed-dispatch", "changed-binding", "uncertain", "already-bound"} {
+	for _, change := range []string{"", "pending", "run-mode", "missing-digest", "wrong-source", "wrong-host", "wrong-reservation", "wrong-route", "wrong-job-route", "wrong-occupant", "not-ready", "changed-sequence", "unconfirmed", "native-error", "changed-native", "changed-dispatch", "changed-binding", "uncertain", "already-bound"} {
 		t.Run(change, func(t *testing.T) {
 			root, j, receipt := openCodeBindingFixture(t)
 			path := filepath.Join(filepath.Dir(receipt.file), "binding.json")
@@ -107,8 +85,6 @@ func TestOpenCodeLateBindingAuthorityAndOccupantGuards(t *testing.T) {
 				j.RunMode = true
 			case "missing-digest":
 				j.OpenCode.ExpectedPromptDigest = ""
-			case "excluded":
-				j.OpenCode.ExcludedIDs = []string{j.OpenCode.SessionID}
 			case "wrong-source":
 				j.Agent = "claude"
 			case "wrong-host":

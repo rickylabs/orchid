@@ -23,17 +23,10 @@ func fixtureExpectedPrompt(t *testing.T, run *openCodeRun, digest string) {
 
 func fixtureExportPrompt(t *testing.T, run *openCodeRun, prompt string) []byte {
 	t.Helper()
-	var record map[string]any
-	if json.Unmarshal(openCodeExportFixture(run, "OK"), &record) != nil {
-		t.Fatal("native export fixture failed")
-	}
-	user := record["messages"].([]any)[0].(map[string]any)
-	user["parts"].([]any)[0].(map[string]any)["text"] = prompt
-	raw, _ := json.Marshal(record)
-	return raw
+	return openCodeStoreFixture(run, prompt, "OK")
 }
 
-func TestOpenCodeFullGoalExportBoundToPrivateDigest(t *testing.T) {
+func TestOpenCodeFullGoalStoreBoundToPrivateDigest(t *testing.T) {
 	goal := "A complete synthetic brief.\n" + finalCommentBodyInstruction(strings.Repeat("d", 64))
 	for _, tc := range []struct {
 		name, prompt, digest string
@@ -51,7 +44,7 @@ func TestOpenCodeFullGoalExportBoundToPrivateDigest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000}
 			fixtureExpectedPrompt(t, run, tc.digest)
-			confirmed, complete, err := inspectOpenCodeExport(fixtureExportPrompt(t, run, tc.prompt), run)
+			confirmed, complete, err := inspectStoreFixture(fixtureExportPrompt(t, run, tc.prompt), run)
 			if tc.want {
 				if !confirmed || !complete || err != nil {
 					t.Fatal("complete first goal did not match its private binding", err)
