@@ -280,3 +280,59 @@ db=sqlite3.connect(sys.argv[1]);db.execute("insert into session_message values('
 		t.Fatalf("an oversized row was materialized and projected: %d bytes", len(raw))
 	}
 }
+
+// Review round 2: the size scan and the blob fetch read one snapshot. A row that grows past
+// the bound between them (OpenCode streaming into its WAL store) is never what is read.
+func TestOpenCodeRunStoreReadUsesOneSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", "")
+	cwd := filepath.Join(home, "checkout")
+	h := Host{Home: home, SSH: "localhost", OpenCodeCLI: &OpenCodeConfig{}}
+	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, SessionID: "ses_fixture", NotBefore: 1000,
+		ExpectedPromptDigest: shaText([]byte(runPointer))}
+	user, _ := json.Marshal(map[string]any{"time": map[string]any{"created": 2000}, "text": runPointer, "files": []any{}})
+	answer := func(finish, text string) string {
+		out, _ := json.Marshal(map[string]any{"time": map[string]any{"created": 2001, "completed": 2002}, "agent": "build",
+			"model": map[string]any{"id": "fixture-model", "providerID": "fixture-provider", "variant": "high"}, "finish": finish,
+			"content": []any{map[string]any{"type": "text", "text": text}}})
+		return string(out)
+	}
+	idle, _ := json.Marshal(map[string]any{"time": map[string]any{"created": 2003}, "outcome": "succeeded"})
+	path := writeOpenCodeRunStore(t, home, "opencode-v2-ses_fixture.db", run.SessionID, cwd,
+		[][3]string{{"msg_user", "user", string(user)}, {"msg_answer", "assistant", answer("stop", "OK")}, {"msg_idle", "idle", string(idle)}})
+	if out, err := exec.Command("python3", "-c", "import sqlite3,sys;sqlite3.connect(sys.argv[1]).execute('pragma journal_mode=wal')", path).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	// Between the size scan and the blob fetch, another connection grows the answer past 1 MiB.
+	hook := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hook, "sitecustomize.py"), []byte(`import os,sqlite3
+_connect=sqlite3.connect
+class _Store:
+    def __init__(self,db): self._db=db
+    def __getattr__(self,name): return getattr(self._db,name)
+    def execute(self,sql,*args):
+        if sql.startswith('select id,type,seq,cast(data as blob)'):
+            w=_connect(os.environ['GROW_STORE']); w.execute("update session_message set data=? where id='msg_answer'",(open(os.environ['GROWN_ANSWER']).read(),)); w.commit(); w.close()
+        return self._db.execute(sql,*args)
+sqlite3.connect=lambda *a,**k:_Store(_connect(*a,**k))
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", hook)
+	t.Setenv("GROW_STORE", path)
+	grown := filepath.Join(hook, "grown-answer.json")
+	if err := os.WriteFile(grown, []byte(answer("length", strings.Repeat("x", 1536*1024))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROWN_ANSWER", grown)
+	raw, err := h.openCodeStore(context.Background(), run)
+	if err != nil {
+		t.Fatal("a store read under a concurrent writer failed:", err)
+	}
+	if len(raw) > 64*1024 {
+		t.Fatalf("the read materialized a row past the bound it scanned (%d bytes)", len(raw))
+	}
+	if confirmed, complete, _, err := inspectOpenCodeStore(raw, run); !confirmed || !complete || err != nil {
+		t.Fatalf("the read mixed two snapshots (%v %v %v)", confirmed, complete, err)
+	}
+}

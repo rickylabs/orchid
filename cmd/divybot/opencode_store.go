@@ -100,7 +100,9 @@ func openCodeRunDatabase(session string) (string, error) {
 }
 
 // Read-only projection of one run database: `mode=ro`, `query_only`, no OpenCode
-// host (a second host on a run's store would resume its claimed session). Prompt
+// host (a second host on a run's store would resume its claimed session). The header,
+// size scan and blob fetch share one read transaction, so the bounds hold for the rows
+// that are read even while OpenCode writes the store. Prompt
 // text never leaves the host; only its digests do. A missing store or session is
 // an empty observation, not a failure. Field names are the 2.1.2 SessionMessageInfo.
 const openCodeStoreReadScript = `import hashlib,json,os,sqlite3,stat,sys,urllib.parse
@@ -121,13 +123,16 @@ try:
  try: st=os.lstat(p)
  except FileNotFoundError: print(json.dumps({'info':None,'messages':[]})); sys.exit(0)
  assert stat.S_ISREG(st.st_mode) and st.st_uid==os.getuid() and not (st.st_mode & 0o022)
- db=sqlite3.connect('file:'+urllib.parse.quote(p)+'?mode=ro',uri=True,timeout=5)
+ db=sqlite3.connect('file:'+urllib.parse.quote(p)+'?mode=ro',uri=True,timeout=5,isolation_level=None)
  db.execute('PRAGMA query_only=1')
+ db.execute('BEGIN')
  row=db.execute('select id,directory,time_created,parent_id from session_v2 where id=?',(sid,)).fetchone()
  if row is None: print(json.dumps({'info':None,'messages':[]})); sys.exit(0)
  sizes=db.execute('select length(cast(data as blob)) from session_message where session_id=? order by seq limit 1025',(sid,)).fetchall()
  assert len(sizes)<=1024 and all(isinstance(n,int) and 0<=n<=1048576 for (n,) in sizes) and sum(n for (n,) in sizes)<=8388608
  rows=db.execute('select id,type,seq,cast(data as blob) from session_message where session_id=? order by seq limit ?',(sid,len(sizes))).fetchall()
+ assert [len(r[3]) for r in rows]==[n for (n,) in sizes]
+ db.execute('ROLLBACK')
  messages=[]
  for mid,kind,seq,raw in rows:
   d=json.loads(raw.decode('utf-8'),object_pairs_hook=strict); assert isinstance(d,dict)
