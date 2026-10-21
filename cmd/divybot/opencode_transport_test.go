@@ -62,17 +62,17 @@ func TestOpenCodeRouteAndCatalogFailClosed(t *testing.T) {
 }
 
 func TestOpenCodeRunDatabaseAndCapacity(t *testing.T) {
-	h := Host{OpenCodeCLI: &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode", DatabasePrefix: "opencode-v2-"}}
+	h := Host{OpenCodeCLI: &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode"}}
 	first, err := newOpenCodeSessionID()
 	second, _ := newOpenCodeSessionID()
 	if err != nil || first == second || !openCodeSessionPattern.MatchString(first) {
 		t.Fatal("pre-assigned session IDs are not fresh 2.x IDs")
 	}
-	if db, err := h.openCodeRunDatabase(first); err != nil || db != "opencode-v2-"+first+".db" {
+	if db, err := openCodeRunDatabase(first); err != nil || db != "opencode-v2-"+first+".db" {
 		t.Fatal("run database is not named by its own session", db, err)
 	}
 	for _, bad := range []string{"", "ses_../x", "ses_a/b", "other_x"} {
-		if _, err := h.openCodeRunDatabase(bad); err == nil {
+		if _, err := openCodeRunDatabase(bad); err == nil {
 			t.Fatal("unsafe run database name accepted", bad)
 		}
 	}
@@ -180,7 +180,7 @@ else:sys.exit(1)
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	job := &Job{Issue: 7, Agent: "opencode", Label: "fixture-agent", Pane: "w1:p1", Workspace: "w1", Host: "fixture-host",
 		OpenCode: &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, SessionID: "ses_fixture", ExpectedPromptDigest: shaText([]byte(runPointer))}}
-	cli := &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode", DatabasePrefix: "opencode-v2-"}
+	cli := &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode"}
 	return Host{Home: root, Name: job.Host, OpenCodeCLI: cli}, job, func() string {
 		b, _ := os.ReadFile(log)
 		return string(b)
@@ -191,11 +191,17 @@ func TestOpenCodeRegisteredLaunchCatalogBeforeSeatAndIsolatedVariant(t *testing.
 	h, j, calls := openCodeHostFixture(t, "")
 	h.ClaudeChildEventRoot = filepath.Join(h.Home, "runs", "child-events")
 	o := Overrides{Model: j.OpenCode.Route.qualifiedModel(), Effort: "high", Router: "fixture-provider"}
-	pane, ws, err := h.spawnAgent(context.Background(), j.Label, j.OpenCode.Cwd, nil, "opencode", o, registrationReceipt(t, "opencode", o))
+	receipt := registrationReceipt(t, "opencode", o)
+	pane, ws, err := h.spawnAgent(context.Background(), j.Label, j.OpenCode.Cwd, nil, "opencode", o, receipt)
 	if err != nil || pane != j.Pane || ws != j.Workspace {
 		t.Fatal("native registration failed", err)
 	}
 	log := calls()
+	// The pre-assigned session is durable beside the receipt and is the one the TUI was given.
+	staged, stagedErr := readOpenCodeStagedRun(receipt.file)
+	if stagedErr != nil || !strings.Contains(log, `"--session", "`+staged.SessionID+`"`) || staged.Database != openCodeRunDatabasePrefix+staged.SessionID+".db" {
+		t.Fatal("the launched session was not staged durably before the start", stagedErr)
+	}
 	if strings.Contains(log, "export HARNESS_CLAUDE_CHILD_EVENT_ROOT=") {
 		t.Fatal("Claude child event root escaped into the OpenCode pane")
 	}
@@ -230,7 +236,7 @@ func TestOpenCodeCatalogFailureNeverCreatesSeatOrDeliversGoal(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			h, j, calls := openCodeHostFixture(t, mode)
 			if mode == "unconfigured" {
-				h.OpenCodeCLI = &OpenCodeConfig{DatabasePrefix: "opencode-v2-"}
+				h.OpenCodeCLI = &OpenCodeConfig{}
 			}
 			o := Overrides{Model: j.OpenCode.Route.qualifiedModel(), Effort: "high"}
 			if _, _, err := h.spawnAgent(context.Background(), j.Label, j.OpenCode.Cwd, nil, "opencode", o, registrationReceipt(t, "opencode", o)); err == nil {

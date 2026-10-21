@@ -84,7 +84,7 @@ type Mem struct {
 type Host struct {
 	NativeJob       *Job                 `json:"-"`
 	RemoteControl   *RemoteControlConfig `json:"-"`
-	OpenCodeCLI     *OpenCodeConfig      `json:"-"` // the shared opencode block: binary and run database names
+	OpenCodeCLI     *OpenCodeConfig      `json:"-"` // the shared opencode block: the host CLI binary
 	CanonicalCodex  bool                 `json:"-"`
 	RemoteRun       *remoteControlRun    `json:"-"`
 	ShadowScope     *nativeShadowScope   `json:"-"`
@@ -196,9 +196,6 @@ func (g Gov) sampleIntervalDur() time.Duration { return durOr(g.SampleInterval, 
 
 func (c *Config) withDefaults() {
 	c.RemoteControl.defaults()
-	if c.OpenCode.DatabasePrefix == "" {
-		c.OpenCode.DatabasePrefix = "opencode-v2-"
-	}
 	for i := range c.Hosts {
 		c.Hosts[i].RemoteControl = &c.RemoteControl
 		c.Hosts[i].OpenCodeCLI = &c.OpenCode
@@ -289,8 +286,8 @@ func loadConfig(path string) (*Config, error) {
 		}
 	}
 	c.withDefaults()
-	if (c.OpenCode.Binary != "" && !openCodeBinaryPath.MatchString(c.OpenCode.Binary)) || !openCodeDatabasePrefix.MatchString(c.OpenCode.DatabasePrefix) {
-		return nil, fmt.Errorf("opencode.binary or opencode.database_prefix invalid")
+	if c.OpenCode.Binary != "" && !openCodeBinaryPath.MatchString(c.OpenCode.Binary) {
+		return nil, fmt.Errorf("opencode.binary invalid")
 	}
 	if !c.UnmeteredTransports.valid() {
 		return nil, fmt.Errorf("unmetered_transports requires agy max_active 0..256")
@@ -798,14 +795,20 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		env["HOME"] = h.agentHome()
 	}
 	if agent == "opencode" || agent == "opencode-run" {
-		// Every 2.x launch owns its database and its private (--standalone) server.
+		// Every 2.x launch owns its database and its private (--standalone) server. The
+		// pre-assigned session is staged durably beside the receipt before Herdr starts
+		// anything, so a dispatcher that stops after the start still knows the run's store.
 		session, idErr := newOpenCodeSessionID()
 		var database string
 		if idErr == nil {
-			database, idErr = h.openCodeRunDatabase(session)
+			database, idErr = openCodeRunDatabase(session)
 		}
 		if idErr != nil {
 			return "", "", matrixSite("spawn.opencode-session", idErr)
+		}
+		staged := openCodeStagedRun{SessionID: session, Database: database}
+		if e := writePrivateJSON(filepath.Join(filepath.Dir(receipt.file), openCodeStagedRunFile), ".opencode-run-", receipt.owner, staged); e != nil {
+			return "", "", matrixSite("spawn.opencode-staged-session", errMatrix)
 		}
 		if env == nil {
 			env = map[string]string{}
@@ -813,7 +816,8 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		env["OPENCODE_DB"] = database
 		if agent == "opencode" {
 			nativeArgs = append(nativeArgs, "--session", session)
-			receipt.openCodeSession = session
+		} else {
+			env[openCodeRunSessionEnv] = session // `opencode run --session` (overrides.go)
 		}
 	}
 	if agent == "agy" {
@@ -3612,10 +3616,11 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		if routeErr != nil {
 			return matrixSite("launch.opencode-route", routeErr)
 		}
-		if !openCodeSessionPattern.MatchString(receipt.openCodeSession) {
-			return matrixSite("launch.opencode-session", errMatrix)
+		staged, stagedErr := readOpenCodeStagedRun(receipt.file)
+		if stagedErr != nil {
+			return matrixSite("launch.opencode-session", stagedErr)
 		}
-		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir, SessionID: receipt.openCodeSession, ExpectedPromptDigest: shaText([]byte(goal))}
+		j.OpenCode = &openCodeRun{Route: route, Cwd: workdir, SessionID: staged.SessionID, ExpectedPromptDigest: shaText([]byte(goal))}
 	}
 	if agent == "codex" {
 		j.NativeGoal = &dispatchGoal{ReceiptKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"), Intent: intent, Reason: "native-session-unavailable"}

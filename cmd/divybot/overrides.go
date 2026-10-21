@@ -244,7 +244,8 @@ func buildAgentCmd(agent string, o Overrides) (string, error) {
 		// runs in RunMode: PR-path + deadline supervision only). The trailing
 		// sleep holds the pane open so the transcript stays readable until
 		// teardown closes the workspace.
-		cmd := "opencode run --standalone"
+		// The pre-assigned session names this run's database (spawnAgent sets both).
+		cmd := `opencode run --standalone --session "${` + openCodeRunSessionEnv + `:?}"`
 		if ocModel != "" {
 			// 2.x names the variant in the model ID (provider/model#variant).
 			if o.Effort != "" && o.Effort != "provider_default" && o.Effort != "none" {

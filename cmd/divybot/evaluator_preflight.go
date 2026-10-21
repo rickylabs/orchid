@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -78,9 +79,25 @@ func validCatalogResult(r evaluatorCatalogResult) bool {
 	}
 	return false
 }
-func evaluatorCatalogPreflight(ctx context.Context, cfg MatrixConfig, request evaluatorCatalogRequest) (evaluatorCatalogResult, error) {
+
+// evaluatorOpenCodeBinary resolves the configured OpenCode CLI on this host: an
+// absolute path, or `$HOME/`-relative as in `opencode.binary`. Empty when unusable.
+func evaluatorOpenCodeBinary(configured string) string {
+	if !openCodeBinaryPath.MatchString(configured) || strings.Contains(configured, "/../") || strings.Contains(configured, "/./") {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(configured, "$HOME/"); ok {
+		home := os.Getenv("HOME")
+		if !filepath.IsAbs(home) {
+			return ""
+		}
+		return filepath.Join(home, rest)
+	}
+	return configured
+}
+func evaluatorCatalogPreflight(ctx context.Context, cfg MatrixConfig, request evaluatorCatalogRequest, binary string) (evaluatorCatalogResult, error) {
 	var result evaluatorCatalogResult
-	if !validCatalogRequest(request) {
+	if !validCatalogRequest(request) || !filepath.IsAbs(binary) {
 		return result, errMatrix
 	}
 	ctx, cancel := context.WithTimeout(ctx, matrixResolveTimeout)
@@ -98,11 +115,15 @@ func evaluatorCatalogPreflight(ctx context.Context, cfg MatrixConfig, request ev
 	if writeErr != nil || closeErr != nil {
 		return result, errMatrix
 	}
-	input, err := json.Marshal(request)
+	// The bridge passes this exact executable to Harness's preflight and may run nothing else.
+	input, err := json.Marshal(struct {
+		evaluatorCatalogRequest
+		Binary string `json:"binary"`
+	}{request, binary})
 	if err != nil {
 		return result, errMatrix
 	}
-	out, err := matrixCommand(ctx, cfg.Source, "deno", input, "run", "--no-config", "--no-lock", "--no-prompt", "--allow-read="+cfg.Source, "--allow-run=opencode", script.Name())
+	out, err := matrixCommand(ctx, cfg.Source, "deno", input, "run", "--no-config", "--no-lock", "--no-prompt", "--allow-read="+cfg.Source, "--allow-run="+binary, script.Name())
 	if err != nil {
 		return result, err
 	}
@@ -124,8 +145,13 @@ func evaluatorCatalogCLI(args []string, stdout io.Writer) int {
 	source := fs.String("source", "", "clean pinned Harness checkout")
 	revision := fs.String("revision", "", "exact Harness head")
 	requestPath := fs.String("request", "", "JSON evaluator request")
+	opencode := fs.String("opencode", "", "the host's OpenCode CLI, as configured in opencode.binary")
 	if fs.Parse(args) != nil || fs.NArg() != 0 || !filepath.IsAbs(*source) || !sourceRevision.MatchString(*revision) || *requestPath == "" {
 		return refuse("arguments-invalid")
+	}
+	binary := evaluatorOpenCodeBinary(*opencode)
+	if binary == "" {
+		return refuse("opencode-binary-unconfigured")
 	}
 	file, err := os.OpenFile(*requestPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -142,7 +168,7 @@ func evaluatorCatalogCLI(args []string, stdout io.Writer) int {
 	if readErr != nil || closeErr != nil || len(raw) > 64*1024 || strictJSON(raw, &request) != nil || !validCatalogRequest(request) {
 		return refuse("request-invalid")
 	}
-	result, err := evaluatorCatalogPreflight(context.Background(), MatrixConfig{Source: *source, Revision: *revision}, request)
+	result, err := evaluatorCatalogPreflight(context.Background(), MatrixConfig{Source: *source, Revision: *revision}, request, binary)
 	if err != nil {
 		return refuse("preflight-unavailable")
 	}

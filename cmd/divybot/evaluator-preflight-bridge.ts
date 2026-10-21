@@ -8,11 +8,13 @@ try {
   const errors = await import(new URL('packages/routing/matrix/launchability.ts', base).href);
   try {
     if (!['any', 'none'].includes(authority.MATRIX_AUTHORITY?.configuration?.roles[input.role]?.certifies)) throw new Error('routing-invalid');
+    // The configured OpenCode 2.x CLI (opencode.binary), never a bare `opencode` from PATH.
+    if (typeof input.binary !== 'string' || !input.binary.startsWith('/')) throw new Error('routing-invalid');
     const result = await preflight.preflightWorkloadRoute({
       tier: input.tier, role: input.role, generatorModel: input.generatorModel,
       privilegedTierAuthorization: input.authorization,
       unavailableTransports: input.unavailableTransports, worktree: '.',
-    });
+    }, { binary: input.binary });
     console.log(JSON.stringify({ status: 'launchable', launcher: result.launchability.launcher,
       model: result.model, logicalModel: result.logicalModel, family: result.family,
       effort: result.effort, catalogObservedAt: result.catalogObservedAt }));

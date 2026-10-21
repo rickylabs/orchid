@@ -211,7 +211,8 @@ After selecting a clean reviewed Harness checkout, run:
 "$PRIVATE/divybot" matrix evaluator-preflight \
   -source "$HARNESS_CHECKOUT" \
   -revision "$HARNESS_COMMIT" \
-  -request "$PRIVATE/evaluator-request.json"
+  -request "$PRIVATE/evaluator-request.json" \
+  -opencode "$OPENCODE_BINARY"
 ```
 
 The request contains `tier`, an evaluation `role`, and `generatorModel` (the logical model
@@ -222,8 +223,10 @@ come from the pinned Harness configuration document; no daemon model list is int
 The pinned source adapter remains interim under [Harness #270](https://github.com/rickylabs/harness/issues/270).
 
 This command checks the source pin and clean state before and after importing Harness's
-read-only OpenCode preflight. It invokes only `opencode models <provider>` on this host, with
-the upstream output bound and deadline. It never starts a turn, contacts a dispatch host,
+read-only OpenCode preflight. `-opencode` is the host's OpenCode 2.x CLI, as in `opencode.binary`
+(absolute or `$HOME/`-relative); without it the command refuses with `opencode-binary-unconfigured`.
+It invokes only that executable, `api --standalone model.list` over an in-memory database (Harness
+68f804a or later), with the upstream output bound and deadline. It never starts a turn, contacts a dispatch host,
 changes configuration, reserves a receipt, polls issues or posts to GitHub. The request is
 bounded to 64 KiB and unknown/duplicate JSON fields are refused.
 

@@ -105,14 +105,14 @@ allowlist. Off-matrix overrides and evaluator restrictions remain enforced.
 Opt in to provider seats in private dispatcher configuration, for example:
 
 ```json
-{"opencode":{"binary":"$HOME/.local/bin/opencode","database_prefix":"opencode-v2-","providers":{"example-provider":{"max_active":2}}}}
+{"opencode":{"binary":"$HOME/.local/bin/opencode","providers":{"example-provider":{"max_active":2}}}}
 ```
 
 `binary` is the host's OpenCode 2.x CLI; it must be named `opencode`, because Herdr
 starts the canonical executable from the pane `PATH`, so its directory is put first
 on that `PATH`. A leading `$HOME/` is expanded by the host shell. Without it, no
-OpenCode seat is created. `database_prefix` (default `opencode-v2-`) names each
-run's own database, `<prefix><session ID>.db` in OpenCode's data directory: no 2.x
+OpenCode seat is created. Each run's own database is `opencode-v2-<session ID>.db`
+in OpenCode's data directory, the name the Harness reader looks up (not configurable): no 2.x
 run opens the 1.x `opencode.db` or a database shared with other runs, and every
 OpenCode command runs `--standalone`, on a private server that exits with it.
 

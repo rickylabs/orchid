@@ -46,7 +46,7 @@ func openCodeCompletionFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int, 
 		t.Fatal("fixture ssh")
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	c.hosts = map[string]Host{j.Host: {Name: j.Host, SSH: "fixture-host", OpenCodeCLI: &OpenCodeConfig{DatabasePrefix: "opencode-v2-"}}}
+	c.hosts = map[string]Host{j.Host: {Name: j.Host, SSH: "fixture-host", OpenCodeCLI: &OpenCodeConfig{}}}
 	if c.st.save() != nil {
 		t.Fatal("state")
 	}

@@ -173,7 +173,7 @@ func TestOpenCodeRunStoreReadIsReadOnlyAndKeepsPromptPrivate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", "")
 	cwd := filepath.Join(home, "checkout")
-	h := Host{Home: home, SSH: "localhost", OpenCodeCLI: &OpenCodeConfig{DatabasePrefix: "opencode-v2-"}}
+	h := Host{Home: home, SSH: "localhost", OpenCodeCLI: &OpenCodeConfig{}}
 	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, SessionID: "ses_fixture", NotBefore: 1000,
 		ExpectedPromptDigest: shaText([]byte(runPointer))}
 	if raw, err := h.openCodeStore(context.Background(), run); err != nil || string(raw) != "{\"info\": null, \"messages\": []}\n" {
@@ -211,4 +211,72 @@ func TestOpenCodeRunStoreReadIsReadOnlyAndKeepsPromptPrivate(t *testing.T) {
 func inspectStoreFixture(raw []byte, run *openCodeRun) (bool, bool, error) {
 	confirmed, completed, _, err := inspectOpenCodeStore(raw, run)
 	return confirmed, completed, err
+}
+
+// Review round 1: new work after a turn's end reopens it, and the end must follow the answer.
+func TestOpenCodeStoreCompactionReopensAndIdleFollowsAnswer(t *testing.T) {
+	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: "/fixture/checkout", SessionID: "ses_fixture", NotBefore: 1000}
+	run.ExpectedPromptDigest = shaText([]byte(runPointer))
+	good := openCodeStoreFixture(run, runPointer, "OK")
+	with := func(extra ...any) []byte {
+		var record map[string]any
+		_ = json.Unmarshal(good, &record)
+		record["messages"] = append(record["messages"].([]any), extra...)
+		out, _ := json.Marshal(record)
+		return out
+	}
+	for _, kind := range []string{"compaction", "synthetic", "shell"} {
+		reopened := with(map[string]any{"id": "msg_" + kind, "type": kind, "seq": 4, "time": map[string]any{"created": 2004}})
+		if confirmed, complete, _, err := inspectOpenCodeStore(reopened, run); !confirmed || complete || err != nil {
+			t.Fatalf("%s after a succeeded turn kept its completion (%v %v %v)", kind, confirmed, complete, err)
+		}
+		idleOnly := with(map[string]any{"id": "msg_" + kind, "type": kind, "seq": 4, "time": map[string]any{"created": 2004}},
+			map[string]any{"id": "msg_idle2", "type": "idle", "seq": 5, "time": map[string]any{"created": 2005}, "outcome": "succeeded", "failed": false})
+		if _, complete, _, _ := inspectOpenCodeStore(idleOnly, run); complete {
+			t.Fatalf("%s then an idle reused the old answer as completion", kind)
+		}
+	}
+	early := editStoreFixture(t, good, func(m []any) {
+		m[1].(map[string]any)["time"] = map[string]any{"created": 2001, "completed": 2010}
+		m[2].(map[string]any)["time"] = map[string]any{"created": 2005}
+	})
+	if _, complete, _, _ := inspectOpenCodeStore(early, run); complete {
+		t.Fatal("a succeeded idle before the answer completed was accepted")
+	}
+}
+
+// Review round 1: the run database name is the Harness reader's contract, never configuration.
+func TestOpenCodeRunDatabaseNameMatchesHarnessReader(t *testing.T) {
+	if openCodeRunDatabasePrefix != "opencode-v2-" {
+		t.Fatal("the run database prefix drifted from Harness OPENCODE_RUN_DB_PREFIX")
+	}
+	if db, err := openCodeRunDatabase("ses_fixture"); err != nil || db != "opencode-v2-ses_fixture.db" {
+		t.Fatal("run database not named by its session", db, err)
+	}
+	cmd, err := buildAgentCmd("opencode-run", Overrides{Model: "fixture-provider/fixture-model", Effort: "high"})
+	if err != nil || !strings.Contains(cmd, `--session "${`+openCodeRunSessionEnv+`:?}"`) {
+		t.Fatal("opencode run does not use the pre-assigned session that names its database", cmd, err)
+	}
+}
+
+// Review round 1: blobs are bounded before they are materialized; over the cap is no observation.
+func TestOpenCodeRunStoreReadRefusesOversizedRows(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", "")
+	cwd := filepath.Join(home, "checkout")
+	h := Host{Home: home, SSH: "localhost", OpenCodeCLI: &OpenCodeConfig{}}
+	run := &openCodeRun{Route: openCodeRoute{"fixture-provider", "fixture-model", "high"}, Cwd: cwd, SessionID: "ses_fixture", NotBefore: 1000,
+		ExpectedPromptDigest: shaText([]byte(runPointer))}
+	path := writeOpenCodeRunStore(t, home, "opencode-v2-ses_fixture.db", run.SessionID, cwd, [][3]string{{"msg_user", "user", `{"time":{"created":2000},"text":"x","files":[]}`}})
+	grow := `import sqlite3,sys
+import json
+body={"time":{"created":2001,"completed":2002},"agent":"build","model":{"id":"fixture-model","providerID":"fixture-provider","variant":"high"},
+ "finish":"stop","content":[{"type":"text","text":"x"*(1048576+1)}]}
+db=sqlite3.connect(sys.argv[1]);db.execute("insert into session_message values('msg_big',?, 'assistant', 2, 2001, ?)",(sys.argv[2],json.dumps(body)));db.commit()`
+	if out, err := exec.Command("python3", "-c", grow, path, run.SessionID).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	if raw, err := h.openCodeStore(context.Background(), run); err == nil {
+		t.Fatalf("an oversized row was materialized and projected: %d bytes", len(raw))
+	}
 }

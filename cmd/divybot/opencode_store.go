@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -16,7 +17,12 @@ import (
 // from the pane PATH, so only its directory varies. `$HOME/` is expanded by the
 // host shell; nothing else in the path is interpreted.
 var openCodeBinaryPath = regexp.MustCompile(`^(\$HOME/|/)([A-Za-z0-9._-]+/)*opencode$`)
-var openCodeDatabasePrefix = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// openCodeRunDatabasePrefix names each run's own database. It is a contract with the
+// Harness reader, whose OPENCODE_RUN_DB_PREFIX (packages/telemetry, opencode-run-store.ts)
+// must equal it: the reader finds a run's database only by this name.
+const openCodeRunDatabasePrefix = "opencode-v2-"
+
 var openCodeSessionPattern = regexp.MustCompile(`^ses_[A-Za-z0-9_-]{1,128}$`)
 
 func (h Host) openCodeConfig() OpenCodeConfig {
@@ -58,14 +64,39 @@ func newOpenCodeSessionID() (string, error) {
 	return "ses_" + hex.EncodeToString(b[:]), nil
 }
 
+// openCodeStagedRunFile holds a launch's pre-assigned session and database, written
+// beside the receipt before Herdr starts the run (the remote-control-run.json seam).
+const openCodeStagedRunFile = "opencode-run.json"
+
+// openCodeRunSessionEnv carries the pre-assigned session into the owner-only
+// `opencode run` command, which has no TUI argv to append it to.
+const openCodeRunSessionEnv = "DIVYBOT_OPENCODE_SESSION"
+
+type openCodeStagedRun struct {
+	SessionID string `json:"sessionID"`
+	Database  string `json:"database"`
+}
+
+// readOpenCodeStagedRun reads and checks the staged session of the receipt at receiptFile.
+func readOpenCodeStagedRun(receiptFile string) (openCodeStagedRun, error) {
+	var staged openCodeStagedRun
+	if readPrivateActionJSON(filepath.Join(filepath.Dir(receiptFile), openCodeStagedRunFile), &staged) != nil {
+		return openCodeStagedRun{}, errMatrix
+	}
+	database, err := openCodeRunDatabase(staged.SessionID)
+	if err != nil || database != staged.Database {
+		return openCodeStagedRun{}, errMatrix
+	}
+	return staged, nil
+}
+
 // The run's own database, relative to OpenCode's data directory. A shared 2.x
 // database would let a run killed mid-turn hold its location for later hosts.
-func (h Host) openCodeRunDatabase(session string) (string, error) {
-	prefix := h.openCodeConfig().DatabasePrefix
-	if !openCodeDatabasePrefix.MatchString(prefix) || !openCodeSessionPattern.MatchString(session) {
+func openCodeRunDatabase(session string) (string, error) {
+	if !openCodeSessionPattern.MatchString(session) {
 		return "", matrixReason("opencode-route-invalid")
 	}
-	return prefix + session + ".db", nil
+	return openCodeRunDatabasePrefix + session + ".db", nil
 }
 
 // Read-only projection of one run database: `mode=ro`, `query_only`, no OpenCode
@@ -94,10 +125,12 @@ try:
  db.execute('PRAGMA query_only=1')
  row=db.execute('select id,directory,time_created,parent_id from session_v2 where id=?',(sid,)).fetchone()
  if row is None: print(json.dumps({'info':None,'messages':[]})); sys.exit(0)
- rows=db.execute('select id,type,seq,data from session_message where session_id=? order by seq limit 1025',(sid,)).fetchall()
+ sizes=db.execute('select length(cast(data as blob)) from session_message where session_id=? order by seq limit 1025',(sid,)).fetchall()
+ assert len(sizes)<=1024 and all(isinstance(n,int) and 0<=n<=1048576 for (n,) in sizes) and sum(n for (n,) in sizes)<=8388608
+ rows=db.execute('select id,type,seq,cast(data as blob) from session_message where session_id=? order by seq limit ?',(sid,len(sizes))).fetchall()
  messages=[]
  for mid,kind,seq,raw in rows:
-  d=json.loads(raw,object_pairs_hook=strict); assert isinstance(d,dict)
+  d=json.loads(raw.decode('utf-8'),object_pairs_hook=strict); assert isinstance(d,dict)
   m={'id':mid,'type':kind,'seq':seq,'time':d.get('time')}
   if kind=='user':
    assert isinstance(d.get('text'),str); m['textDigests']=digests(d['text'])
@@ -117,7 +150,7 @@ func (h Host) openCodeStore(ctx context.Context, run *openCodeRun) ([]byte, erro
 	if run == nil {
 		return nil, matrixReason("opencode-output-unconfirmed")
 	}
-	database, err := h.openCodeRunDatabase(run.SessionID)
+	database, err := openCodeRunDatabase(run.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -151,8 +184,8 @@ type openCodeStoreMessage struct {
 	} `json:"content"`
 }
 
-// Every 2.1.2 SessionMessageInfo type. Only user, assistant and idle carry turn
-// evidence; an unknown type is a different store contract and confirms nothing.
+// Every 2.1.2 SessionMessageInfo type. user, assistant and idle carry turn evidence;
+// synthetic, shell and compaction start new work; an unknown type confirms nothing.
 var openCodeMessageTypes = map[string]bool{"agent-switched": true, "model-switched": true, "location-switched": true,
 	"user": true, "synthetic": true, "system": true, "skill": true, "shell": true, "assistant": true, "compaction": true, "idle": true}
 
@@ -182,7 +215,8 @@ func inspectOpenCodeStore(raw []byte, run *openCodeRun) (confirmed bool, complet
 		(run.CreatedAt != 0 && info.Created != run.CreatedAt) {
 		return false, false, 0, bad
 	}
-	first, answered := true, false
+	// answeredAt: completion clock of this turn's stopped, non-empty, tool-settled answer; 0 = none.
+	first, answeredAt := true, int64(0)
 	seen := map[string]bool{}
 	var seq int64
 	for _, m := range record.Messages {
@@ -191,8 +225,12 @@ func inspectOpenCodeStore(raw []byte, run *openCodeRun) (confirmed bool, complet
 		}
 		seen[m.ID], seq = true, m.Seq
 		switch m.Type {
+		case "synthetic", "shell", "compaction":
+			// Work that starts after a turn's end, without a new prompt: that end no longer
+			// describes the session until a fresh stopped answer and its own succeeded idle.
+			completed, answeredAt = false, 0
 		case "user":
-			confirmed, completed, answered = false, false, false
+			confirmed, completed, answeredAt = false, false, 0
 			if first && !containsString(m.TextDigests, run.ExpectedPromptDigest) {
 				return false, false, 0, bad
 			}
@@ -208,7 +246,7 @@ func inspectOpenCodeStore(raw []byte, run *openCodeRun) (confirmed bool, complet
 			if m.Failed || m.Finish == "error" {
 				return false, false, 0, matrixReason("opencode-provider-error")
 			}
-			confirmed, completed, answered = true, false, false
+			confirmed, completed, answeredAt = true, false, 0
 			if m.Time.Completed > 0 && (m.Time.Completed < m.Time.Created || m.Time.Completed > time.Now().UnixMilli()) {
 				return false, false, 0, bad
 			}
@@ -221,13 +259,14 @@ func inspectOpenCodeStore(raw []byte, run *openCodeRun) (confirmed bool, complet
 				if !text {
 					return false, false, 0, matrixReason("opencode-empty-answer")
 				}
-				answered = true
+				answeredAt = m.Time.Completed
 			}
 		case "idle":
 			if m.Failed || m.Outcome == "failed" {
 				return false, false, 0, matrixReason("opencode-provider-error")
 			}
-			completed = confirmed && answered && m.Outcome == "succeeded"
+			// The native end must follow the answer it closes; an earlier idle clock contradicts it.
+			completed = confirmed && answeredAt > 0 && m.Time.Created >= answeredAt && m.Outcome == "succeeded"
 		}
 	}
 	return confirmed, completed, info.Created, nil
