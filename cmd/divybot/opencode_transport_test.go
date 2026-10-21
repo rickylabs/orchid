@@ -62,7 +62,6 @@ func TestOpenCodeRouteAndCatalogFailClosed(t *testing.T) {
 }
 
 func TestOpenCodeRunDatabaseAndCapacity(t *testing.T) {
-	h := Host{OpenCodeCLI: &OpenCodeConfig{Binary: "$HOME/.local/bin/opencode"}}
 	first, err := newOpenCodeSessionID()
 	second, _ := newOpenCodeSessionID()
 	if err != nil || first == second || !openCodeSessionPattern.MatchString(first) {
@@ -76,11 +75,20 @@ func TestOpenCodeRunDatabaseAndCapacity(t *testing.T) {
 			t.Fatal("unsafe run database name accepted", bad)
 		}
 	}
-	if bin, err := h.openCodeBinary(); err != nil || bin != `"$HOME"/'.local/bin/opencode'` {
-		t.Fatal("configured binary not rendered for the host shell", bin, err)
-	}
-	if dir, err := h.openCodeBinaryDir(); err != nil || dir != `"$HOME"/'.local/bin'` {
-		t.Fatal("configured binary directory not rendered for the host shell", dir, err)
+	// A `$HOME/` path resolves against the host's agent home before it is quoted, so the binary
+	// the catalog checks and the directory Herdr's PATH lists are one absolute path (review round 3).
+	for config, want := range map[string][2]string{
+		"$HOME/.local/bin/opencode": {"/fixture/home/.local/bin/opencode", "/fixture/home/.local/bin"},
+		"$HOME/opencode":            {"/fixture/home/opencode", "/fixture/home"},
+		"/opt/oc/bin/opencode":      {"/opt/oc/bin/opencode", "/opt/oc/bin"},
+	} {
+		host := Host{Home: "/fixture/home", OpenCodeCLI: &OpenCodeConfig{Binary: config}}
+		if bin, err := host.openCodeBinary(); err != nil || bin != shq(want[0]) {
+			t.Fatal("configured binary not resolved for the host", config, bin, err)
+		}
+		if dir, err := host.openCodeBinaryDir(); err != nil || dir != shq(want[1]) {
+			t.Fatal("configured binary directory not resolved for the host", config, dir, err)
+		}
 	}
 	for _, bad := range []string{"", "opencode", "$HOME/../opencode", "/usr/bin/opencode2", "~/bin/opencode", "$HOME/bin/$(x)/opencode", "/a/./opencode"} {
 		if _, err := (Host{OpenCodeCLI: &OpenCodeConfig{Binary: bad}}).openCodeBinary(); err == nil {
@@ -213,7 +221,7 @@ func TestOpenCodeRegisteredLaunchCatalogBeforeSeatAndIsolatedVariant(t *testing.
 		strings.Contains(log, `"--model"`) || strings.Contains(log, `"--pure"`) {
 		t.Fatal("2.x TUI was not started standalone on a pre-assigned session", log)
 	}
-	if !strings.Contains(log, `export OPENCODE_DB='opencode-v2-ses_`) || !strings.Contains(log, `export PATH=\"$HOME\"/'.local/bin':\"$PATH\"; `) ||
+	if !strings.Contains(log, `export OPENCODE_DB='opencode-v2-ses_`) || !strings.Contains(log, `export PATH='`+h.Home+`/.local/bin':\"$PATH\"; `) ||
 		!strings.Contains(log, `\"model\":\"fixture-provider/fixture-model#high\"`) || strings.Contains(log, "."+"opencode"+"/bin") {
 		t.Fatal("pane lacks its own database, the configured CLI or the 2.x model ID", log)
 	}

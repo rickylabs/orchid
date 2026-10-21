@@ -32,26 +32,34 @@ func (h Host) openCodeConfig() OpenCodeConfig {
 	return *h.OpenCodeCLI
 }
 
-func openCodeShellPath(p string) string {
-	if rest, ok := strings.CutPrefix(p, "$HOME/"); ok {
-		return `"$HOME"/` + shq(rest)
-	}
-	return shq(p)
-}
-
-func (h Host) openCodeBinary() (string, error) {
+// The configured CLI as one absolute path on the host: a leading `$HOME/` resolves against
+// the host's agent home, so the binary the catalog checks and the directory Herdr's PATH
+// lists never depend on the pane's own HOME.
+func (h Host) openCodeBinaryPath() (string, error) {
 	cfg := h.openCodeConfig()
 	if !openCodeBinaryPath.MatchString(cfg.Binary) || strings.Contains(cfg.Binary, "/../") || strings.Contains(cfg.Binary, "/./") {
 		return "", matrixReason("opencode-binary-unconfigured")
 	}
-	return openCodeShellPath(cfg.Binary), nil
+	if rest, ok := strings.CutPrefix(cfg.Binary, "$HOME/"); ok {
+		return path.Join(h.agentHome(), rest), nil
+	}
+	return cfg.Binary, nil
+}
+
+func (h Host) openCodeBinary() (string, error) {
+	binary, err := h.openCodeBinaryPath()
+	if err != nil {
+		return "", err
+	}
+	return shq(binary), nil
 }
 
 func (h Host) openCodeBinaryDir() (string, error) {
-	if _, err := h.openCodeBinary(); err != nil {
+	binary, err := h.openCodeBinaryPath()
+	if err != nil {
 		return "", err
 	}
-	return openCodeShellPath(path.Dir(h.openCodeConfig().Binary)), nil
+	return shq(path.Dir(binary)), nil
 }
 
 // A fresh 2.x session ID chosen before launch. The TUI creates it at the first
