@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Provider IDs and models are data. These are syntax bounds, not a catalog.
@@ -47,48 +45,42 @@ func resolveOpenCodeRoute(o Overrides) (openCodeRoute, error) {
 
 func (r openCodeRoute) qualifiedModel() string { return r.Provider + "/" + r.Model }
 
-// `models --verbose` is a sequence of qualified IDs and JSON metadata. Check the
-// native providerID and id independently of the ID header; reject duplicates,
-// malformed/oversized catalogs, and a missing exact variant. Never pick a fallback.
+// The 2.x `model.list` API answer. Check the native providerID and id; reject
+// duplicates, malformed/oversized catalogs, and a missing exact variant. Never
+// pick a fallback.
 func validateOpenCodeCatalog(raw []byte, route openCodeRoute) error {
-	bad := matrixReason("opencode-catalog-unavailable")
-	if len(raw) == 0 || len(raw) > 1024*1024 || !utf8.Valid(raw) {
-		return bad
+	models, err := decodeOpenCodeModels(raw)
+	if err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	found := false
-	for len(bytes.TrimSpace(raw)) > 0 {
-		raw = bytes.TrimSpace(raw)
-		line, rest, ok := bytes.Cut(raw, []byte("\n"))
-		if !ok || seen[string(line)] || len(seen) >= 1024 {
-			return bad
+	for _, model := range models {
+		key := model.ProviderID + "/" + model.ID
+		if seen[key] || !openCodeProviderID.MatchString(model.ProviderID) || !openCodeModelID.MatchString(model.ID) {
+			return matrixReason("opencode-catalog-unavailable")
 		}
-		seen[string(line)] = true
-		decoder := json.NewDecoder(bytes.NewReader(rest))
-		var body json.RawMessage
-		if decoder.Decode(&body) != nil {
-			return bad
+		seen[key] = true
+		if model.ProviderID != route.Provider || model.ID != route.Model {
+			continue
 		}
-		var model struct {
-			ID         string                     `json:"id"`
-			ProviderID string                     `json:"providerID"`
-			Variants   map[string]json.RawMessage `json:"variants"`
+		found = true
+		if route.Variant == "" {
+			continue
 		}
-		if decodeNativeJSON(body, &model) != nil || model.ProviderID != route.Provider ||
-			!openCodeModelID.MatchString(model.ID) || string(line) != model.ProviderID+"/"+model.ID {
-			return bad
+		var variants []struct {
+			ID string `json:"id"`
 		}
-		if model.ID == route.Model {
-			if route.Variant != "" {
-				variant, ok := model.Variants[route.Variant]
-				var options map[string]json.RawMessage
-				if !ok || strictJSON(variant, &options) != nil || options == nil {
-					return matrixReason("opencode-variant-unavailable")
-				}
-			}
-			found = true
+		if len(model.Variants) == 0 || json.Unmarshal(model.Variants, &variants) != nil {
+			return matrixReason("opencode-variant-unavailable")
 		}
-		raw = rest[decoder.InputOffset():]
+		ok := false
+		for _, variant := range variants {
+			ok = ok || variant.ID == route.Variant
+		}
+		if !ok {
+			return matrixReason("opencode-variant-unavailable")
+		}
 	}
 	if !found {
 		return matrixReason("opencode-model-unavailable")
@@ -96,24 +88,24 @@ func validateOpenCodeCatalog(raw []byte, route openCodeRoute) error {
 	return nil
 }
 
-// No provider turn, credential output, or unbounded native diagnostics. Use the
-// same HOME, cwd and process overlay as the launched TUI. Whole-process-group
+// One 2.x server API operation on a private host this command owns:
+// `--standalone` starts it and it exits with the command; the in-memory database
+// opens no run or shared store, so it has no session to resume. No provider turn,
+// credential output, or unbounded native diagnostics. Whole-process-group
 // cancellation and the existing 1 MiB writer bound also apply over SSH.
-func (h Host) openCodeRead(ctx context.Context, cwd string, env map[string]string, args ...string) ([]byte, error) {
+func (h Host) openCodeAPI(ctx context.Context, cwd string, env map[string]string, operation string) ([]byte, error) {
+	binary, err := h.openCodeBinary()
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var script strings.Builder
-	fmt.Fprintf(&script, "export HOME=%s; export PATH=\"$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH\"; export TMPDIR=/tmp; ", shq(h.agentHome()))
-	for _, key := range []string{"OPENCODE_CONFIG_CONTENT", "XDG_STATE_HOME"} {
-		if value := env[key]; value != "" {
-			fmt.Fprintf(&script, "export %s=%s; ", key, shq(value))
-		}
+	fmt.Fprintf(&script, "export HOME=%s; export TMPDIR=/tmp; export OPENCODE_DB=:memory:; ", shq(h.agentHome()))
+	if value := env["OPENCODE_CONFIG_CONTENT"]; value != "" {
+		fmt.Fprintf(&script, "export OPENCODE_CONFIG_CONTENT=%s; ", shq(value))
 	}
-	fmt.Fprintf(&script, "cd %s && exec opencode --pure", shq(cwd))
-	for _, arg := range args {
-		script.WriteString(" " + shq(arg))
-	}
-	script.WriteString(" 2>/dev/null")
+	fmt.Fprintf(&script, "cd %s && exec %s api --standalone %s 2>/dev/null", shq(cwd), binary, shq(operation))
 	if h.isLocal() {
 		return matrixCommand(ctx, "", "bash", nil, "-c", script.String())
 	}
@@ -124,11 +116,14 @@ func openCodeEnvironment(cwd string, route openCodeRoute) (map[string]string, er
 	if !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd || cwd == "/" || !cleanText(cwd) || len(cwd) > 4096 {
 		return nil, matrixReason("opencode-route-invalid")
 	}
-	// Agent model precedes the TUI --model fallback. The overlay sets both and
-	// changes no permission rule. The isolated state prevents inherited variants.
-	config, err := json.Marshal(map[string]any{"model": route.qualifiedModel(), "default_agent": "build",
-		"agent": map[string]any{"build": map[string]any{"model": route.qualifiedModel()}}, "share": "disabled",
-		"experimental": map[string]any{"disable_paste_summary": true}})
+	// The 2.x TUI takes no --model or --agent; the overlay names both and changes
+	// no permission rule. The variant is part of the 2.x model ID. The isolated
+	// state keeps the TUI's recent-model choices from replacing the route.
+	model := route.qualifiedModel()
+	if route.Variant != "" {
+		model += "#" + route.Variant
+	}
+	config, err := json.Marshal(map[string]any{"model": model, "default_agent": "build", "share": "disabled"})
 	if err != nil {
 		return nil, errMatrix
 	}
@@ -140,38 +135,24 @@ func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openC
 	// A trusted owner choice is attempted directly. Autonomous launches retain
 	// their catalog policy; catalog output never authorizes an owner grant.
 	if len(ownerChoice) == 0 || !ownerChoice[0] {
-		// Catalog commands do not select a variant. Avoid creating the private state
-		// root until the catalog has independently admitted the route.
-		catalog, err := h.openCodeRead(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "models", route.Provider, "--verbose")
+		// Avoid creating the private state root until the catalog has
+		// independently admitted the route.
+		catalog, err := h.openCodeAPI(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "model.list")
 		if err != nil {
+			var reason matrixReason
+			if errors.As(err, &reason) && reason == "opencode-binary-unconfigured" {
+				return err
+			}
 			return matrixReason("opencode-catalog-unavailable")
 		}
 		if err := validateOpenCodeCatalog(catalog, route); err != nil {
 			return err
 		}
-		agent, err := h.openCodeRead(ctx, cwd, map[string]string{"OPENCODE_CONFIG_CONTENT": env["OPENCODE_CONFIG_CONTENT"]}, "debug", "agent", "build")
-		var selected struct {
-			Name, Mode string
-			Hidden     bool
-			Model      struct{ ProviderID, ModelID string }
-		}
-		if err != nil || len(agent) > 1024*1024 || decodeNativeJSON(agent, &selected) != nil || selected.Name != "build" || selected.Hidden ||
-			(selected.Mode != "primary" && selected.Mode != "all") || selected.Model.ProviderID != route.Provider || selected.Model.ModelID != route.Model {
-			return matrixReason("opencode-route-invalid")
-		}
 	}
-	state, _ := json.Marshal(map[string]any{"recent": []any{}, "favorite": []any{},
-		"variant": map[string]string{route.qualifiedModel(): route.Variant}})
 	root := filepath.Join(cwd, ".divybot-opencode")
-	file := filepath.Join(env["XDG_STATE_HOME"], "opencode", "model.json")
-	// A summarized paste expands its placeholder but retains an extra SPACE.
-	// Use literal input in this fresh per-run state; never change global TUI state.
-	kvFile := filepath.Join(filepath.Dir(file), "kv.json")
 	// Never overwrite or traverse a pre-existing repository-supplied state path.
 	script := "umask 077; test ! -e " + shq(root) + " && test ! -L " + shq(root) +
-		" && mkdir " + shq(root) + " && mkdir -p " + shq(filepath.Dir(file)) +
-		" && printf '%s' " + shq(string(state)) + " > " + shq(file) +
-		" && printf '%s' " + shq(`{"paste_summary_enabled":false}`) + " > " + shq(kvFile) +
+		" && mkdir " + shq(root) + " && mkdir -p " + shq(env["XDG_STATE_HOME"]) +
 		" && printf '\\n.divybot-opencode/\\n' >> " + shq(filepath.Join(cwd, ".git", "info", "exclude"))
 	if _, err := h.runRemote(ctx, script); err != nil {
 		return matrixReason("opencode-state-unavailable")
@@ -180,246 +161,33 @@ func (h Host) prepareOpenCodeLaunch(ctx context.Context, cwd string, route openC
 }
 
 // Native paste normalizes line endings. Do this before hashing and sending;
-// observed text remains byte-exact. Paste summaries are disabled in launch state.
-// Staging retains the original rendered goal for existing file consumers.
+// observed text remains byte-exact, except the one trailing space the 2.1.2 TUI
+// appends to a pasted prompt. Staging retains the original rendered goal.
 func openCodeFirstPrompt(goal string) string {
 	return strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(goal, "\r\n", "\n"), "\r", "\n"), "\n")
 }
 
 // This private correlation record is not an observed route or a public native
-// identity. A session is bound only after native prompt/route evidence agrees.
-// ExpectedPromptDigest binds the exact rendered first prompt; records without
-// it cannot confirm legacy pointer delivery and are never automatically replayed.
+// identity. SessionID is chosen before launch, but the session is bound only
+// after its own store shows the prompt and route. ExpectedPromptDigest binds the
+// exact rendered first prompt; records without it are never automatically replayed.
 type openCodeRun struct {
 	ExpectedPromptDigest string        `json:"expectedPromptDigest,omitempty"`
 	Route                openCodeRoute `json:"route"`
 	Cwd                  string        `json:"cwd"`
-	ExcludedIDs          []string      `json:"excludedIds"`
 	NotBefore            int64         `json:"notBefore"`
 	SessionID            string        `json:"sessionId,omitempty"`
 	CreatedAt            int64         `json:"createdAt,omitempty"`
 	Failure              string        `json:"failure,omitempty"`
 }
 
-type openCodeSession struct {
-	ID        string `json:"id"`
-	Directory string `json:"directory"`
-	Created   int64  `json:"created"`
-}
-
-func decodeOpenCodeSessions(raw []byte) ([]openCodeSession, error) {
-	// Installed 1.18.34 returns zero bytes (rc 0) for an empty session index.
-	// This supplies no session/answer evidence and can never confirm a run.
-	if len(raw) == 0 {
-		return []openCodeSession{}, nil
-	}
-	var sessions []openCodeSession
-	if len(raw) > 1024*1024 || !utf8.Valid(raw) || decodeNativeJSONList(raw, &sessions) != nil || sessions == nil || len(sessions) > 128 {
-		return nil, matrixReason("opencode-output-unconfirmed")
-	}
-	seen := map[string]bool{}
-	for _, s := range sessions {
-		if !privateNativeID(s.ID) || !strings.HasPrefix(s.ID, "ses_") || seen[s.ID] || !filepath.IsAbs(s.Directory) || s.Created <= 0 {
-			return nil, matrixReason("opencode-output-unconfirmed")
-		}
-		seen[s.ID] = true
-	}
-	return sessions, nil
-}
-
-func decodeNativeJSONList(raw []byte, out any) error {
-	var records []json.RawMessage
-	if strictJSON(raw, &records) != nil {
-		return errMatrix
-	}
-	return json.Unmarshal(raw, out)
-}
-
-func (h Host) openCodeSessions(ctx context.Context, run *openCodeRun) ([]openCodeSession, error) {
-	env, err := openCodeEnvironment(run.Cwd, run.Route)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := h.openCodeRead(ctx, run.Cwd, env, "session", "list", "--format", "json", "--max-count", "128")
-	if err != nil {
-		return nil, matrixReason("opencode-output-unconfirmed")
-	}
-	return decodeOpenCodeSessions(raw)
-}
-
-func selectOpenCodeSession(sessions []openCodeSession, run *openCodeRun) (string, error) {
-	var id string
-	for _, session := range sessions {
-		if session.Directory != run.Cwd || session.Created < run.NotBefore || containsString(run.ExcludedIDs, session.ID) {
-			continue
-		}
-		if id != "" || (run.SessionID != "" && run.SessionID != session.ID) {
-			return "", matrixReason("opencode-output-unconfirmed")
-		}
-		id = session.ID
-	}
-	return id, nil
-}
-
-type openCodeMessage struct {
-	Info struct {
-		ID, Role, SessionID, ParentID, ProviderID, ModelID, Variant, Finish string
-		Error                                                               json.RawMessage
-		Summary                                                             json.RawMessage
-		Model                                                               struct{ ProviderID, ModelID, Variant string }
-		Time                                                                struct{ Created, Completed int64 }
-	} `json:"info"`
-	Parts []struct {
-		Type, Text, SessionID, MessageID string
-		Synthetic, Ignored               bool
-		Time                             struct{ Start, End int64 }
-		Metadata                         struct{ ProviderExecuted bool }
-		State                            struct {
-			Status   string
-			Metadata struct{ Interrupted bool }
-		}
-	} `json:"parts"`
-}
-
-// OpenCode 1.18.34 uses different summary contracts by message role. User
-// summary is descriptive object metadata; only an assistant boolean marks
-// compaction. Neither can replace prompt, route or native terminal evidence.
-func openCodeSummary(role string, raw json.RawMessage) (bool, error) {
-	if len(raw) == 0 {
-		return false, nil
-	}
-	switch role {
-	case "user":
-		var metadata map[string]json.RawMessage
-		if strictJSON(raw, &metadata) != nil {
-			return false, errMatrix
-		}
-		return false, nil
-	case "assistant":
-		var compact bool
-		if strictJSON(raw, &compact) != nil {
-			return false, errMatrix
-		}
-		return compact, nil
-	default:
-		return false, errMatrix
-	}
-}
-
-// Inspect native stored messages, never the requested argv, a footer, an exit
-// status or Herdr idle/done. Output from a different parent cannot satisfy a turn.
-func inspectOpenCodeExport(raw []byte, run *openCodeRun) (confirmed bool, completed bool, err error) {
-	if run == nil || run.NotBefore < 1 || !privateNativeID(run.SessionID) || !strings.HasPrefix(run.SessionID, "ses_") {
-		return false, false, matrixReason("opencode-output-unconfirmed")
-	}
-	var record struct {
-		Info struct {
-			ID, Directory string
-			Time          struct{ Created int64 }
-		}
-		Messages []openCodeMessage
-	}
-	bad := matrixReason("opencode-output-unconfirmed")
-	if len(raw) > 1024*1024 || !utf8.Valid(raw) || decodeNativeJSON(raw, &record) != nil ||
-		record.Info.ID != run.SessionID || record.Info.Directory != run.Cwd || record.Info.Time.Created <= 0 || record.Info.Time.Created < run.NotBefore || (run.CreatedAt != 0 && record.Info.Time.Created != run.CreatedAt) ||
-		len(record.Messages) == 0 || len(record.Messages) > 1024 {
-		return false, false, bad
-	}
-	users := map[string]bool{}
-	latestUser := ""
-	first := true
-	seen := map[string]bool{}
-	for _, message := range record.Messages {
-		info := message.Info
-		compact, summaryErr := openCodeSummary(info.Role, info.Summary)
-		if summaryErr != nil {
-			return false, false, bad
-		}
-		if info.ID == "" || seen[info.ID] || info.SessionID != run.SessionID || info.Time.Created < record.Info.Time.Created || len(message.Parts) > 1024 {
-			return false, false, bad
-		}
-		seen[info.ID] = true
-		var text strings.Builder
-		continuation := false
-		lastPart := info.Time.Created
-		for _, part := range message.Parts {
-			if part.SessionID != run.SessionID || part.MessageID != info.ID {
-				return false, false, bad
-			}
-			if part.Type == "text" && !part.Synthetic && !part.Ignored {
-				text.WriteString(part.Text)
-				if part.Time.Start != 0 && part.Time.Start < info.Time.Created || part.Time.End != 0 && part.Time.End < part.Time.Start {
-					return false, false, bad
-				}
-				if part.Time.Start > lastPart {
-					lastPart = part.Time.Start
-				}
-				if part.Time.End > lastPart {
-					lastPart = part.Time.End
-				}
-			}
-			if part.Type == "tool" && !part.Metadata.ProviderExecuted && !(part.State.Status == "error" && part.State.Metadata.Interrupted) {
-				continuation = true
-			}
-		}
-		switch info.Role {
-		case "user":
-			confirmed, completed = false, false
-			if info.Model.ProviderID != run.Route.Provider || info.Model.ModelID != run.Route.Model || info.Model.Variant != run.Route.Variant {
-				return false, false, matrixReason("opencode-route-mismatch")
-			}
-			if first && shaText([]byte(text.String())) != run.ExpectedPromptDigest {
-				return false, false, bad
-			}
-			first = false
-			users[info.ID] = true
-			latestUser = info.ID
-		case "assistant":
-			if !users[info.ParentID] || info.ParentID != latestUser || info.ProviderID != run.Route.Provider || info.ModelID != run.Route.Model || info.Variant != run.Route.Variant {
-				return false, false, matrixReason("opencode-route-mismatch")
-			}
-			if len(info.Error) > 0 && string(info.Error) != "null" {
-				return false, false, matrixReason("opencode-provider-error")
-			}
-			confirmed = true
-			completed = false // An earlier assistant cannot complete a later streaming response.
-			if compact {
-				continue
-			}
-			if info.Time.Completed > 0 && (info.Time.Completed < lastPart || info.Time.Completed > time.Now().UnixMilli()) {
-				return false, false, bad
-			}
-			if info.Time.Completed > 0 && info.Finish == "stop" && !continuation {
-				if strings.TrimSpace(text.String()) == "" {
-					return false, false, matrixReason("opencode-empty-answer")
-				}
-				completed = true
-			}
-		default:
-			return false, false, bad
-		}
-	}
-	return confirmed, completed, nil
-}
-
 type openCodeObservationCalls struct {
-	agent    func(context.Context, string) (AgentInfo, error)
-	sessions func(context.Context, *openCodeRun) ([]openCodeSession, error)
-	export   func(context.Context, *openCodeRun, string) ([]byte, error)
+	agent func(context.Context, string) (AgentInfo, error)
+	store func(context.Context, *openCodeRun) ([]byte, error)
 }
 
 func (h Host) observeOpenCode(ctx context.Context, j *Job) (bool, bool, error) {
-	return observeOpenCodeSession(ctx, j, openCodeObservationCalls{
-		agent:    h.agentInfoOf,
-		sessions: h.openCodeSessions,
-		export: func(ctx context.Context, run *openCodeRun, id string) ([]byte, error) {
-			env, err := openCodeEnvironment(run.Cwd, run.Route)
-			if err != nil {
-				return nil, err
-			}
-			return h.openCodeRead(ctx, run.Cwd, env, "export", id)
-		},
-	})
+	return observeOpenCodeSession(ctx, j, openCodeObservationCalls{agent: h.agentInfoOf, store: h.openCodeStore})
 }
 
 func observeOpenCodeSession(ctx context.Context, j *Job, calls openCodeObservationCalls) (bool, bool, error) {
@@ -431,36 +199,17 @@ func observeOpenCodeSession(ctx context.Context, j *Job, calls openCodeObservati
 	if err != nil || !openCodeOccupant(before, j, run) {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
-	sessions, err := calls.sessions(ctx, run)
-	if err != nil {
-		return false, false, err
-	}
-	id, err := selectOpenCodeSession(sessions, run)
-	if err != nil || id == "" {
-		return false, false, err
-	}
-	copy := *run
-	copy.SessionID = id
-	for _, session := range sessions {
-		if session.ID == id {
-			copy.CreatedAt = session.Created
-		}
-	}
-	if run.CreatedAt != 0 && run.CreatedAt != copy.CreatedAt {
-		return false, false, matrixReason("opencode-output-unconfirmed")
-	}
-	raw, err := calls.export(ctx, run, id)
+	raw, err := calls.store(ctx, run)
 	if err != nil {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
-	confirmed, completed, observationErr := inspectOpenCodeExport(raw, &copy)
+	confirmed, completed, created, observationErr := inspectOpenCodeStore(raw, run)
 	after, err := calls.agent(ctx, j.Pane)
 	if err != nil || ctx.Err() != nil || !openCodeOccupant(after, j, run) || before.StateChangeSeq != after.StateChangeSeq {
 		return false, false, matrixReason("opencode-output-unconfirmed")
 	}
 	if observationErr == nil && confirmed {
-		run.SessionID = id
-		run.CreatedAt = copy.CreatedAt
+		run.CreatedAt = created
 	}
 	return confirmed, completed, observationErr
 }
@@ -505,17 +254,8 @@ func (h Host) deliverOpenCodeGoal(ctx context.Context, j *Job, goal string, pers
 	if err != nil || j.OpenCode == nil || !openCodeOccupant(before, j, j.OpenCode) || before.AgentStatus != "idle" {
 		return matrixReason("opencode-output-unconfirmed")
 	}
-	sessions, err := h.openCodeSessions(ctx, j.OpenCode)
-	if err != nil {
-		return err
-	}
-	for _, session := range sessions {
-		if session.Directory == j.OpenCode.Cwd {
-			j.OpenCode.ExcludedIDs = append(j.OpenCode.ExcludedIDs, session.ID)
-		}
-	}
 	// The native host's clock supplies the freshness bound, not the dispatcher's
-	// clock. An old, truncated-out session cannot satisfy this launch.
+	// clock. A session created before this prompt cannot satisfy this launch.
 	script := "cd " + shq(j.OpenCode.Cwd) + " && exec date '+%s' 2>/dev/null"
 	var clock []byte
 	if h.isLocal() {

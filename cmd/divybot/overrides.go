@@ -192,11 +192,12 @@ func interactiveAgentArgs(agent string, o Overrides) (string, []string, error) {
 			args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(o.Effort))
 		}
 	case "opencode":
-		route, err := resolveOpenCodeRoute(o)
-		if err != nil {
+		if _, err := resolveOpenCodeRoute(o); err != nil {
 			return "", nil, err
 		}
-		args = append(args, "--pure", "--agent", "build", "--model", route.qualifiedModel())
+		// 2.x takes the model and agent from the launch overlay. A private server
+		// owned by this TUI, never the shared background service.
+		args = append(args, "--standalone")
 	case "agy":
 		args = []string{"--dangerously-skip-permissions"}
 		if o.Model != "" {
@@ -243,12 +244,14 @@ func buildAgentCmd(agent string, o Overrides) (string, error) {
 		// runs in RunMode: PR-path + deadline supervision only). The trailing
 		// sleep holds the pane open so the transcript stays readable until
 		// teardown closes the workspace.
-		cmd := "opencode run"
+		// The pre-assigned session names this run's database (spawnAgent sets both).
+		cmd := `opencode run --standalone --session "${` + openCodeRunSessionEnv + `:?}"`
 		if ocModel != "" {
+			// 2.x names the variant in the model ID (provider/model#variant).
+			if o.Effort != "" && o.Effort != "provider_default" && o.Effort != "none" {
+				ocModel += "#" + o.Effort
+			}
 			cmd += " --model " + shq(ocModel)
-		}
-		if o.Effort != "" && o.Effort != "provider_default" {
-			cmd += " --variant " + shq(o.Effort)
 		}
 		cmd += " " + shq(runPointer)
 		return "bash -c " + shq(cmd+`; echo "[divybot] opencode run exited: $?"; exec sleep 2147483647`), nil

@@ -24,9 +24,10 @@ export const MATRIX_AUTHORITY={configuration:{roles:{implementation_evaluation:{
 	writeFixture(t, filepath.Join(runtime, "launchability.ts"), `export class RouteLaunchError extends Error {constructor(code,model,launcher='opencode'){super('fixed');this.code=code;this.model=model;this.launcher=launcher;}}`)
 	writeFixture(t, filepath.Join(runtime, "opencode-preflight.ts"), `
 import {RouteLaunchError} from './launchability.ts';
-export async function preflightWorkloadRoute(r){
+export async function preflightWorkloadRoute(r,o){
  if(r.tier!=='feature'||r.role!=='implementation_evaluation'||r.generatorModel!=='invented_writer')throw Error('private-native-canary');
- const output=await new Deno.Command('opencode',{args:['models','synthetic'],stdout:'piped',stderr:'null'}).output();
+ if(typeof o?.binary!=='string')throw Error('bare-opencode-canary');
+ const output=await new Deno.Command(o.binary,{args:['models','synthetic'],stdout:'piped',stderr:'null'}).output();
  if(!output.success)throw new RouteLaunchError('launcher-catalog-unavailable','synthetic/critic');
  if(!new TextDecoder().decode(output.stdout).split(/\r?\n/).includes('synthetic/critic'))throw new RouteLaunchError('launcher-model-absent','synthetic/critic');
  return {model:'synthetic/critic',logicalModel:'invented_critic',family:'invented_family',effort:'high',catalogObservedAt:'2026-09-30T00:00:00Z',launchability:{launcher:'opencode'}};
@@ -40,7 +41,11 @@ export async function preflightWorkloadRoute(r){
 	if os.Chmod(launcher, 0700) != nil {
 		t.Fatal("launcher setup failed")
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The configured CLI only: a bare `opencode` on PATH must never be what runs.
+	shadow := t.TempDir()
+	writeFixture(t, filepath.Join(shadow, "opencode"), "#!/bin/sh\nexit 99\n")
+	os.Chmod(filepath.Join(shadow, "opencode"), 0700)
+	t.Setenv("PATH", shadow+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return cfg, launcher
 }
 func catalogRequest() evaluatorCatalogRequest {
@@ -48,13 +53,13 @@ func catalogRequest() evaluatorCatalogRequest {
 }
 func TestEvaluatorCatalogPreflight(t *testing.T) {
 	cfg, launcher := catalogFixture(t)
-	good, err := evaluatorCatalogPreflight(context.Background(), cfg, catalogRequest())
+	good, err := evaluatorCatalogPreflight(context.Background(), cfg, catalogRequest(), launcher)
 	if err != nil || good.Status != "launchable" || good.Model != "synthetic/critic" {
 		t.Fatal("catalog positive control did not pass")
 	}
 	writeFixture(t, launcher, "#!/bin/sh\n[ \"$1\" = models ] && [ \"$2\" = synthetic ] || exit 77\nexit 0\n")
 	os.Chmod(launcher, 0700)
-	bad, err := evaluatorCatalogPreflight(context.Background(), cfg, catalogRequest())
+	bad, err := evaluatorCatalogPreflight(context.Background(), cfg, catalogRequest(), launcher)
 	if err != nil || bad.Status != "refused" || bad.ReasonCode != "launcher-model-absent" || bad.Model != "synthetic/critic" {
 		t.Fatal("missing launcher ID was not named")
 	}
@@ -63,21 +68,26 @@ func TestEvaluatorCatalogPreflight(t *testing.T) {
 	}
 	wrong := cfg
 	wrong.Revision = strings.Repeat("f", 40)
-	if _, err = evaluatorCatalogPreflight(context.Background(), wrong, catalogRequest()); err == nil {
+	if _, err = evaluatorCatalogPreflight(context.Background(), wrong, catalogRequest(), launcher); err == nil {
 		t.Fatal("wrong source pin accepted")
 	}
 	writeFixture(t, filepath.Join(cfg.Source, "untracked"), "synthetic")
-	if _, err = evaluatorCatalogPreflight(context.Background(), cfg, catalogRequest()); err == nil {
+	if _, err = evaluatorCatalogPreflight(context.Background(), cfg, catalogRequest(), launcher); err == nil {
 		t.Fatal("dirty source accepted")
 	}
 }
 func TestEvaluatorCatalogCLI(t *testing.T) {
-	cfg, _ := catalogFixture(t)
+	cfg, launcher := catalogFixture(t)
 	request := filepath.Join(t.TempDir(), "request.json")
 	raw, _ := json.Marshal(catalogRequest())
 	writeFixture(t, request, string(raw))
-	args := []string{"evaluator-preflight", "-source", cfg.Source, "-revision", cfg.Revision, "-request", request}
 	var out, stderr bytes.Buffer
+	unconfigured := []string{"evaluator-preflight", "-source", cfg.Source, "-revision", cfg.Revision, "-request", request}
+	if matrixConfigCLI(unconfigured, &out, &stderr) != 2 || !strings.Contains(out.String(), "opencode-binary-unconfigured") {
+		t.Fatal("preflight ran without the configured OpenCode binary")
+	}
+	out.Reset()
+	args := append(unconfigured, "-opencode", launcher)
 	if matrixConfigCLI(args, &out, &stderr) != 0 {
 		t.Fatal("read-only CLI did not pass catalog control")
 	}

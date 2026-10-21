@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"time"
 )
 
@@ -15,16 +14,8 @@ func openCodeBindingEligible(j *Job) bool {
 		return false
 	}
 	r := j.OpenCode
-	if r.Failure != "" || !privateNativeID(r.SessionID) || !strings.HasPrefix(r.SessionID, "ses_") ||
-		!digestPattern.MatchString(r.ExpectedPromptDigest) || r.NotBefore < 1 || r.CreatedAt < r.NotBefore {
-		return false
-	}
-	for _, id := range r.ExcludedIDs {
-		if id == r.SessionID {
-			return false
-		}
-	}
-	return true
+	return r.Failure == "" && openCodeSessionPattern.MatchString(r.SessionID) &&
+		digestPattern.MatchString(r.ExpectedPromptDigest) && r.NotBefore >= 1 && r.CreatedAt >= r.NotBefore
 }
 
 // The exact whole-brief reservation and independently selected route remain authority.

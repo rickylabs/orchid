@@ -37,18 +37,16 @@ func openCodeCompletionFixture(t *testing.T) (*Coord, *Job, *bool, *bool, *int, 
 	}
 	c.actions.completed = nil
 	bin := t.TempDir()
-	native := openCode11834SummaryFixture(t, j.OpenCode, map[string]any{"diffs": []any{}}, false)
-	t.Setenv("OPENCODE_COMPLETION_EXPORT", string(native))
+	native := openCodeStoreFixture(j.OpenCode, runPointer, "OK")
+	t.Setenv("OPENCODE_COMPLETION_STORE", string(native))
 	agents, _ := json.Marshal(map[string]any{"result": map[string]any{"type": "agent_info", "agent": a}})
-	sessions, _ := json.Marshal([]openCodeSession{{ID: id, Directory: j.OpenCode.Cwd, Created: j.OpenCode.CreatedAt}})
 	t.Setenv("OPENCODE_COMPLETION_AGENT", string(agents))
-	t.Setenv("OPENCODE_COMPLETION_SESSIONS", string(sessions))
-	script := "#!/usr/bin/env python3\nimport os,sys\ns=sys.argv[-1]\nif \"'export'\" in s: print(os.environ['OPENCODE_COMPLETION_EXPORT'])\nelif \"'session' 'list'\" in s: print(os.environ['OPENCODE_COMPLETION_SESSIONS'])\nelse: print(os.environ['OPENCODE_COMPLETION_AGENT'])\n"
+	script := "#!/usr/bin/env python3\nimport os,sys\ns=sys.argv[-1]\nif 'exec python3 -c' in s: print(os.environ['OPENCODE_COMPLETION_STORE'])\nelse: print(os.environ['OPENCODE_COMPLETION_AGENT'])\n"
 	if os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0700) != nil {
 		t.Fatal("fixture ssh")
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	c.hosts = map[string]Host{j.Host: {Name: j.Host, SSH: "fixture-host"}}
+	c.hosts = map[string]Host{j.Host: {Name: j.Host, SSH: "fixture-host", OpenCodeCLI: &OpenCodeConfig{}}}
 	if c.st.save() != nil {
 		t.Fatal("state")
 	}
@@ -91,27 +89,27 @@ func TestOpenCodeNativeFinalStopRetiresBeforeOperatorTimeout(t *testing.T) {
 }
 
 func TestOpenCodeCompletionCannotUsePaneStatusOrCommentAsNativeStop(t *testing.T) {
-	for _, name := range []string{"streaming", "tool-continuation", "route", "prompt", "parent", "clock", "empty", "compaction", "native-missing", "native-foreign", "binding-foreign", "receipt-changed", "occupant", "working", "changed-sequence", "open-pr", "pending", "run-mode", "canceled"} {
+	for _, name := range []string{"streaming", "tool-continuation", "route", "prompt", "agent", "clock", "empty", "interrupted", "native-missing", "native-foreign", "binding-foreign", "receipt-changed", "occupant", "working", "changed-sequence", "open-pr", "pending", "run-mode", "canceled"} {
 		t.Run(name, func(t *testing.T) {
 			c, j, _, _, closes, r := openCodeCompletionFixture(t)
-			raw := os.Getenv("OPENCODE_COMPLETION_EXPORT")
+			raw := os.Getenv("OPENCODE_COMPLETION_STORE")
 			switch name {
 			case "streaming":
-				raw = strings.Replace(raw, `"completed":2002`, `"completed":0`, 1)
+				raw = strings.Replace(raw, `{"completed":2002,"created":2001}`, `{"created":2001}`, 1)
 			case "tool-continuation":
 				raw = strings.Replace(raw, `"finish":"stop"`, `"finish":"tool-calls"`, 1)
 			case "route":
 				raw = strings.ReplaceAll(raw, `"providerID":"fixture-provider"`, `"providerID":"foreign"`)
 			case "prompt":
-				raw = strings.Replace(raw, runPointer, "different", 1)
-			case "parent":
-				raw = strings.Replace(raw, `"parentID":"fixture-user"`, `"parentID":"foreign"`, 1)
+				raw = strings.Replace(raw, shaText([]byte(runPointer)), shaText([]byte("different")), 1)
+			case "agent":
+				raw = strings.Replace(raw, `"agent":"build"`, `"agent":"plan"`, 1)
 			case "clock":
 				raw = strings.Replace(raw, `"completed":2002`, `"completed":2000`, 1)
 			case "empty":
-				raw = strings.Replace(raw, `"text":"fixture answer"`, `"text":""`, 1)
-			case "compaction":
-				raw = strings.Replace(raw, `"summary":false`, `"summary":true`, 1)
+				raw = strings.Replace(raw, `"text":true`, `"text":false`, 1)
+			case "interrupted":
+				raw = strings.Replace(raw, `"outcome":"succeeded"`, `"outcome":"interrupted"`, 1)
 			case "native-missing":
 				_ = r.writeNativeIdentity(nil)
 			case "native-foreign":
@@ -129,7 +127,7 @@ func TestOpenCodeCompletionCannotUsePaneStatusOrCommentAsNativeStop(t *testing.T
 			case "run-mode":
 				j.RunMode = true
 			}
-			t.Setenv("OPENCODE_COMPLETION_EXPORT", raw)
+			t.Setenv("OPENCODE_COMPLETION_STORE", raw)
 			original := c.actions.list
 			reads := 0
 			c.actions.list = func(ctx context.Context, h Host) ([]AgentInfo, error) {
@@ -253,7 +251,7 @@ func TestOpenCodePositiveBindingLogFollowsDurableProofOnly(t *testing.T) {
 				t.Fatal("unbound fixture")
 			}
 			if name == "wrong-prompt" {
-				t.Setenv("OPENCODE_COMPLETION_EXPORT", strings.Replace(os.Getenv("OPENCODE_COMPLETION_EXPORT"), runPointer, "foreign prompt", 1))
+				t.Setenv("OPENCODE_COMPLETION_STORE", strings.Replace(os.Getenv("OPENCODE_COMPLETION_STORE"), shaText([]byte(runPointer)), shaText([]byte("foreign prompt")), 1))
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

@@ -96,7 +96,7 @@ func (h Host) resolveCodexClient(ctx context.Context, version string) (string, e
 		// No valid daemon version was observed, so no installed client was compared.
 		return "", errCodexClientCheck
 	}
-	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.opencode/bin:$HOME/.local/bin:/usr/local/bin:$PATH"; v=%s; want="codex-cli $v"
+	script := fmt.Sprintf(`export HOME=%s; export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; v=%s; want="codex-cli $v"
 %s
 for d in "$HOME"/.codex/packages/standalone/releases/"$v"-*/bin; do
 	check "$d/codex" && exit 0
