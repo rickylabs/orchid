@@ -70,10 +70,13 @@ type ownerNativeApproval struct {
 }
 
 type ownerNativeAck struct {
-	SchemaVersion  int               `json:"schema_version"`
-	OperationID    string            `json:"operation_id,omitempty"`
-	State          string            `json:"state"`
-	Reason         string            `json:"reason,omitempty"`
+	SchemaVersion int    `json:"schema_version"`
+	OperationID   string `json:"operation_id,omitempty"`
+	State         string `json:"state"`
+	Reason        string `json:"reason,omitempty"`
+	// Detail is the plain why of a REFUSED or UNKNOWN answer (which agent or route
+	// was refused), so the owner sees the cause and not only the closed reason.
+	Detail         string            `json:"detail,omitempty"`
 	IssueID        string            `json:"issue_id,omitempty"`
 	IssueNumber    int               `json:"issue_number,omitempty"`
 	Inbox          string            `json:"inbox,omitempty"`
@@ -542,7 +545,11 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the matrix config refuses the grant (" + problems[0].Field + ": " + problems[0].Reason + ")")
 	}
 	if problems := validateMatrixIssue(ctx, copy, is.Issue, r.Target, s.deps); len(problems) > 0 {
-		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue cannot launch on this route (" + problems[0].Field + ": " + problems[0].Reason + ")")
+		why := problems[0].Field + ": " + problems[0].Reason
+		if problems[0].Reason == "harness-conflict" {
+			why += ": " + ownerNativeHarnessConflictWhy(s.cfg.effectiveTargets(), r.Target, r.NativeOverride)
+		}
+		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue cannot launch on this route (" + why + ")")
 	}
 	return ownerNativeGrantRecord{SchemaVersion: 1, Inbox: s.cfg.Inbox, MatrixRevision: s.cfg.Matrix.Revision, TargetRevision: revision, ApprovalDigest: digest, Request: r, Issue: is, Grant: grant}, nil
 }
@@ -707,7 +714,51 @@ func (s *ownerNativeGrantStore) refuse(issue int, operation, state, reason, why 
 		subject = fmt.Sprintf("issue #%d: owner grant", issue)
 	}
 	log.Printf("%s %s %s (%s): %s", subject, operation, state, reason, why)
-	return ownerNativeFailure(operation, state, reason)
+	ack := ownerNativeFailure(operation, state, reason)
+	ack.Detail = ownerNativeDetail(why)
+	return ack
+}
+
+// ownerNativeDetailLimit bounds the why an answer carries; the log keeps all of it.
+const ownerNativeDetailLimit = 256
+
+// ownerNativeDetail is the why as one printable ASCII line within the limit.
+func ownerNativeDetail(why string) string {
+	line := []byte(strings.TrimSpace(why))
+	for i, b := range line {
+		if b < 0x20 || b > 0x7e {
+			line[i] = ' '
+		}
+	}
+	if len(line) > ownerNativeDetailLimit {
+		line = line[:ownerNativeDetailLimit]
+	}
+	return strings.TrimSpace(string(line))
+}
+
+// ownerNativeHarnessConflictWhy explains a harness-conflict: the cockpit target
+// does not allow the owner's agent, or else the brief conflicts with the route.
+func ownerNativeHarnessConflictWhy(targets []Target, repo string, override *ownerNativeOverride) string {
+	if agent := ownerNativeAgentWhy(targets, repo, override); agent != "" {
+		return agent
+	}
+	return "the brief's harness conflicts with the approved route"
+}
+
+// ownerNativeAgentWhy names the agent a cockpit target refuses on its repository
+// (the repository's Agents setting), or "" when the target allows it or is not a
+// cockpit target: then the route's own transport differs from the harness.
+func ownerNativeAgentWhy(targets []Target, repo string, override *ownerNativeOverride) string {
+	if override == nil {
+		return ""
+	}
+	agent := strings.TrimSuffix(override.Route.Harness, "-run")
+	for _, t := range targets {
+		if t.Repo == repo && t.cockpit && !t.allowsTransport(agent) {
+			return fmt.Sprintf("%s is not allowed on %s (the cockpit allows: %s)", agent, repo, strings.Join(t.Agents, ", "))
+		}
+	}
+	return ""
 }
 
 func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstallRequest) ownerNativeAck {
