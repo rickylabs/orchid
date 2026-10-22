@@ -50,3 +50,12 @@ func TestOwnerNativeAgentWhyNamesTheRefusedAgent(t *testing.T) {
 		}
 	}
 }
+
+// A harness-conflict the cockpit allow-list does not explain is the brief against
+// the approved route: the why says that, never which harness "the route" runs.
+func TestOwnerNativeRouteConflictWhy(t *testing.T) {
+	if got := ownerNativeHarnessConflictWhy([]Target{{Repo: "example/project", Agents: []string{"claude", "codex"}, cockpit: true}}, "example/project",
+		&ownerNativeOverride{Route: ownerNativeRoute{Harness: "claude"}}); got != "the brief's harness conflicts with the approved route" {
+		t.Fatalf("got %q", got)
+	}
+}

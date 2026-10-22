@@ -547,11 +547,7 @@ func (s *ownerNativeGrantStore) makeRecord(ctx context.Context, r ownerNativeIns
 	if problems := validateMatrixIssue(ctx, copy, is.Issue, r.Target, s.deps); len(problems) > 0 {
 		why := problems[0].Field + ": " + problems[0].Reason
 		if problems[0].Reason == "harness-conflict" {
-			if agent := ownerNativeAgentWhy(s.cfg.effectiveTargets(), r.Target, r.NativeOverride); agent != "" {
-				why += ": " + agent
-			} else if r.NativeOverride != nil {
-				why += ": the route does not run the requested " + r.NativeOverride.Route.Harness
-			}
+			why += ": " + ownerNativeHarnessConflictWhy(s.cfg.effectiveTargets(), r.Target, r.NativeOverride)
 		}
 		return ownerNativeGrantRecord{}, ownerNativeWhy("the issue cannot launch on this route (" + why + ")")
 	}
@@ -738,6 +734,15 @@ func ownerNativeDetail(why string) string {
 		line = line[:ownerNativeDetailLimit]
 	}
 	return strings.TrimSpace(string(line))
+}
+
+// ownerNativeHarnessConflictWhy explains a harness-conflict: the cockpit target
+// does not allow the owner's agent, or else the brief conflicts with the route.
+func ownerNativeHarnessConflictWhy(targets []Target, repo string, override *ownerNativeOverride) string {
+	if agent := ownerNativeAgentWhy(targets, repo, override); agent != "" {
+		return agent
+	}
+	return "the brief's harness conflicts with the approved route"
 }
 
 // ownerNativeAgentWhy names the agent a cockpit target refuses on its repository
