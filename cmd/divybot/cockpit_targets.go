@@ -109,11 +109,17 @@ func (t Target) allowsTransport(transport string) bool {
 // refreshCockpitTargets reads the cockpit snapshot once per tick. A missing
 // file before any load means no cockpit list yet. A problem keeps the last good
 // list and is logged once per distinct reason, never with the file contents.
-func (c *Coord) refreshCockpitTargets() {
-	if c.cfg.ActionRequestRoot == "" || c.cfg.cockpit == nil {
+func (c *Coord) refreshCockpitTargets() { c.cfg.refreshCockpitTargets(time.Now()) }
+
+// refreshCockpitTargets reads the cockpit snapshot into the shared list. The
+// coordinator calls it each tick; the owner-grant store calls it before each
+// install, so an Agents change the cockpit just published is never refused by
+// a list one tick old. An unchanged snapshot costs one read and one digest.
+func (c *Config) refreshCockpitTargets(now time.Time) {
+	if c.ActionRequestRoot == "" || c.cockpit == nil {
 		return
 	}
-	c.cfg.cockpit.refresh(c.cfg.ActionRequestRoot, c.cfg.Targets, time.Now())
+	c.cockpit.refresh(c.ActionRequestRoot, c.Targets, now)
 }
 
 func (s *cockpitTargetSource) refresh(root string, static []Target, now time.Time) {
