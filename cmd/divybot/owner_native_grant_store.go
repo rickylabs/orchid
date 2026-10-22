@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -764,6 +765,7 @@ func ownerNativeAgentWhy(targets []Target, repo string, override *ownerNativeOve
 func (s *ownerNativeGrantStore) install(ctx context.Context, r ownerNativeInstallRequest) ownerNativeAck {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.cfg.refreshCockpitTargets(time.Now()) // guard:grant-fresh-targets
 	if !ownerNativeRequestValid(r) {
 		return s.refuse(r.IssueNumber, "", "REFUSED", "override-invalid", "the install request is malformed")
 	}

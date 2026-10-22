@@ -507,3 +507,29 @@ esac
 		})
 	}
 }
+
+// The owner turns an agent on and approves at once (atelier-cockpit#916: saved
+// 18:56:05, approved 18:56:11, refused 18:56:33 as harness-conflict): the grant
+// store reads the snapshot the cockpit just published, not the list of the last
+// coordinator tick.
+func TestOwnerGrantReadsTheAgentsTheCockpitJustPublished(t *testing.T) {
+	s, r, _ := ownerPortFixture(t, "claude")
+	spool := privateTestRoot(t)
+	writeCockpitTargets(t, spool, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["codex"],"since":"2026-01-01T00:00:00.000Z"}]}`, 0600)
+	cfg, err := cloneOwnerNativeConfig(s.cfg)
+	if err != nil {
+		t.Fatal("config copy")
+	}
+	cfg.ActionRequestRoot, cfg.OwnerNativeGrantPort = spool, &s.options
+	cfg.cockpit = &cockpitTargetSource{}
+	(&Coord{cfg: cfg}).refreshCockpitTargets() // the last tick: codex only
+	store, err := newOwnerNativeGrantStore(context.Background(), cfg, s.options, s.deps)
+	if err != nil {
+		t.Fatal("store")
+	}
+	// The owner allows claude; the cockpit publishes; no coordinator tick yet.
+	writeCockpitTargets(t, spool, `{"schema_version":1,"targets":[{"repo":"example/project","agents":["codex","claude"],"since":"2026-01-01T00:00:00.000Z"}]}`, 0600)
+	if ack := store.install(context.Background(), r); ack.State != "LIVE" {
+		t.Fatalf("grant refused with the list of the last tick: %+v", ack)
+	}
+}
