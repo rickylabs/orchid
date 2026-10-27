@@ -100,9 +100,9 @@ func remoteCodexArgs(args []string, cwd, native string) ([]string, error) {
 	if !privateNativeID(native) || !validRemoteCwd(cwd) {
 		return nil, goalError("remote-control-binding-invalid")
 	}
-	// The native remote resume already owns its verified prepared cwd. Explicit
-	// --cd invokes a separate daemon-global folder-trust lookup, ignoring the
-	// per-thread trust map. Do not manufacture or answer that consent dialog.
+	// The native remote resume owns its verified prepared cwd. Preparation
+	// grants that checkout in daemon config before this TUI starts; per-thread
+	// and CLI trust alone do not satisfy the remote folder-trust lookup.
 	// Codex refuses permission overrides on a remote resume ("Permission
 	// overrides are not supported when resuming a remote task") and exits before
 	// thread/resume. The prepared thread already carries approvalPolicy=never and
