@@ -1,0 +1,16 @@
+cmd/divybot/herdr_events.go:208: cmd := commandContext(ctx, "ssh", args...)
+cmd/divybot/main.go:532: cmd := commandContext(ctx, name, args...)
+cmd/divybot/main.go:1199: if out, err := commandContext(context.Background(), "gh", "auth", "token").Output(); err == nil {
+cmd/divybot/main.go:1333: cmd := commandContext(cctx, "claude", "-p", "ok")
+cmd/divybot/main.go:1442: cmd := commandContext(ctx, "gh", args...)
+cmd/divybot/matrix.go:192: cmd := commandContext(ctx, command, args...)
+cmd/divybot/native_claude_bridge.go:145: cmd = commandContext(ctx, "bash", "-c", script)
+cmd/divybot/native_claude_bridge.go:147: cmd = commandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
+cmd/divybot/native_codex_transport.go:45: cmd := commandContext(ctx, name, args...)
+cmd/divybot/reaper.go:30: func commandContext(ctx context.Context, name string, args ...string) *ownedCommand {
+cmd/divybot/reaper.go:31: return children.commandContext(ctx, name, args...)
+cmd/divybot/reaper.go:34: func (g *childRegistry) commandContext(ctx context.Context, name string, args ...string) *ownedCommand {
+cmd/divybot/reaper.go:35: return &ownedCommand{Cmd: exec.CommandContext(ctx, name, args...), owner: g}
+cmd/divybot/remote_control_transport.go:220: cmd = commandContext(ctx, "bash", "-c", script)
+cmd/divybot/remote_control_transport.go:222: cmd = commandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
+cmd/divybot/source_binding.go:150: cmd := commandContext(ctx, "gh", append(args, path)...)
