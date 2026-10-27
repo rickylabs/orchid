@@ -13,3 +13,5 @@
 Discovery complete. No existing PR covers daemon configuration trust; previous startup-trust PR used the process-only CLI override. Consulted prior Orchid environment memory. Explicit operator evaluation route takes precedence over the current feature matrix defaults.
 
 Implementation slice: native grant/removal helper and narrow RPC capability added; preparation writes once after exact thread readback, remote argv drops process trust, and recorded-checkout cleanup revokes before deletion. Focused tests passed, including canonical framing. Broader gates, live proof and independent review are pending; this commit is implementation progress, not certification.
+
+Broader local suite found one stale client-selection fixture: preparation correctly refused its empty config-write response. Fixture now acknowledges native writes; its targeted regression passes. Startup rollback is installed before preparation so even an ambiguous grant failure triggers a bounded removal attempt. Live proof requires a real Git checkout with a project layer; an empty folder was an ineffective negative control.

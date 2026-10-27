@@ -9,7 +9,8 @@ import (
 	"unicode/utf8"
 )
 
-// Trust only the checkout prepared by this dispatch, for this process. Codex
+// Plain Codex trusts only this dispatch checkout for its process. Remote Codex
+// drops this override and uses codex_checkout_trust.go for daemon trust. Codex
 // 0.159.3 shows folder consent even with approvals/sandbox bypassed. Its -c
 // dotted-key parser splits literal dots, so the path belongs in an inline TOML
 // table value, not in a quoted dotted key. No user config file is changed.

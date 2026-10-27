@@ -192,6 +192,8 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 				methods = append(methods, method)
 				mu.Unlock()
 				switch method {
+				case codexConfigValueWrite:
+					return trustWriteOK()
 				case "remoteControl/status/read":
 					return map[string]string{"status": "connected"}
 				case "thread/start", "thread/read":

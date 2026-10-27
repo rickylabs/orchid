@@ -15,7 +15,7 @@ import (
 
 // Codex refuses permission overrides on a remote resume; the prepared thread
 // already carries its approval and sandbox policy. Plain launches keep the flag.
-func TestRemoteCodexResumeDropsOnlyThePermissionOverride(t *testing.T) {
+func TestRemoteCodexResumeDropsPermissionAndProcessTrustOverrides(t *testing.T) {
 	cwd := "/fixture/issue-7"
 	_, plain, err := managedInteractiveAgentArgs("codex", Overrides{Model: "fixture-model", Effort: "high"}, cwd)
 	if err != nil || plain[0] != "--dangerously-bypass-approvals-and-sandbox" {
@@ -26,15 +26,8 @@ func TestRemoteCodexResumeDropsOnlyThePermissionOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var kept []string
-	for i := 1; i < len(plain); i++ {
-		if plain[i] == "-c" && i+1 < len(plain) && strings.HasPrefix(plain[i+1], "projects={") {
-			i++
-			continue
-		}
-		kept = append(kept, plain[i])
-	}
-	want := append(kept, "-c", `tui.status_line=["thread-id"]`, "--remote", "unix://", "resume", id)
+	want := []string{"-m", "fixture-model", "-c", `model_reasoning_effort="high"`, "-c", "check_for_update_on_startup=false",
+		"-c", `tui.status_line=["thread-id"]`, "--remote", "unix://", "resume", id}
 	if strings.Join(remote, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("remote resume argv changed beyond permission and process trust overrides: %q", remote)
 	}

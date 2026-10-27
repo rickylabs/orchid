@@ -944,9 +944,6 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		attempt.enter(stageThreadPreparation)
 		if agent == "codex" {
 			remote.LifecycleHooks = nativeLifecycleHooks(agent, label, pane, ws, cwd)
-			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
-				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
-			}
 			defer func() {
 				if err != nil {
 					cleanup, done := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -956,6 +953,9 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 					}
 				}
 			}()
+			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
+				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
+			}
 			nativeArgs, err = remoteCodexArgs(nativeArgs, cwd, remote.NativeSessionID)
 			if err != nil {
 				return pane, ws, matrixSite("spawn.remote-control-render", err)
