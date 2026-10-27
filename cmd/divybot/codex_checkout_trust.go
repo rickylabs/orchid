@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"path/filepath"
 	"sort"
@@ -99,7 +100,7 @@ func (h Host) checkoutTrustRoots() ([]string, error) {
 
 // Reconcile from native config so even a crash between grant and Job save has
 // durable recovery evidence. Preserve retained jobs, other roots and untrusted
-// entries; retry unconfirmed removals on the next existing lifecycle tick.
+// entries; retry unconfirmed removals at the next bounded recovery pass.
 func (p *goalRPC) reconcileCheckoutTrust(roots []string, retained map[string]bool) error {
 	for _, root := range roots {
 		if !validRemoteCwd(root) {
@@ -151,44 +152,68 @@ func (p *goalRPC) reconcileCheckoutTrust(roots []string, retained map[string]boo
 	return failure
 }
 
-// Startup and tick call this synchronously before admission; no sweep overlaps
-// a grant still being converted into a Job by the serialized dispatcher loop.
+// The dispatcher records raw fleet folders before issue/adoption filtering.
+// Recovery runs after adoption and launch/cleanup effects in that same loop.
+// A nil live set means no fleet snapshot has been taken yet.
+type checkoutTrustRecovery struct {
+	live    map[string]bool
+	up      map[string]bool
+	codex   map[string]bool
+	last    map[string]time.Time
+	pending bool
+}
+
+// Failure paths request an immediate pass; before the first snapshot it stays
+// pending until the post-adoption pass. Calls stay on the serialized loop.
+func (c *Coord) recoverCheckoutTrust(ctx context.Context) {
+	c.trust.pending = true
+	c.reconcileCheckoutTrust(ctx)
+}
+
 func (c *Coord) reconcileCheckoutTrust(ctx context.Context) {
-	if c.dry || ctx.Err() != nil || c.st == nil {
+	r := &c.trust
+	if c.dry || ctx.Err() != nil || c.st == nil || r.live == nil { // guard:trust-snapshot-first
 		return
 	}
-	retained := map[string]map[string]bool{}
+	retained := map[string]bool{}
+	for cwd := range r.live {
+		retained[cwd] = true
+	}
 	codexJobs := map[string]bool{}
 	c.st.mu.Lock()
 	for _, j := range c.st.Jobs {
-		h, ok := c.hosts[j.Host]
-		if !ok {
-			continue
-		}
+		h := c.hosts[j.Host]
 		if j.Agent == "codex" {
 			codexJobs[j.Host] = true
 		}
 		if j.stopUnconfirmed() {
 			continue // a bounded release is no longer a trust owner
 		}
-		if retained[j.Host] == nil {
-			retained[j.Host] = map[string]bool{}
-		}
-		retained[j.Host][h.jobCheckout(j)] = true
+		retained[h.jobCheckout(j)] = true // guard:trust-global-retained
 	}
 	c.st.mu.Unlock()
+	if r.last == nil {
+		r.last = map[string]time.Time{}
+	}
+	now := time.Now()
 	for name, h := range c.hosts {
-		// Config-loaded hosts retain this pointer even with Codex disabled, so
-		// switching off new launches does not strand their earlier trust entries.
-		if h.RemoteControl == nil && !codexJobs[name] {
+		if !r.up[name] { // guard:trust-up-host
 			continue
 		}
+		if !(h.remoteEnabled("codex") && h.runsAgent("codex")) && !codexJobs[name] && !r.codex[name] { // guard:trust-codex-host
+			continue
+		}
+		if !r.pending && now.Sub(r.last[name]) < fleetRecoveryEvery { // guard:trust-recovery-interval
+			continue
+		}
+		// Count attempts too: an unavailable daemon must not cause event-rate reads.
+		r.last[name] = now
 		roots, err := h.checkoutTrustRoots()
 		if err == nil {
 			check, done := context.WithTimeout(ctx, 10*time.Second)
 			h.RemoteRun = nil
 			err = h.withCanonicalConnection(check, "", func(p *goalRPC) error {
-				return p.reconcileCheckoutTrust(roots, retained[name])
+				return p.reconcileCheckoutTrust(roots, retained)
 			})
 			done()
 		}
@@ -196,6 +221,7 @@ func (c *Coord) reconcileCheckoutTrust(ctx context.Context) {
 			log.Printf("codex checkout trust reconciliation unconfirmed reason=%s", closedGoalReason(err))
 		}
 	}
+	r.pending = false
 }
 
 // Used both by normal checkout cleanup and the bounded native-stop release.
@@ -213,4 +239,13 @@ func (h Host) revokeJobCheckoutTrust(ctx context.Context, j *Job) error {
 		return errCodexTrustRemoval
 	}
 	return nil
+}
+
+// Only a trust-revoke refusal triggers recovery; ordinary deletion stays best effort.
+func (c *Coord) cleanupCheckout(ctx context.Context, host Host, j *Job) error {
+	err := host.cleanupCheckout(ctx, j)
+	if errors.Is(err, errCodexTrustRemoval) {
+		c.recoverCheckoutTrust(ctx) // guard:trust-failed-revoke-recovery
+	}
+	return err
 }

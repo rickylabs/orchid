@@ -109,75 +109,294 @@ func TestCodexTrustReconcileRejectsUnconfirmedReadAndInvalidRoot(t *testing.T) {
 	}
 }
 
-// Real startup and tick wiring recover native entries left before Job save,
-// retry a failed rollback and remove grants after bounded capacity release.
-func TestCodexTrustReconcileStartupAndTickRecoverOrphanGrants(t *testing.T) {
-	var mu sync.Mutex
-	projects := map[string]any{}
-	reads, removals := 0, 0
+// A canonical daemon fixture records actual config reads/removals. The fleet is
+// supplied independently so tests can distinguish raw occupants from adoption.
+type checkoutRecoveryFixture struct {
+	mu                    sync.Mutex
+	projects              map[string]any
+	reads, removals       int
+	failRead, failRemoval bool
+	onRead                func()
+}
+
+func newCheckoutRecoveryFixture(t *testing.T) (*Coord, *checkoutRecoveryFixture, Host) {
+	t.Helper()
+	f := &checkoutRecoveryFixture{projects: map[string]any{}}
 	h := canonicalFixtureHost(t, "multi", func(method string, params map[string]any) any {
-		mu.Lock()
-		defer mu.Unlock()
+		f.mu.Lock()
+		defer f.mu.Unlock()
 		if method == codexConfigRead {
-			reads++
-			snapshot := make(map[string]any, len(projects))
-			for cwd, project := range projects {
+			f.reads++
+			if f.onRead != nil {
+				f.onRead()
+			}
+			if f.failRead {
+				return map[string]any{}
+			}
+			snapshot := make(map[string]any, len(f.projects))
+			for cwd, project := range f.projects {
 				snapshot[cwd] = project
 			}
 			return map[string]any{"config": map[string]any{"projects": snapshot}}
 		}
-		if method != codexConfigValueWrite || params["value"] != nil {
-			t.Fatal("recovery attempted a non-removal effect")
+		if method != codexConfigValueWrite {
+			return map[string]any{} // native stop intentionally remains unconfirmed
 		}
-		for cwd := range projects {
+		if params["value"] != nil {
+			t.Error("recovery attempted a non-removal effect")
+			return map[string]any{}
+		}
+		if f.failRemoval {
+			return map[string]any{}
+		}
+		for cwd := range f.projects {
 			if params["keyPath"] == codexCheckoutTrustKey(cwd) {
-				delete(projects, cwd)
-				removals++
+				delete(f.projects, cwd)
+				f.removals++
 			}
 		}
 		return trustWriteOK()
 	})
-	h.WorkdirRoot, h.DiskWorkdirRoot = filepath.Join(h.Home, "legacy"), filepath.Join(h.Home, "disk")
-	off := false
-	h.RemoteControl = &RemoteControlConfig{Codex: &off} // disabling launches must still clean old grants
-	bin := filepath.Join(h.Home, ".local", "bin")
-	if os.MkdirAll(bin, 0700) != nil || os.WriteFile(filepath.Join(bin, "herdr"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"result\":{\"agents\":[]}}'\n"), 0700) != nil {
-		t.Fatal("isolated fleet fixture unavailable")
+	h.Name, h.WorkdirRoot, h.DiskWorkdirRoot = "fixture", "/fixture/legacy", "/fixture/disk"
+	on := true
+	h.RemoteControl = &RemoteControlConfig{Codex: &on}
+	c := newCoord(&Config{Hosts: []Host{h}, StateFile: filepath.Join(t.TempDir(), "state.json")})
+	c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	return c, f, h
+}
+
+func (f *checkoutRecoveryFixture) grant(cwds ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, cwd := range cwds {
+		f.projects[cwd] = map[string]any{"trust_level": "trusted"}
 	}
-	cfg := &Config{Hosts: []Host{h}, StateFile: filepath.Join(t.TempDir(), "state.json")}
-	c := newCoord(cfg)
-	live := filepath.Join(h.DiskWorkdirRoot, "issue-7")
-	orphan := filepath.Join(h.DiskWorkdirRoot, "issue-8")
-	foreignHost := filepath.Join(h.DiskWorkdirRoot, "issue-9")
-	c.st.Jobs[7] = &Job{Issue: 7, Agent: "codex", Host: h.Name, Workdir: live}
-	c.st.Jobs[9] = &Job{Issue: 9, Agent: "codex", Host: "other-host", Workdir: foreignHost}
-	if c.st.save() != nil {
-		t.Fatal("recovery state unavailable")
+}
+
+func (f *checkoutRecoveryFixture) check(t *testing.T, reads, removals int, retained ...string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reads != reads || f.removals != removals || len(f.projects) != len(retained) {
+		t.Fatalf("recovery counts: reads=%d removals=%d remaining=%d; want %d/%d/%d", f.reads, f.removals, len(f.projects), reads, removals, len(retained))
 	}
-	c.st = loadState(c.st.path) // restart lost all unpersisted launch state
-	mu.Lock()
-	for _, cwd := range []string{live, orphan, foreignHost} {
-		projects[cwd] = map[string]any{"trust_level": "trusted"}
+	for _, cwd := range retained {
+		if f.projects[cwd] == nil {
+			t.Fatal("recovery revoked a retained checkout")
+		}
 	}
-	mu.Unlock()
-	ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
-	defer done()
+}
+
+func TestCodexTrustReconcileStartupAndTickRecoverOrphanGrants(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	live, orphan := "/fixture/disk/issue-7", "/fixture/disk/issue-8"
+	f.grant(live, orphan)
+	c.fleet.publish(h.observerKey(), []AgentInfo{{Agent: "codex", Cwd: live}}, true)
+	ctx := context.Background()
 	c.startOwnerGrantsWithTargets(ctx)
-	mu.Lock()
-	if len(projects) != 1 || projects[live] == nil || reads != 1 || removals != 2 {
-		t.Fatal("startup did not remove unsaved grants or preserve its persisted job")
-	}
-	// A failed launch rollback leaves only native config evidence for the next tick.
-	projects[orphan] = map[string]any{"trust_level": "trusted"}
-	// A bounded release cannot keep trust even if its Job awaits state removal.
-	c.st.Jobs[7].StopMisses = stopMissLimit
-	mu.Unlock()
+	f.check(t, 0, 0, live, orphan) // startup must not sweep before observation/adoption
 	c.tick(ctx)
-	mu.Lock()
-	defer mu.Unlock()
-	if len(projects) != 0 || reads != 2 || removals != 4 {
-		t.Fatal("tick failed to reconcile a failed launch or bounded release")
+	f.check(t, 1, 1, live) // raw occupant is not adoptable with no target
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.tick(ctx)
+	f.check(t, 1, 1, live) // event ticks must not read daemon config again
+	c.trust.last[h.Name] = time.Now().Add(-fleetRecoveryEvery)
+	c.tick(ctx)
+	f.check(t, 2, 2)
+}
+
+func TestCodexTrustFirstSweepFollowsAdoption(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	c.cfg.Targets = []Target{{Label: "work", Repo: "fixture/repo", Disabled: true}}
+	bin := t.TempDir()
+	script := `#!/bin/sh
+if [ "$1 $2" = "issue list" ]; then
+  printf '%s\n' '[{"number":7,"title":"fixture","labels":[{"name":"work"},{"name":"harness"}]}]'
+else
+  printf '%s\n' '[]'
+fi
+`
+	if os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0700) != nil {
+		t.Fatal("issue fixture unavailable")
 	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cwd := "/fixture/disk/issue-7"
+	f.grant(cwd, "/fixture/disk/issue-8")
+	f.onRead = func() {
+		c.st.mu.Lock()
+		defer c.st.mu.Unlock()
+		j := c.st.Jobs[7]
+		if j == nil || j.Workdir != cwd {
+			t.Error("first sweep preceded adoption of the observed cwd")
+		}
+	}
+	c.fleet.publish(h.observerKey(), []AgentInfo{{Agent: "codex", Cwd: cwd, AgentStatus: "unknown"}}, true)
+	c.tick(context.Background())
+	f.check(t, 1, 1, cwd)
+}
+
+func TestCodexTrustRecoveryRequiresFirstSnapshot(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	orphan := "/fixture/disk/issue-7"
+	f.grant(orphan)
+	// A recovery request may precede fleet observation. Even if host reachability
+	// is known, it cannot authorize removal without the working-folder snapshot.
+	c.trust.up = map[string]bool{h.Name: true}
+	c.recoverCheckoutTrust(context.Background())
+	f.check(t, 0, 0, orphan)
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 1, 1)
+}
+
+func TestCodexTrustRetainsRawFleetFoldersAndGlobalJobs(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	alias := h
+	alias.Name = "alias"
+	c.hosts[alias.Name] = alias
+	manual := h
+	manual.HerdrSession = "manual"
+	c.fleet.hosts[manual.observerKey()] = manual
+	paths := []string{"/fixture/disk/issue-7", "/fixture/disk/issue-8", "/fixture/disk/issue-9", "/fixture/disk/issue-10", "/fixture/legacy/issue-7"}
+	orphan := "/fixture/disk/issue-11"
+	f.grant(append(paths, orphan)...)
+	// Alias/unknown host jobs must protect the same daemon's paths globally.
+	c.st.Jobs[7] = &Job{Issue: 7, Host: alias.Name, Agent: "codex", Workdir: paths[0]}
+	c.st.Jobs[8] = &Job{Issue: 8, Host: "unconfigured", Agent: "claude", Workdir: paths[1]}
+	// Conflicting issue keys, manual scopes and jobs failing occupant matching
+	// disappear from adoption, but every raw working folder still owns trust.
+	c.fleet.publish(h.observerKey(), []AgentInfo{{Agent: "claude", Cwd: paths[4]}, {Agent: "codex", Cwd: paths[2]}}, true)
+	c.fleet.publish(manual.observerKey(), []AgentInfo{{Agent: "claude", Cwd: paths[3]}}, true)
+	c.fleet.hosts[alias.observerKey()] = alias
+	c.fleet.publish(alias.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 2, 1, paths...)
+}
+
+func TestCodexTrustAdoptionRecordsObservedWorkdir(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	c.cfg.Targets = []Target{{Label: "work", Repo: "fixture/repo"}}
+	cwd := "/fixture/disk/issue-7"
+	f.grant(cwd)
+	c.fleet.publish(h.observerKey(), []AgentInfo{{Agent: "codex", Cwd: cwd}}, true)
+	status, _ := c.fleetStatus(context.Background())
+	j, ok := c.adopt(7, Issue{Number: 7, Labels: []string{"work"}}, status)
+	if !ok || j.Workdir != cwd {
+		t.Fatal("adoption lost its observed working folder")
+	}
+	if c.st.save() != nil {
+		t.Fatal("adoption state unavailable")
+	}
+	c.st = loadState(c.st.path)
+	if c.st.Jobs[7].Workdir != cwd {
+		t.Fatal("adopted Workdir did not persist")
+	}
+	// A later observation omission must not redirect this job to the legacy root.
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 1, 0, cwd)
+}
+
+func TestCodexTrustRecoverySkipsDownAndNonCodexHosts(t *testing.T) {
+	for _, row := range []struct {
+		name                                      string
+		up, enabled, allowed, job, occupant, want bool
+	}{
+		{"down", false, true, true, true, false, false},
+		{"disabled", true, false, true, false, false, false},
+		{"other-agents", true, true, false, false, false, false},
+		{"enabled", true, true, true, false, false, true},
+		{"retained-job", true, false, false, true, false, true},
+		{"fleet-job", true, false, false, false, true, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			c, f, h := newCheckoutRecoveryFixture(t)
+			h.RemoteControl.Codex = &row.enabled
+			if !row.allowed {
+				h.Agents = []string{"claude"}
+			}
+			c.hosts[h.Name] = h
+			if row.job {
+				c.st.Jobs[9] = &Job{Issue: 9, Host: h.Name, Agent: "codex", Workdir: "/fixture/disk/issue-9"}
+			}
+			var agents []AgentInfo
+			if row.occupant {
+				agents = []AgentInfo{{Agent: "codex", Cwd: "/fixture/disk/issue-9"}}
+			}
+			c.fleet.publish(h.observerKey(), agents, row.up)
+			c.fleetStatus(context.Background())
+			c.reconcileCheckoutTrust(context.Background())
+			want := 0
+			if row.want {
+				want = 1
+			}
+			f.check(t, want, 0)
+		})
+	}
+}
+
+func TestCodexTrustRecoveryPacesFailedReads(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	f.failRead = true
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 1, 0)
+	c.trust.last[h.Name] = time.Now().Add(-fleetRecoveryEvery)
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 2, 0)
+}
+
+// Failed lifecycle effects bypass the ordinary interval on the same loop turn.
+func TestCodexTrustFailedLaunchRecoversImmediately(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	f.grant("/fixture/disk/issue-8")
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.trust.last = map[string]time.Time{h.Name: time.Now()}
+	// A refused target aborts the production launch before any external effects.
+	if c.spawn(context.Background(), 7, Issue{Number: 7}, h, "codex", Overrides{}, nil) == nil {
+		t.Fatal("invalid launch succeeded")
+	}
+	f.check(t, 1, 1)
+}
+
+func TestCodexTrustFailedRevokeRecoversImmediately(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	cwd, orphan := "/fixture/disk/issue-7", "/fixture/disk/issue-8"
+	f.grant(cwd, orphan)
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.trust.last = map[string]time.Time{h.Name: time.Now()}
+	// A mismatched native binding refuses the direct revoke without a directory
+	// deletion, but still schedules native recovery for unrelated orphan grants.
+	j := &Job{Issue: 7, Host: h.Name, Agent: "codex", Workdir: cwd, RemoteControl: syntheticRemoteRun(t)}
+	c.st.Jobs[7] = j
+	if !errors.Is(c.cleanupCheckout(context.Background(), h, j), errCodexTrustRemoval) {
+		t.Fatal("failed revoke lost its cleanup refusal")
+	}
+	f.check(t, 1, 1, cwd)
+}
+
+func TestCodexTrustBoundedReleaseRecoversImmediately(t *testing.T) {
+	c, _, j, _, _ := teardownFixture(t)
+	_, f, h := newCheckoutRecoveryFixture(t)
+	h.Name = j.Host
+	c.hosts = map[string]Host{h.Name: h}
+	j.Agent, j.Label = "codex", "codex-7"
+	j.RemoteControl = syntheticRemoteRun(t)
+	j.Workdir, j.RemoteControl.Cwd = "/fixture/disk/issue-7", "/fixture/disk/issue-7"
+	j.RemoteCleanup, j.StopMisses = "teardown", stopMissLimit-1
+	f.grant(j.Workdir, "/fixture/disk/issue-8")
+	c.trust = checkoutTrustRecovery{live: map[string]bool{}, up: map[string]bool{h.Name: true}, last: map[string]time.Time{h.Name: time.Now()}}
+	if !c.teardown(context.Background(), 7, j, "teardown") {
+		t.Fatal("bounded release did not end the run")
+	}
+	f.check(t, 1, 2)
 }
 
 func TestCodexTrustGrantUsesCleanupCheckoutValidation(t *testing.T) {

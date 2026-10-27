@@ -94,15 +94,23 @@ or sibling checkout is trusted, and no config file is edited by Orchid.
 `codex_checkout_trust.go` owns both grant and removal. Checkout cleanup removes
 that same entry with a null API value before deleting the recorded directory;
 a failed acknowledgement retains cleanup responsibility. Failed startup also
-attempts removal with a separate bounded context. Startup and each existing serialized tick also read native config to reconcile
-orphan grants under the configured persistent and compatibility worktree roots.
-Only trusted direct `issue-N` checkouts without a retained per-host job are
-removed; other roots, nested paths and untrusted entries stay untouched. This
-recovers failed rollback and a crash between grant and Job save. A bounded stop
-release attempts revocation immediately, and the tick retries failed removals.
-Disabling new Codex launches does not disable this cleanup. There is no new timer
-or app-side trigger. Invalid checkout cleanup still skips, and ordinary deletion
-errors remain best effort; only failed Codex trust revocation blocks teardown.
+attempts removal with a separate bounded context. After the first fleet snapshot
+and adoption, the serialized dispatcher reads native config to recover orphan
+grants under the configured persistent and compatibility worktree roots. All
+raw fleet working folders and retained jobs share one protected path set across
+hosts, including occupants excluded from issue adoption. Adopted jobs record the
+observed working folder for later ticks and restarts.
+
+Ordinary recovery runs at most once per host per `fleetRecoveryEvery`; failed
+reads are paced too. Failed Codex launches, failed trust revokes and bounded stop
+releases request immediate recovery, deferred until observation if necessary.
+Down hosts and hosts with neither enabled Codex launches nor recorded or observed
+Codex jobs are skipped. Disabling launches still allows cleanup of existing jobs.
+Only trusted direct `issue-N` entries without a retained owner are removed;
+other roots, nested paths and untrusted entries stay untouched. Bounded release
+also attempts exact-checkout revocation directly. There is no new timer or
+app-side trigger. Invalid checkout cleanup skips, and ordinary deletion errors
+remain best effort; only failed Codex trust revocation blocks teardown.
 
 Grant and removal both validate a canonical positive `issue-N` checkout through
 `validJobCheckout`. Here N is the internal job key; for a `/swarm` comment it is

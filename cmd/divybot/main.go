@@ -2244,7 +2244,8 @@ type Coord struct {
 	beatMu      sync.Mutex
 	beatStarted string
 	stopping    bool
-	dry         bool // dry-run: log spawn/adopt decisions, take no spawning action
+	trust       checkoutTrustRecovery // accessed only by the serialized dispatcher loop
+	dry         bool                  // dry-run: log spawn/adopt decisions, take no spawning action
 	gov         struct {
 		mu sync.Mutex
 		q  map[string]quota // freshest live meter reading per account
@@ -2278,7 +2279,7 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 	j := &Job{
 		Issue: n, Host: ref.Host, Label: agent + "-" + strconv.Itoa(n),
 		HerdrScope: ref.HerdrScope, TerminalID: ref.TerminalID,
-		Pane: ref.Pane, Workspace: ref.Workspace,
+		Pane: ref.Pane, Workspace: ref.Workspace, Workdir: ref.Cwd, // guard:trust-adopt-cwd
 		Target: tgt.Label, Repo: tgt.Repo, Branch: fmt.Sprintf("%s%d", c.cfg.BranchPrefix, n),
 		Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Home: is.home(),
@@ -2304,7 +2305,6 @@ func newCoord(cfg *Config) *Coord {
 // startOwnerGrantsWithTargets loads the cockpit targets before the owner-grant
 // store recovers, so a saved grant for a cockpit repository is valid on restart.
 func (c *Coord) startOwnerGrantsWithTargets(ctx context.Context) {
-	c.reconcileCheckoutTrust(ctx) // guard:trust-startup-reconcile
 	c.refreshCockpitTargets()
 	c.startOwnerNativeGrants(ctx)
 }
@@ -2547,7 +2547,6 @@ func (c *Coord) activeHosts() []Host {
 }
 
 func (c *Coord) tick(ctx context.Context) {
-	c.reconcileCheckoutTrust(ctx) // guard:trust-tick-reconcile
 	// The cockpit's target list first, so every step of this tick reads it.
 	c.refreshCockpitTargets()
 	c.actionTick(ctx)
@@ -2770,6 +2769,7 @@ func (c *Coord) tick(ctx context.Context) {
 			c.replySourceStarted(ctx, n)
 		}
 	}
+	c.reconcileCheckoutTrust(ctx) // guard:trust-post-adoption-reconcile
 	c.st.save()
 }
 
@@ -2863,6 +2863,7 @@ type agentRef struct {
 	HerdrScope     *herdrScope
 	TerminalID     string
 	Host           string
+	Cwd            string
 	Agent          string // claude | codex
 	Status         string // idle|working|blocked|done|unknown
 	Pane           string // send/read target
@@ -2939,6 +2940,12 @@ func issueFromCwd(cwd string) int {
 func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]bool) {
 	out := map[int]agentRef{}
 	up := map[string]bool{}
+	live := map[string]bool{}
+	codex := map[string]bool{}
+	available := map[string]bool{}
+	defer func() {
+		c.trust.live, c.trust.up, c.trust.codex = live, available, codex
+	}()
 	c.st.mu.Lock()
 	jobs := map[int]*Job{}
 	for n, j := range c.st.Jobs {
@@ -2946,12 +2953,17 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 	}
 	c.st.mu.Unlock()
 	add := func(h Host, agents []AgentInfo) {
+		available[h.Name] = true
 		for _, a := range agents {
+			live[a.Cwd] = true // guard:trust-fleet-cwds
+			if accountKey(a.Agent) == "codex" {
+				codex[h.Name] = true
+			}
 			n := issueFromCwd(a.Cwd)
 			if n == 0 {
 				continue
 			}
-			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Cwd: a.Cwd, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
 			if j := jobs[n]; j != nil {
 				if !jobRefMatches(ref, j) {
 					continue
@@ -3407,7 +3419,12 @@ func (c *Coord) workerGoal(n int, is Issue, tgt Target, workdir, branch string, 
 	return goal
 }
 
-func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) error {
+func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent string, ovr Overrides, receipt *durableMatrixReceipt) (launchErr error) {
+	defer func() {
+		if agent == "codex" && launchErr != nil {
+			c.recoverCheckoutTrust(ctx) // guard:trust-failed-launch-recovery
+		}
+	}()
 	attempt := receipt.launchAttempt()
 	attempt.enter(stagePreparation)
 	ownerChoice := receipt != nil && receipt.dispatch != nil && receipt.dispatch.MatrixSource == ownerNativeSource
@@ -4214,6 +4231,7 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool 
 		}
 		done()
 	}
+	c.recoverCheckoutTrust(ctx) // guard:trust-bounded-release-recovery
 	log.Printf("issue #%d: native stop unconfirmed after %d attempts; run ended, capacity released", n, j.StopMisses)
 	return true
 }
@@ -4316,7 +4334,7 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 	// dir — left behind they accumulate without bound (115 GB of dead worktrees
 	// filled the mac-mini and ground builds to a halt). rm it on teardown.
 	rmctx, rmcancel := context.WithTimeout(ctx, 30*time.Second)
-	cleanupErr := host.cleanupCheckout(rmctx, j)
+	cleanupErr := c.cleanupCheckout(rmctx, host, j)
 	rmcancel()
 	if cleanupErr != nil {
 		log.Printf("issue #%d: worktree cleanup unconfirmed reason=%s", n, closedGoalReason(cleanupErr))
