@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -141,12 +140,11 @@ print(json.dumps(out))
 // runBounded runs a host script whose whole process group, and the wait for
 // its output pipes, ends with ctx: no inherited pipe outlives the bound.
 func (h Host) runBounded(ctx context.Context, script string) (string, error) {
-	defer children.hold()()
-	var cmd *exec.Cmd
+	var cmd *ownedCommand
 	if h.isLocal() {
-		cmd = exec.CommandContext(ctx, "bash", "-c", script)
+		cmd = commandContext(ctx, "bash", "-c", script)
 	} else {
-		cmd = exec.CommandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
+		cmd = commandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) } // guard:bridge-kill-group

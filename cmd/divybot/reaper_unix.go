@@ -10,31 +10,21 @@ import (
 	"time"
 )
 
-// reaperSweep is the backstop interval. Signals coalesce — a burst of exits can arrive as a single
-// SIGCHLD — and an orphan that dies while a spawn holds the gate is skipped and has to wait for a
-// later pass, so the reaper cannot rely on SIGCHLD alone.
+// reaperSweep retries adoption races and coalesced or missed SIGCHLD notifications.
 const reaperSweep = 30 * time.Second
 
-// waitAllExited collects every child that has already exited and reports how many. It never
-// blocks: WNOHANG makes wait4 return immediately once the remaining children are still running.
-//
-// Call it only through childGate.reapOrphans, which is what keeps it off the children os/exec is
-// waiting on.
-func waitAllExited() int { return collectExited(syscall.Wait4) }
-
-func collectExited(wait func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error)) int {
-	n := 0
+// collectExited waits on one unowned positive PID, never any os/exec-owned child.
+func collectExited(pid int, wait func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error)) bool {
+	if pid <= 0 {
+		return false
+	}
 	for {
 		var ws syscall.WaitStatus
-		pid, err := wait(-1, &ws, syscall.WNOHANG, nil)
+		got, err := wait(pid, &ws, syscall.WNOHANG, nil)
 		if err == syscall.EINTR {
 			continue
 		}
-		// pid 0: children exist, none has exited yet. pid -1 with ECHILD: no children at all.
-		if pid <= 0 || err != nil {
-			return n
-		}
-		n++
+		return err == nil && got == pid
 	}
 }
 
@@ -58,7 +48,7 @@ func startReaper(stop <-chan struct{}) {
 	}()
 }
 
-// Signals coalesce; a skipped sweep must also be retried by the backstop.
+// Signals coalesce; the backstop retries child adoption and enumeration races.
 func reapUntilStopped(stop <-chan struct{}, sigs <-chan os.Signal, ticks <-chan time.Time, reap func() int) {
 	for {
 		select {

@@ -529,8 +529,7 @@ func (s *State) saveLocked() error {
 // ============================ exec helpers ============================
 
 func run(ctx context.Context, name string, args ...string) (string, error) {
-	defer children.hold()()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := commandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -1197,8 +1196,7 @@ func resolveGHToken() string {
 	if t := strings.TrimSpace(os.Getenv("GH_TOKEN")); t != "" {
 		return t
 	}
-	defer children.hold()()
-	if out, err := exec.Command("gh", "auth", "token").Output(); err == nil {
+	if out, err := commandContext(context.Background(), "gh", "auth", "token").Output(); err == nil {
 		return strings.TrimSpace(string(out))
 	}
 	return ""
@@ -1330,10 +1328,9 @@ if command -v jq >/dev/null 2>&1; then t=$(mktemp); jq '.includeCoAuthoredBy=fal
 // refreshLocal triggers a claude oauth refresh on the coordinator (cheap noop
 // call) so the canonical creds file is fresh before we push it.
 func (a *AuthStore) refreshLocal(ctx context.Context) {
-	defer children.hold()()
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "claude", "-p", "ok")
+	cmd := commandContext(cctx, "claude", "-p", "ok")
 	cmd.Stdin = strings.NewReader("")
 	_ = cmd.Run()
 	if t := resolveGHToken(); t != "" {
@@ -1442,8 +1439,7 @@ type Issue struct {
 }
 
 func ghJSON(ctx context.Context, out any, args ...string) error {
-	defer children.hold()()
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd := commandContext(ctx, "gh", args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = nil

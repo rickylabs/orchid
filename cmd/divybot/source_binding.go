@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -143,13 +142,12 @@ var errSourceRead = errors.New("source read failed")
 // ghConditional performs one conditional GET and returns its status, body and
 // headers. gh exits non-zero for 304 and 404, which are answers, not failures.
 func ghConditional(ctx context.Context, path, etag string) (int, []byte, sourceMeta, error) {
-	defer children.hold()()
 	meta := sourceMeta{Remaining: -1}
 	args := []string{"api", "-i"}
 	if etag != "" {
 		args = append(args, "-H", "If-None-Match: "+etag)
 	}
-	cmd := exec.CommandContext(ctx, "gh", append(args, path)...)
+	cmd := commandContext(ctx, "gh", append(args, path)...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	runErr := cmd.Run()

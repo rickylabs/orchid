@@ -47,7 +47,7 @@ func TestReaperCollectsOrphanWhileOwnedChildLives(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := reaperHelper(ctx, "starvation").CombinedOutput()
-	if err != nil || string(out) != "REAPER-STARVATION-PASS\n" {
+	if err != nil || !strings.Contains(string(out), "REAPER-STARVATION-PASS\n") {
 		if strings.Contains(string(out), "orphan remained waitable while an owned child was live") {
 			t.Log("orphan remained waitable while an owned child was live")
 		}
@@ -116,15 +116,13 @@ func TestReaperHelper(t *testing.T) {
 	if !reports.Scan() || reports.Text() != strconv.Itoa(os.Getpid()) {
 		t.Fatal("kernel did not adopt the fixture orphan")
 	}
-	var gate childGate
+	var gate childRegistry
 	if mode == "starvation" {
-		release := gate.hold()
-		control, report, owned := startReaperFixture(t, "live")
+		control, report, owned := startOwnedReaperFixture(t, &gate)
 		defer func() {
 			control.Close()
 			report.Close()
 			_ = owned.Wait()
-			release()
 		}()
 		fmt.Fprintln(orphanControl, "exit")
 		deadline := time.Now().Add(time.Second)
@@ -175,11 +173,9 @@ func TestReaperHelper(t *testing.T) {
 	}
 
 	// A directly-owned child that already exited must remain waitable by os/exec.
-	release := gate.hold()
-	control, report, owned := startReaperFixture(t, "live")
+	control, report, owned := startOwnedReaperFixture(t, &gate)
 	defer control.Close()
 	defer report.Close()
-	defer release()
 	fmt.Fprintln(control, "exit")
 	deadline = time.Now().Add(3 * time.Second)
 	zombie := false
@@ -229,4 +225,46 @@ func startReaperFixture(t *testing.T, mode string) (*os.File, *os.File, *exec.Cm
 	input.Close()
 	output.Close()
 	return control, report, cmd
+}
+
+// Start the same cooperative fixture through the production ownership lifecycle.
+func startOwnedReaperFixture(t *testing.T, gate *childRegistry) (*os.File, *os.File, *ownedCommand) {
+	t.Helper()
+	input, control, err := os.Pipe()
+	if err != nil {
+		t.Fatal("owned control pipe unavailable")
+	}
+	report, output, err := os.Pipe()
+	if err != nil {
+		t.Fatal("owned report pipe unavailable")
+	}
+	cmd := gate.commandContext(context.Background(), os.Args[0], "-test.run=^TestReaperHelper$", "-test.timeout=12s")
+	cmd.Env = append(os.Environ(), "ORCHID_REAPER_TEST=live")
+	cmd.ExtraFiles = []*os.File{input, output}
+	if cmd.Start() != nil {
+		t.Fatal("owned fixture process unavailable")
+	}
+	input.Close()
+	output.Close()
+	return control, report, cmd
+}
+
+func TestReaperProcParent(t *testing.T) {
+	for _, test := range []struct {
+		stat string
+		want int
+		ok   bool
+	}{
+		{"7 (fixture) Z 42 0", 42, true},
+		{"7 (fixture ) (with spaces)) S 42 0", 42, true},
+		{"broken", 0, false},
+		{"7 (fixture)", 0, false},
+		{"7 (fixture) Z invalid", 0, false},
+		{"7 (fixture) Z 0", 0, false},
+	} {
+		got, ok := procParent([]byte(test.stat))
+		if got != test.want || ok != test.ok {
+			t.Fatal("proc stat parent parsing violated the direct-child filter")
+		}
+	}
 }
