@@ -2279,10 +2279,21 @@ func (c *Coord) adopt(n int, is Issue, status map[int]agentRef) (*Job, bool) {
 	j := &Job{
 		Issue: n, Host: ref.Host, Label: agent + "-" + strconv.Itoa(n),
 		HerdrScope: ref.HerdrScope, TerminalID: ref.TerminalID,
-		Pane: ref.Pane, Workspace: ref.Workspace, Workdir: ref.Cwd, // guard:trust-adopt-cwd
+		Pane: ref.Pane, Workspace: ref.Workspace,
 		Target: tgt.Label, Repo: tgt.Repo, Branch: fmt.Sprintf("%s%d", c.cfg.BranchPrefix, n),
 		Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Home: is.home(),
+	}
+	// A fleet cwd retains trust, but only a managed checkout grants deletion authority.
+	if host, known := c.hosts[ref.Host]; known && validTrustCheckout(ref.Cwd) && filepath.Base(ref.Cwd) == fmt.Sprintf("issue-%d", n) {
+		if roots, err := host.checkoutTrustRoots(); err == nil {
+			for _, root := range roots {
+				if filepath.Dir(ref.Cwd) == root { // guard:trust-adopt-root
+					j.Workdir = ref.Cwd // guard:trust-adopt-cwd
+					break
+				}
+			}
+		}
 	}
 	c.st.mu.Lock()
 	c.st.Jobs[n] = j

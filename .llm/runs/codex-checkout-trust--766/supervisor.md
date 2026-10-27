@@ -13,3 +13,9 @@ Specific operator instructions supersede the generic inbox PR template: this is 
 Baseline: `1bbc5bb60520ad14667b296a2c830de770c2abf8` on the existing PR branch. Codex implements the coordinator's explicitly approved narrow repair. No external review this round; the coordinator reviews the resulting head. Fresh feature matrix queried; the explicit assignment selects Codex with requested high effort instead of the default implementation route. No independent certification is claimed.
 
 Round 3 write surface: `cmd/divybot/main.go`, `cmd/divybot/codex_checkout_trust.go`, `cmd/divybot/codex_checkout_trust_reconcile_test.go`, `.github/scripts/check-codex-checkout-trust-mutants.py`, `cmd/divybot/README.md`, and this run directory. Private build logs and memory remain outside Git in the project run. Existing PR only; no new PR, merge, deployment, service restart or live configuration mutation.
+
+## Round 4 supervisor
+
+Baseline: `7f4b4371b6294f4d886b5f202bdb359866edadc7` on the existing PR branch. Codex implements the one approved adoption-path blocker; coordinator review follows. Fresh feature routing was queried; the explicit assignment overrides the default implementation route and requests high effort. No external reviewer is launched or independent PASS claimed.
+
+Write surface: `cmd/divybot/main.go`, `cmd/divybot/checkout_storage_test.go`, `.github/scripts/check-codex-checkout-trust-mutants.py`, `cmd/divybot/README.md`, and this run directory. Private logs, scripts, routing evidence and memory stay in the project run outside Git. Canonical final report goes through the assignment checkout's excluded report file. Existing PR only; stop READY.

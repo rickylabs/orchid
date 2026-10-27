@@ -99,7 +99,10 @@ and adoption, the serialized dispatcher reads native config to recover orphan
 grants under the configured persistent and compatibility worktree roots. All
 raw fleet working folders and retained jobs share one protected path set across
 hosts, including occupants excluded from issue adoption. Adopted jobs record the
-observed working folder for later ticks and restarts.
+observed working folder for later ticks and restarts only when it is a canonical
+`issue-N` checkout matching that job key and directly beneath one of that host's
+checkout roots. Other observed folders protect trust without becoming deletion
+targets; adoption leaves Workdir empty and cleanup retains its legacy fallback.
 
 Ordinary recovery runs at most once per host per `fleetRecoveryEvery`; failed
 reads are paced too. Failed Codex launches, failed trust revokes and bounded stop

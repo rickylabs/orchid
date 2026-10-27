@@ -31,8 +31,17 @@ mutants = [
      'live[a.Cwd] = true // guard:trust-fleet-cwds',
      '_ = a.Cwd // guard:trust-fleet-cwds'),
     ('adopted-cwd-recorded', 'main.go',
-     'Workdir: ref.Cwd, // guard:trust-adopt-cwd',
-     'Workdir: "", // guard:trust-adopt-cwd'),
+     'j.Workdir = ref.Cwd // guard:trust-adopt-cwd',
+     'j.Workdir = "" // guard:trust-adopt-cwd'),
+    ('adopted-cwd-direct-root', 'main.go',
+     'if filepath.Dir(ref.Cwd) == root { // guard:trust-adopt-root',
+     'if root != "" { // guard:trust-adopt-root'),
+    ('adopted-cwd-canonical', 'main.go',
+     'known && validTrustCheckout(ref.Cwd) && filepath.Base(ref.Cwd)',
+     'known && filepath.Base(ref.Cwd)'),
+    ('adopted-cwd-matches-job', 'main.go',
+     ' && filepath.Base(ref.Cwd) == fmt.Sprintf("issue-%d", n)',
+     ''),
     ('fleet-cwd-carried', 'main.go',
      'Host: h.Name, Cwd: a.Cwd, Agent: a.Agent',
      'Host: h.Name, Cwd: "", Agent: a.Agent'),
@@ -139,6 +148,11 @@ with tempfile.TemporaryDirectory(prefix='orchid-trust-mutants-') as temp:
             tested = compile_and_run()
             output = tested.stdout + tested.stderr
             red = tested.returncode != 0 and '--- FAIL: Test' in output and 'panic:' not in output
+            if label == 'adopted-cwd-direct-root':
+                # Both deletion boundaries must independently reject this guard removal.
+                red = red and all(
+                    '--- FAIL: TestCodexTrustAdoptionCheckoutBoundaries/' + case in output
+                    for case in ('outside-roots', 'nested-checkout'))
             result = {'mutation': label, 'compiledAssertionRed': red}
             results.append(result)
             print(json.dumps(result), flush=True)

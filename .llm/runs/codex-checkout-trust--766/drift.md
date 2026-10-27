@@ -21,3 +21,7 @@ The added receipt-number check was removed before final validation: comment disp
 ## Round 3 approved correction
 
 The coordinator's re-review of 1bbc5bb found premature recovery before fleet adoption and unnecessary daemon reads on every tick. Replace those with raw fleet cwd retention, recorded adopted Workdir, one global retained-path set, a post-adoption first sweep, interval-bounded subsequent sweeps and failure-triggered recovery. Down and non-Codex hosts are skipped. No external review is requested this round because the review credential expired; coordinator review remains pending. The existing plan is preserved; these instructions authorize this repair and its regression/mutation gates.
+
+## Round 4 approved correction
+
+The coordinator's review of 7f4b437 found that unconditional adopted Workdir persisted arbitrary deletion authority. Restrict that assignment to canonical matching issue checkouts with an exact direct parent from the adopting host's checkoutTrustRoots; otherwise retain the empty default. Raw fleet cwd retention remains unchanged. This specific repair supersedes the round-3 blanket cwd-persistence description. The explicit operator instruction forbids external review; the coordinator reviews the resulting head.
