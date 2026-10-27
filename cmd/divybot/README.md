@@ -94,8 +94,19 @@ or sibling checkout is trusted, and no config file is edited by Orchid.
 `codex_checkout_trust.go` owns both grant and removal. Checkout cleanup removes
 that same entry with a null API value before deleting the recorded directory;
 a failed acknowledgement retains cleanup responsibility. Failed startup also
-attempts removal with a separate bounded context. All work stays in divybot's
-launch/teardown paths and introduces no polling or app-side trigger.
+attempts removal with a separate bounded context. Startup and each existing serialized tick also read native config to reconcile
+orphan grants under the configured persistent and compatibility worktree roots.
+Only trusted direct `issue-N` checkouts without a retained per-host job are
+removed; other roots, nested paths and untrusted entries stay untouched. This
+recovers failed rollback and a crash between grant and Job save. A bounded stop
+release attempts revocation immediately, and the tick retries failed removals.
+Disabling new Codex launches does not disable this cleanup. There is no new timer
+or app-side trigger. Invalid checkout cleanup still skips, and ordinary deletion
+errors remain best effort; only failed Codex trust revocation blocks teardown.
+
+Grant and removal both validate a canonical positive `issue-N` checkout through
+`validJobCheckout`. Here N is the internal job key; for a `/swarm` comment it is
+the comment ID, while the dispatch home still names the source issue number.
 
 Per-thread trust remains necessary for initial thread creation, which precedes
 the persistent grant. The redundant process trust argument is removed from

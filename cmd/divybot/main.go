@@ -760,9 +760,6 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if e != nil {
 			return "", "", matrixSite("spawn.remote-control-name", e)
 		}
-		if agent == "codex" && !validJobCheckout(cwd, receipt.dispatch.Issue.Number) {
-			return "", "", matrixSite("spawn.checkout-trust", errAgentRegistration)
-		}
 		remote = &remoteControlRun{Cwd: cwd, Name: name, Model: ovr.Model, Effort: ovr.Effort}
 	}
 	if !strings.HasSuffix(agent, "-run") {

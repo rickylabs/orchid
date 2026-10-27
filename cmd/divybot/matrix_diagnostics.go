@@ -268,7 +268,6 @@ func (c *Coord) reportMatrixLaunchAfterRefusal(ctx context.Context, n int, post 
 }
 
 var matrixSites = map[string]bool{
-	"spawn.checkout-trust":                true,
 	"spawn.remote-control-mode":           true,
 	"spawn.remote-control-name":           true,
 	"spawn.remote-control-prepare":        true,

@@ -264,15 +264,3 @@ func TestTrustCheckoutMustHavePositiveCanonicalIssue(t *testing.T) {
 		}
 	}
 }
-
-func TestCodexTrustGrantMatchesReceiptIssue(t *testing.T) {
-	h := canonicalFixtureHost(t, "valid", func(string, map[string]any) any { t.Fatal("mismatched checkout reached daemon"); return nil })
-	on := true
-	h.RemoteControl = &RemoteControlConfig{Codex: &on}
-	ctx, done := context.WithTimeout(context.Background(), time.Second)
-	defer done()
-	_, _, err := h.spawnAgent(ctx, "fixture-agent", "/fixture/issue-8", nil, "codex", Overrides{}, registrationReceipt(t, "codex", Overrides{}), "Synthetic task")
-	if err == nil || matrixCause(err) != "spawn.checkout-trust" {
-		t.Fatal("a mismatched checkout was not refused before client selection")
-	}
-}
