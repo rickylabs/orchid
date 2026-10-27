@@ -15,3 +15,7 @@ Discovery: PR 1 uses wait4(-1) behind a lifetime-wide count. runHerdrForward hol
 Baseline regression: `go test ./cmd/divybot -run ^TestReaperCollectsOrphanWhileOwnedChildLives$ -count=1 -v` in golang:bookworm exited 1 at a real assertion: orphan remained waitable while an owned child was live. No production code changed before this measurement.
 
 Implementation: all twelve production constructors now use one owned-command helper. The registry fences Start/registration and direct-child enumeration/reaping; Wait retains ownership through os/exec completion. Linux collects only positive unowned direct PIDs. Focused `go test ./cmd/divybot -run ^TestReaper -count=1 -v` passed, including the previously red starvation regression, preservation of owned zombie status, live-orphan safety, startup failure, cancellation, output copying, pipe ordering and concurrent starts/sweeps. Full gates and isolated compiled mutations are running with shared warm caches.
+
+Separate read-only implementation review: PASS, no blockers. Exact operator-requested model/effort, sandbox read-only, stdin closed; complete 59 KB diff/current-source prompt supplied, tools forbidden. The reviewer checked the five golden-rule priorities.
+
+Mutation harness correction: the removed-start-fence mutant exposed a double receive in the test itself after detecting an early start. Retain the already-received result so the mutant fails a bounded assertion rather than hanging. The unchanged production fix remains green; the full mutation suite was restarted on its isolated source tree.

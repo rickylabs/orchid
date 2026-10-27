@@ -28,6 +28,8 @@ func TestReaperStartIsFencedDuringCollection(t *testing.T) {
 	defer cancel()
 	cmd := g.commandContext(ctx, "sh", "-c", "exit 0")
 	started := make(chan error, 1)
+	var startErr error
+	early := false
 	g.reapWith(func() []int { return []int{7} }, func(int) bool {
 		if g.mu.TryLock() {
 			g.mu.Unlock()
@@ -35,13 +37,17 @@ func TestReaperStartIsFencedDuringCollection(t *testing.T) {
 		}
 		go func() { started <- cmd.Start() }()
 		select {
-		case <-started:
+		case startErr = <-started:
+			early = true
 			t.Error("command started during a sweep")
 		case <-time.After(30 * time.Millisecond):
 		}
 		return false
 	})
-	if err := <-started; err != nil {
+	if !early {
+		startErr = <-started
+	}
+	if startErr != nil {
 		t.Fatal("command did not start after the sweep")
 	}
 	if cmd.Wait() != nil {
