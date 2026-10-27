@@ -1,65 +1,117 @@
 package main
 
-import "sync"
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os/exec"
+	"sync"
+)
 
-// divybot runs as pid 1 inside the orchid container, which makes it the reaper of last resort for
-// the whole pid namespace: when any process in the container loses its parent, the kernel
-// re-parents the orphan onto us. Go collects only the children it started itself — every
-// (*exec.Cmd).Run, .Output and .CombinedOutput waits on its own child — so a re-parented orphan is
-// waited on by nobody and stays in the process table as a zombie for the life of the daemon,
-// holding a pid slot each.
-//
-// The hazard is stealing an exit status. wait4(-1) collects *any* child, so a reaper firing while
-// os/exec sits in Wait can take that child first and leave the Wait to fail with ECHILD — turning
-// a healthy gh call into "waitid: no child processes" and stopping dispatch. That is a far worse
-// bug than the leak. So the reaper never runs while divybot owns a child of its own: every spawn
-// takes a hold, and reaping happens under the same mutex, which confines it to the gaps where the
-// only children left in the namespace are orphans.
-
-// childGate counts the child processes divybot spawned and is still waiting on.
-type childGate struct {
+// childRegistry separates os/exec-owned children from adopted orphans. Start and
+// PID registration share the sweep mutex; Wait runs outside it and relinquishes
+// ownership only after os/exec has collected the child and finished its I/O.
+// Long-lived commands therefore never prevent collection of unrelated orphans.
+type childRegistry struct {
 	mu    sync.Mutex
-	count int
+	owned map[int]*ownedCommand
 }
 
-// children guards every exec site in this program. A spawn that does not take a hold here is a
-// spawn the reaper may race, so keep this the only way divybot starts a process.
-var children childGate
+var children childRegistry
 
-// hold registers a spawn and returns its release. The intended use is one deferred call at the top
-// of the spawning function:
-//
-//	defer children.hold()()
-//
-// which takes the hold now and releases it when the function — and so the Wait inside it — is done.
-// Holds nest: a function that holds and then calls another that holds is counted twice and gated
-// until both return.
-func (g *childGate) hold() func() {
-	g.mu.Lock()
-	g.count++
-	g.mu.Unlock()
-	return func() {
-		g.mu.Lock()
-		g.count--
-		g.mu.Unlock()
+// ownedCommand is the sole production subprocess lifecycle. Configure its Cmd
+// before Start; finish all StdoutPipe/StderrPipe reads before calling Wait.
+// Run, Output and CombinedOutput already wait and must not be waited on again.
+type ownedCommand struct {
+	*exec.Cmd
+	owner *childRegistry
+}
+
+func commandContext(ctx context.Context, name string, args ...string) *ownedCommand {
+	return children.commandContext(ctx, name, args...)
+}
+
+func (g *childRegistry) commandContext(ctx context.Context, name string, args ...string) *ownedCommand {
+	return &ownedCommand{Cmd: exec.CommandContext(ctx, name, args...), owner: g}
+}
+
+// Start fences the fork-to-registration window against every orphan sweep.
+func (c *ownedCommand) Start() error {
+	c.owner.mu.Lock()
+	defer c.owner.mu.Unlock()
+	if err := c.Cmd.Start(); err != nil {
+		return err
 	}
+	if c.owner.owned == nil {
+		c.owner.owned = make(map[int]*ownedCommand)
+	}
+	c.owner.owned[c.Process.Pid] = c
+	return nil
 }
 
-// reapOrphans collects every child that has already exited, but only while divybot is waiting on
-// none of its own, and reports how many it took.
-func (g *childGate) reapOrphans() int { return g.reapWith(waitAllExited) }
+// Wait preserves os/exec's exit status and pipe-copy completion before release.
+func (c *ownedCommand) Wait() error {
+	err := c.Cmd.Wait() // guard:owned-wait
+	c.owner.mu.Lock()
+	defer c.owner.mu.Unlock()
+	if c.ProcessState != nil && c.owner.owned[c.Process.Pid] == c {
+		delete(c.owner.owned, c.Process.Pid)
+	}
+	return err
+}
 
-// reapWith is reapOrphans with the collector supplied, so the gating can be tested without forking
-// anything. Holding the mutex across the whole collect is the point of the design: it stops a
-// spawn from starting mid-reap and being collected before its own Wait ever sees it.
-func (g *childGate) reapWith(collect func() int) int {
+func (c *ownedCommand) Run() error {
+	if err := c.Start(); err != nil {
+		return err
+	}
+	return c.Wait()
+}
+
+func (c *ownedCommand) Output() ([]byte, error) {
+	if c.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	var out bytes.Buffer
+	c.Stdout = &out
+	// Retain bounded stderr on ExitError, as callers of os/exec.Output expect.
+	var diagnostic stderrTail
+	capture := c.Stderr == nil
+	if capture {
+		c.Stderr = &diagnostic
+	}
+	err := c.Run()
+	if exit, ok := err.(*exec.ExitError); capture && ok {
+		exit.Stderr = append([]byte(nil), diagnostic.Bytes()...)
+	}
+	return out.Bytes(), err
+}
+
+func (c *ownedCommand) CombinedOutput() ([]byte, error) {
+	if c.Stdout != nil || c.Stderr != nil {
+		return nil, errors.New("exec: output already set")
+	}
+	var out bytes.Buffer
+	c.Stdout, c.Stderr = &out, &out
+	err := c.Run()
+	return out.Bytes(), err
+}
+
+// reapWith holds the start fence through enumeration and positive-PID waits.
+// A stale candidate cannot become a newly started owned child during a sweep.
+func (g *childRegistry) reapWith(list func() []int, collect func(int) bool) int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.count != 0 {
-		return 0
+	n := 0
+	for _, pid := range list() {
+		if pid <= 0 || g.owned[pid] != nil {
+			continue
+		}
+		if collect(pid) {
+			n++
+		}
 	}
-	return collect()
+	return n
 }
 
-// Only the namespace init inherits otherwise-unowned processes in production.
+// Only namespace init inherits otherwise-unowned processes in production.
 func reaperEnabled(pid int) bool { return pid == 1 }

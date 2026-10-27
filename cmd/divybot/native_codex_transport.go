@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 )
 
 // One owned canonical generation for native prompt acceptance. Unlike
@@ -42,9 +41,8 @@ func (h Host) withJoinedCanonicalConnection(ctx context.Context, thread string, 
 	if script == "" {
 		script = canonicalEndScript(h.agentHome())
 	}
-	defer children.hold()()
 	name, args := h.joinedArgs(script)
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := commandContext(ctx, name, args...)
 	in, e := cmd.StdinPipe()
 	if e != nil {
 		return goalError("goal-transport-unavailable")

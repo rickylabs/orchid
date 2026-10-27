@@ -42,6 +42,19 @@ func reaperHelper(ctx context.Context, mode string) *exec.Cmd {
 	return cmd
 }
 
+// The owned event-stream child must not postpone collection of unrelated orphans.
+func TestReaperCollectsOrphanWhileOwnedChildLives(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := reaperHelper(ctx, "starvation").CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "REAPER-STARVATION-PASS\n") {
+		if strings.Contains(string(out), "orphan remained waitable while an owned child was live") {
+			t.Log("orphan remained waitable while an owned child was live")
+		}
+		t.Fatal("isolated owned-child starvation regression failed")
+	}
+}
+
 func TestReaperHelper(t *testing.T) {
 	mode := os.Getenv("ORCHID_REAPER_TEST")
 	if mode == "" {
@@ -71,7 +84,7 @@ func TestReaperHelper(t *testing.T) {
 		// Intentionally do not wait: this child must be adopted by the scenario process.
 		os.Exit(0)
 	}
-	if mode != "scenario" {
+	if mode != "scenario" && mode != "starvation" {
 		t.Fatal("unknown helper role")
 	}
 	// Linux offers the same authoritative orphan adoption/wait contract to a subreaper.
@@ -103,7 +116,33 @@ func TestReaperHelper(t *testing.T) {
 	if !reports.Scan() || reports.Text() != strconv.Itoa(os.Getpid()) {
 		t.Fatal("kernel did not adopt the fixture orphan")
 	}
-	var gate childGate
+	var gate childRegistry
+	if mode == "starvation" {
+		control, report, owned := startOwnedReaperFixture(t, &gate)
+		defer func() {
+			control.Close()
+			report.Close()
+			_ = owned.Wait()
+		}()
+		fmt.Fprintln(orphanControl, "exit")
+		deadline := time.Now().Add(time.Second)
+		count := 0
+		for count == 0 && time.Now().Before(deadline) {
+			count += gate.reapOrphans()
+			if count == 0 {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		if count != 1 {
+			t.Fatal("orphan remained waitable while an owned child was live")
+		}
+		fmt.Fprintln(control, "ping")
+		if scanner := bufio.NewScanner(report); !scanner.Scan() || scanner.Text() != "alive" {
+			t.Fatal("owned stream stopped during orphan collection")
+		}
+		fmt.Println("REAPER-STARVATION-PASS")
+		return
+	}
 	collected := make(chan int, 1)
 	go func() { collected <- gate.reapOrphans() }()
 	select {
@@ -134,11 +173,9 @@ func TestReaperHelper(t *testing.T) {
 	}
 
 	// A directly-owned child that already exited must remain waitable by os/exec.
-	release := gate.hold()
-	control, report, owned := startReaperFixture(t, "live")
+	control, report, owned := startOwnedReaperFixture(t, &gate)
 	defer control.Close()
 	defer report.Close()
-	defer release()
 	fmt.Fprintln(control, "exit")
 	deadline = time.Now().Add(3 * time.Second)
 	zombie := false
@@ -188,4 +225,46 @@ func startReaperFixture(t *testing.T, mode string) (*os.File, *os.File, *exec.Cm
 	input.Close()
 	output.Close()
 	return control, report, cmd
+}
+
+// Start the same cooperative fixture through the production ownership lifecycle.
+func startOwnedReaperFixture(t *testing.T, gate *childRegistry) (*os.File, *os.File, *ownedCommand) {
+	t.Helper()
+	input, control, err := os.Pipe()
+	if err != nil {
+		t.Fatal("owned control pipe unavailable")
+	}
+	report, output, err := os.Pipe()
+	if err != nil {
+		t.Fatal("owned report pipe unavailable")
+	}
+	cmd := gate.commandContext(context.Background(), os.Args[0], "-test.run=^TestReaperHelper$", "-test.timeout=12s")
+	cmd.Env = append(os.Environ(), "ORCHID_REAPER_TEST=live")
+	cmd.ExtraFiles = []*os.File{input, output}
+	if cmd.Start() != nil {
+		t.Fatal("owned fixture process unavailable")
+	}
+	input.Close()
+	output.Close()
+	return control, report, cmd
+}
+
+func TestReaperProcParent(t *testing.T) {
+	for _, test := range []struct {
+		stat string
+		want int
+		ok   bool
+	}{
+		{"7 (fixture) Z 42 0", 42, true},
+		{"7 (fixture ) (with spaces)) S 42 0", 42, true},
+		{"broken", 0, false},
+		{"7 (fixture)", 0, false},
+		{"7 (fixture) Z invalid", 0, false},
+		{"7 (fixture) Z 0", 0, false},
+	} {
+		got, ok := procParent([]byte(test.stat))
+		if got != test.want || ok != test.ok {
+			t.Fatal("proc stat parent parsing violated the direct-child filter")
+		}
+	}
 }

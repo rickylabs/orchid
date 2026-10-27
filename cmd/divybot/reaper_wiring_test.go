@@ -10,18 +10,17 @@ import (
 	"testing"
 )
 
-// Coverage guard: adding an unregistered command reintroduces the ECHILD race.
-// Inspect production files, including launch sites added after the original reaper PR.
-func TestReaperEveryExecSiteHoldsGate(t *testing.T) {
+// Coverage guard: bypassing the owned command helper reintroduces the wait race.
+func TestReaperEveryExecSiteUsesOwnedCommand(t *testing.T) {
 	files, err := parser.ParseDir(token.NewFileSet(), ".", func(info fs.FileInfo) bool {
 		return strings.HasSuffix(info.Name(), ".go") && !strings.HasSuffix(info.Name(), "_test.go")
 	}, 0)
 	if err != nil {
 		t.Fatal("production AST unavailable")
 	}
-	sites := 0
+	constructors, callers := 0, 0
 	for _, pkg := range files {
-		for _, file := range pkg.Files {
+		for filename, file := range pkg.Files {
 			execAlias := ""
 			for _, imp := range file.Imports {
 				value, _ := strconv.Unquote(imp.Path.Value)
@@ -35,57 +34,38 @@ func TestReaperEveryExecSiteHoldsGate(t *testing.T) {
 					}
 				}
 			}
-			if execAlias == "" {
-				continue
-			}
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				hold := token.NoPos
-				for _, stmt := range fn.Body.List {
-					d, ok := stmt.(*ast.DeferStmt)
-					if !ok {
-						continue
-					}
-					call, ok := d.Call.Fun.(*ast.CallExpr)
-					if !ok {
-						continue
-					}
-					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok {
-						continue
-					}
-					owner, ok := sel.X.(*ast.Ident)
-					if ok && owner.Name == "children" && sel.Sel.Name == "hold" {
-						hold = stmt.Pos()
-					}
-				}
-				ast.Inspect(fn.Body, func(node ast.Node) bool {
-					call, ok := node.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					owner, ok := sel.X.(*ast.Ident)
-					if !ok || owner.Name != execAlias || (sel.Sel.Name != "Command" && sel.Sel.Name != "CommandContext") {
-						return true
-					}
-					sites++
-					if hold == token.NoPos || hold > call.Pos() {
-						t.Errorf("process launch in %s lacks an earlier deferred child gate", fn.Name.Name)
-					}
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
 					return true
-				})
-			}
+				}
+				if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "commandContext" {
+					callers++
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if owner, ok := sel.X.(*ast.Ident); ok && owner.Name == execAlias && (sel.Sel.Name == "Command" || sel.Sel.Name == "CommandContext") {
+					constructors++
+					if filename != "reaper.go" {
+						t.Error("raw command construction bypasses ownership")
+					}
+				}
+				if raw, ok := sel.X.(*ast.SelectorExpr); ok && raw.Sel.Name == "Cmd" {
+					switch sel.Sel.Name {
+					case "Start", "Wait", "Run", "Output", "CombinedOutput":
+						if filename != "reaper.go" {
+							t.Error("raw command lifecycle bypasses ownership")
+						}
+					}
+				}
+				return true
+			})
 		}
 	}
-	if sites == 0 {
-		t.Fatal("no subprocess sites inspected")
+	if constructors != 1 || callers == 0 {
+		t.Fatal("expected one owned constructor and production callers")
 	}
 }
 

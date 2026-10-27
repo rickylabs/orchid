@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -204,10 +203,9 @@ func (h Host) herdrEventConnection(ctx context.Context) (io.ReadWriteCloser, err
 	}
 }
 
-// The reaper gate must cover the entire owned subprocess lifetime, including Wait.
+// The owned command remains registered through Wait without pausing orphan collection.
 func runHerdrForward(ctx context.Context, args []string, started chan<- error) {
-	defer children.hold()()
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := commandContext(ctx, "ssh", args...)
 	err := cmd.Start()
 	started <- err
 	if err == nil {

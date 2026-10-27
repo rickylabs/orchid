@@ -1,0 +1,178 @@
+baseline: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.160s
+mutated: owned Wait removed: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_linux_test.go:32: isolated kernel reaper assertions failed
+    reaper_test.go:86: owned command did not wait and preserve its exit status
+    reaper_test.go:86: owned command did not wait and preserve its exit status
+    reaper_test.go:86: owned command did not wait and preserve its exit status
+    reaper_test.go:86: owned command did not wait and preserve its exit status
+    reaper_test.go:115: cancelled command did not wait and release ownership
+    reaper_test.go:128: pipe fixture did not read output before waiting
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:157: concurrent command lost output or exit status
+    reaper_test.go:163: concurrent waits retained ownership
+FAIL	orch/cmd/divybot	0.150s
+restored: owned Wait removed: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.149s
+mutated: owned PID registration: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_linux_test.go:29: reaper stole an owned child's exit status
+    reaper_linux_test.go:32: isolated kernel reaper assertions failed
+    reaper_test.go:80: started command was not registered
+FAIL	orch/cmd/divybot	0.149s
+restored: owned PID registration: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.139s
+mutated: owned PID release: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_test.go:94: waited command retained ownership
+    reaper_test.go:94: waited command retained ownership
+    reaper_test.go:94: waited command retained ownership
+    reaper_test.go:94: waited command retained ownership
+    reaper_test.go:115: cancelled command did not wait and release ownership
+    reaper_test.go:128: pipe fixture did not read output before waiting
+    reaper_test.go:163: concurrent waits retained ownership
+FAIL	orch/cmd/divybot	0.143s
+restored: owned PID release: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.140s
+mutated: owned PID exclusion: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_linux_test.go:29: reaper stole an owned child's exit status
+    reaper_linux_test.go:32: isolated kernel reaper assertions failed
+    reaper_test.go:21: sweep must skip owned PIDs while collecting unrelated orphans
+FAIL	orch/cmd/divybot	0.158s
+restored: owned PID exclusion: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.144s
+mutated: start fence during collection: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_test.go:36: collector ran without excluding starts
+    reaper_test.go:42: command started during a sweep
+FAIL	orch/cmd/divybot	0.104s
+restored: start fence during collection: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.147s
+mutated: PID 1 activation: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_test.go:170: reaper activation must be confined to namespace init
+FAIL	orch/cmd/divybot	0.141s
+restored: PID 1 activation: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.146s
+mutated: nonblocking live-child wait: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_linux_test.go:29: reaper blocked waiting for a live inherited child
+    reaper_linux_test.go:32: isolated kernel reaper assertions failed
+    reaper_unix_test.go:16: collector must wait nonblocking for one positive child PID
+FAIL	orch/cmd/divybot	1.170s
+restored: nonblocking live-child wait: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.148s
+mutated: wait interrupted retry: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_unix_test.go:28: collector must retry interruptions and collect the candidate
+FAIL	orch/cmd/divybot	0.149s
+restored: wait interrupted retry: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.148s
+mutated: positive-PID wait: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_unix_test.go:16: collector must wait nonblocking for one positive child PID
+FAIL	orch/cmd/divybot	0.196s
+restored: positive-PID wait: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.138s
+mutated: direct-child enumeration: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_linux_test.go:32: isolated kernel reaper assertions failed
+    reaper_linux_test.go:52: orphan remained waitable while an owned child was live
+    reaper_linux_test.go:54: isolated owned-child starvation regression failed
+FAIL	orch/cmd/divybot	4.147s
+restored: direct-child enumeration: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.140s
+mutated: no signalling API: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_wiring_test.go:92: the reaper must not signal processes or introduce raw syscalls
+FAIL	orch/cmd/divybot	0.144s
+restored: no signalling API: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.148s
+mutated: signal wake: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_unix_test.go:87: signal wake was ignored
+FAIL	orch/cmd/divybot	1.153s
+restored: signal wake: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.146s
+mutated: backstop wake: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_unix_test.go:88: backstop wake was ignored
+FAIL	orch/cmd/divybot	1.149s
+restored: backstop wake: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.151s
+mutated: stop lifecycle: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_unix_test.go:93: reaper did not stop
+FAIL	orch/cmd/divybot	1.147s
+restored: stop lifecycle: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.147s
+mutated: main startup hook: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_wiring_test.go:127: main must start the guarded reaper exactly once
+FAIL	orch/cmd/divybot	0.143s
+restored: main startup hook: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.201s
+mutated: helper bypass: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 1
+    reaper_wiring_test.go:59: raw command lifecycle bypasses ownership
+FAIL	orch/cmd/divybot	0.183s
+restored: helper bypass: go test ./cmd/divybot -run ^TestReaper -count=1 -timeout=45s -json
+exit 0
+ok  	orch/cmd/divybot	0.148s
+PASS: 16 mutations failed assertions; 16 restored controls passed

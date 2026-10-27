@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -216,12 +215,11 @@ func (h Host) withCanonicalConnection(ctx context.Context, thread string, use fu
 }
 
 func (h Host) withGoalScript(ctx context.Context, script, thread string, use func(*goalRPC) error) error {
-	defer children.hold()()
-	var cmd *exec.Cmd
+	var cmd *ownedCommand
 	if h.isLocal() {
-		cmd = exec.CommandContext(ctx, "bash", "-c", script)
+		cmd = commandContext(ctx, "bash", "-c", script)
 	} else {
-		cmd = exec.CommandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
+		cmd = commandContext(ctx, "ssh", append(h.sshBase(), h.SSH, script)...)
 	}
 	in, e := cmd.StdinPipe()
 	if e != nil {

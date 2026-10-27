@@ -11,37 +11,42 @@ import (
 
 func TestReaperWaitContract(t *testing.T) {
 	calls := 0
-	got := collectExited(func(pid int, status *syscall.WaitStatus, options int, usage *syscall.Rusage) (int, error) {
-		if pid != -1 || options != syscall.WNOHANG || status == nil || usage != nil {
-			t.Fatal("collector must wait nonblocking for exited children only")
+	got := collectExited(7, func(pid int, status *syscall.WaitStatus, options int, usage *syscall.Rusage) (int, error) {
+		if pid != 7 || options != syscall.WNOHANG || status == nil || usage != nil {
+			t.Fatal("collector must wait nonblocking for one positive child PID")
 		}
 		calls++
-		switch calls {
-		case 1:
+		if calls == 1 {
 			return -1, syscall.EINTR
-		case 2, 3:
-			return 7, nil
-		case 4:
-			return 0, nil
-		default:
-			t.Fatal("collector did not stop when only live children remained")
-			return 0, nil
 		}
+		if calls > 2 {
+			t.Fatal("collector must stop after collecting its candidate")
+		}
+		return 7, nil
 	})
-	if got != 2 || calls != 4 {
-		t.Fatal("collector must retry interruptions and drain every exited child")
+	if !got || calls != 2 {
+		t.Fatal("collector must retry interruptions and collect the candidate")
 	}
-	for _, errno := range []error{syscall.ECHILD, syscall.EINVAL} {
+	for _, result := range []struct {
+		pid int
+		err error
+	}{
+		{0, nil}, {-1, syscall.ECHILD}, {-1, syscall.EINVAL},
+	} {
 		calls = 0
-		got = collectExited(func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+		if collectExited(7, func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
 			calls++
-			if calls > 1 {
-				t.Fatal("collector did not stop on a wait error")
-			}
-			return -1, errno
-		})
-		if got != 0 {
-			t.Fatal("a wait error is not a collected child")
+			return result.pid, result.err
+		}) || calls != 1 {
+			t.Fatal("a live child or a wait error must not count as collected")
+		}
+	}
+	for _, pid := range []int{-1, 0} {
+		if collectExited(pid, func(int, *syscall.WaitStatus, int, *syscall.Rusage) (int, error) {
+			t.Fatal("nonpositive PID reached wait4")
+			return 0, nil
+		}) {
+			t.Fatal("invalid PID counted as collected")
 		}
 	}
 }
