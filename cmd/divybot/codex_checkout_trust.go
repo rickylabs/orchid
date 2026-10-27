@@ -164,10 +164,13 @@ type checkoutTrustRecovery struct {
 }
 
 // Failure paths request an immediate pass; before the first snapshot it stays
-// pending until the post-adoption pass. Calls stay on the serialized loop.
+// pending until the first post-adoption pass. Later failures recover immediately
+// on the serialized loop; a snapshot alone does not prove adoption has run.
 func (c *Coord) recoverCheckoutTrust(ctx context.Context) {
 	c.trust.pending = true
-	c.reconcileCheckoutTrust(ctx)
+	if len(c.trust.last) > 0 { // guard:trust-first-recovery-after-adoption
+		c.reconcileCheckoutTrust(ctx)
+	}
 }
 
 func (c *Coord) reconcileCheckoutTrust(ctx context.Context) {

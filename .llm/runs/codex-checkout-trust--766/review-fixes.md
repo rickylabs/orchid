@@ -17,3 +17,14 @@ The final mutation gate contains 16 compiled guard removals, each required to ca
 A live owned-root check using the production Go helper removed an unsaved grant, preserved a retained job's grant, then removed it after release. The TUI check was repeated with a valid issue checkout: no trust timed out with no native resume; API trust became ready and resumed; removal made startup fail again. No screen was read or answered, and only proof-owned resources were cleaned up.
 
 The extra receipt-number check was discarded because source-comment dispatches use the comment ID as their internal job key (`source_binding.go:1233`, `main.go:3448` checkoutDirectory call). The source issue number remains a separate identity. The prepared path is validated without conflating these identifiers.
+
+## Round 3 — coordinator re-review of 1bbc5bb
+
+The two supplied blockers are addressed; coordinator review of the resulting head remains pending. No external review was attempted this round, as explicitly instructed.
+
+- **Live job trust:** main.go:2958 captures raw Herdr working folders before issue/identity/role filtering; main.go:2966 carries cwd into agentRef and main.go:2282 records it in adopted Job.Workdir. main.go:2772 invokes ordinary recovery after observation and adoption. The canonical daemon fixture asserts the job exists with its real cwd when the first config read occurs. Adoption persistence and later observation omission have separate regressions.
+- **Sweep cost:** codex_checkout_trust.go:200 skips down hosts; :203 checks enabled/eligible Codex launches or recorded/observed Codex jobs; :206 paces ordinary attempts by fleetRecoveryEvery, including failed reads. Failure hooks request immediate recovery; a pre-observation request remains pending. All work stays in the serialized dispatcher loop, without another timer or app read.
+- **Global retention:** codex_checkout_trust.go:178 builds one path set from raw fleet folders and every retained Job, including a job whose host is no longer configured. The canonical fixture serves two host aliases from one daemon and checks both retain the same paths.
+- **Evidence correction:** the prior round's worklog now consistently reports 16 final mutations. Round 3 expands that gate to 32. Its first run found a masked released-job assertion; a separate orphan-recovery test now proves that guard independently of direct bounded-release revocation.
+
+Protocol choice and write scope are unchanged: exact-checkout grant and null removal remain native API operations in the single trust module. Per-thread trust remains for thread creation. Existing live API/TUI proof is historical; this scheduling/retention repair introduces no new live configuration mutation.

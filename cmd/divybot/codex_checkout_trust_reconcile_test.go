@@ -112,11 +112,11 @@ func TestCodexTrustReconcileRejectsUnconfirmedReadAndInvalidRoot(t *testing.T) {
 // A canonical daemon fixture records actual config reads/removals. The fleet is
 // supplied independently so tests can distinguish raw occupants from adoption.
 type checkoutRecoveryFixture struct {
-	mu                    sync.Mutex
-	projects              map[string]any
-	reads, removals       int
-	failRead, failRemoval bool
-	onRead                func()
+	mu              sync.Mutex
+	projects        map[string]any
+	reads, removals int
+	failRead        bool
+	onRead          func()
 }
 
 func newCheckoutRecoveryFixture(t *testing.T) (*Coord, *checkoutRecoveryFixture, Host) {
@@ -144,9 +144,6 @@ func newCheckoutRecoveryFixture(t *testing.T) (*Coord, *checkoutRecoveryFixture,
 		}
 		if params["value"] != nil {
 			t.Error("recovery attempted a non-removal effect")
-			return map[string]any{}
-		}
-		if f.failRemoval {
 			return map[string]any{}
 		}
 		for cwd := range f.projects {
@@ -222,6 +219,7 @@ fi
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	cwd := "/fixture/disk/issue-7"
 	f.grant(cwd, "/fixture/disk/issue-8")
+	f.mu.Lock()
 	f.onRead = func() {
 		c.st.mu.Lock()
 		defer c.st.mu.Unlock()
@@ -230,6 +228,7 @@ fi
 			t.Error("first sweep preceded adoption of the observed cwd")
 		}
 	}
+	f.mu.Unlock()
 	c.fleet.publish(h.observerKey(), []AgentInfo{{Agent: "codex", Cwd: cwd, AgentStatus: "unknown"}}, true)
 	c.tick(context.Background())
 	f.check(t, 1, 1, cwd)
@@ -243,11 +242,30 @@ func TestCodexTrustRecoveryRequiresFirstSnapshot(t *testing.T) {
 	// is known, it cannot authorize removal without the working-folder snapshot.
 	c.trust.up = map[string]bool{h.Name: true}
 	c.recoverCheckoutTrust(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
 	f.check(t, 0, 0, orphan)
 	c.fleet.publish(h.observerKey(), nil, true)
 	c.fleetStatus(context.Background())
 	c.reconcileCheckoutTrust(context.Background())
 	f.check(t, 1, 1)
+}
+
+func TestCodexTrustInitialFailureRecoveryWaitsForAdoption(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	c.cfg.Targets = []Target{{Label: "work", Repo: "fixture/repo"}}
+	cwd := "/fixture/disk/issue-7"
+	f.grant(cwd, "/fixture/disk/issue-8")
+	c.fleet.publish(h.observerKey(), []AgentInfo{{Agent: "codex", Cwd: cwd}}, true)
+	status, _ := c.fleetStatus(context.Background())
+	// A retry action can obtain a fleet snapshot and fail before the main tick
+	// reaches adoption. Its recovery request must not run the first sweep early.
+	c.recoverCheckoutTrust(context.Background())
+	f.check(t, 0, 0, cwd, "/fixture/disk/issue-8")
+	if _, ok := c.adopt(7, Issue{Number: 7, Labels: []string{"work"}}, status); !ok {
+		t.Fatal("live job was not adopted")
+	}
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 1, 1, cwd)
 }
 
 func TestCodexTrustRetainsRawFleetFoldersAndGlobalJobs(t *testing.T) {
@@ -351,7 +369,9 @@ func TestCodexTrustRecoverySkipsDownAndNonCodexHosts(t *testing.T) {
 
 func TestCodexTrustRecoveryPacesFailedReads(t *testing.T) {
 	c, f, h := newCheckoutRecoveryFixture(t)
+	f.mu.Lock()
 	f.failRead = true
+	f.mu.Unlock()
 	c.fleet.publish(h.observerKey(), nil, true)
 	c.fleetStatus(context.Background())
 	c.reconcileCheckoutTrust(context.Background())
