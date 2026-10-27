@@ -1,6 +1,6 @@
 # Coordinator review repair
 
-The independent Opus 5.5 CHANGES review of de9b9f9 has been addressed on the same PR branch. Execution gates for the final repair are still running; no independent PASS is claimed for the repaired head.
+The independent Opus 5.5 CHANGES review of de9b9f9 has been addressed on the same PR branch. All final execution gates pass; no independent PASS is claimed for the repaired head.
 
 | Review blocker | Repair | Regression evidence |
 | --- | --- | --- |
@@ -16,4 +16,4 @@ The final mutation gate contains 16 compiled guard removals, each required to ca
 
 A live owned-root check using the production Go helper removed an unsaved grant, preserved a retained job's grant, then removed it after release. The TUI check was repeated with a valid issue checkout: no trust timed out with no native resume; API trust became ready and resumed; removal made startup fail again. No screen was read or answered, and only proof-owned resources were cleaned up.
 
-The extra receipt-number check was discarded because source-comment dispatches use the comment ID as their internal job key (`source_binding.go:1233`, `main.go` checkoutDirectory call). The source issue number remains a separate identity. The prepared path is validated without conflating these identifiers.
+The extra receipt-number check was discarded because source-comment dispatches use the comment ID as their internal job key (`source_binding.go:1233`, `main.go:3448` checkoutDirectory call). The source issue number remains a separate identity. The prepared path is validated without conflating these identifiers.
