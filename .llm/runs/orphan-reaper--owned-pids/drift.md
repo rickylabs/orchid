@@ -4,4 +4,4 @@ Operator override: specific Codex implementation/review identities take preceden
 
 Repository correction: dispatch checkout contains Harness; an isolated Orchid worktree carries the actual PR. Final report handoff remains in the original assignment checkout.
 
-Proc enumeration refinement: https://man7.org/linux/man-pages/man5/proc_tid_children.5.html warns that task children lists omit children during concurrent exits and can be unavailable by kernel configuration. Use a single /proc directory scan with stat PPID filtering instead; no task-child interface dependency. The scan is linear in this PID namespace, once per coalesced signal/backstop, and waits only on direct unowned PIDs.
+Proc enumeration refinement: https://man7.org/linux/man-pages/man5/proc_tid_children.5.html warns that task children lists omit children during concurrent exits and can be unavailable by kernel configuration. Use a single /proc directory scan with stat PPID filtering instead; no task-child interface dependency. The scan covers only this PID namespace, once per coalesced signal/backstop, and waits only on direct unowned PIDs.

@@ -19,3 +19,5 @@ Implementation: all twelve production constructors now use one owned-command hel
 Separate read-only implementation review: PASS, no blockers. Exact operator-requested model/effort, sandbox read-only, stdin closed; complete 59 KB diff/current-source prompt supplied, tools forbidden. The reviewer checked the five golden-rule priorities.
 
 Mutation harness correction: the removed-start-fence mutant exposed a double receive in the test itself after detecting an early start. Retain the already-received result so the mutant fails a bounded assertion rather than hanging. The unchanged production fix remains green; the full mutation suite was restarted on its isolated source tree.
+
+Compiled mutation suite completed: exit 0, 16/16 assertion failures and 16/16 restored passing controls. This includes removal of the actual Cmd.Wait, registration/release/exclusion, start fence, positive-PID/nonblocking waits, PPID filtering, no-signalling guard, signal/backstop/stop wiring, main startup and helper bypass.
