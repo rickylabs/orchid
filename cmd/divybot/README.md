@@ -103,7 +103,8 @@ observed working folder for later ticks and restarts.
 
 Ordinary recovery runs at most once per host per `fleetRecoveryEvery`; failed
 reads are paced too. Failed Codex launches, failed trust revokes and bounded stop
-releases request immediate recovery, deferred until observation if necessary.
+releases request immediate recovery, deferred until the first post-adoption pass
+if necessary.
 Down hosts and hosts with neither enabled Codex launches nor recorded or observed
 Codex jobs are skipped. Disabling launches still allows cleanup of existing jobs.
 Only trusted direct `issue-N` entries without a retained owner are removed;
