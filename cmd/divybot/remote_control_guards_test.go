@@ -48,7 +48,11 @@ func syntheticRemoteRun(t *testing.T) *remoteControlRun {
 	t.Helper()
 	id := privateTestID(t)
 	id = id[:8] + "-" + id[8:12] + "-4" + id[13:16] + "-8" + id[17:20] + "-" + id[20:]
-	return &remoteControlRun{NativeSessionID: id, Cwd: t.TempDir(), Name: "#7 synthetic task", Model: "fixture-model", Effort: "low", IdentitySource: "herdr-session-start", HookConfirmed: true}
+	cwd := filepath.Join(t.TempDir(), "issue-7")
+	if err := os.Mkdir(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return &remoteControlRun{NativeSessionID: id, Cwd: cwd, Name: "#7 synthetic task", Model: "fixture-model", Effort: "low", IdentitySource: "herdr-session-start", HookConfirmed: true}
 }
 func remoteThreadFixture(run *remoteControlRun) map[string]any {
 	return map[string]any{"thread": map[string]any{"id": run.NativeSessionID, "sessionId": run.NativeSessionID, "parentThreadId": nil, "cwd": run.Cwd, "name": run.Name, "model": run.Model, "reasoningEffort": run.Effort, "status": map[string]string{"type": "idle"}},

@@ -760,6 +760,9 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		if e != nil {
 			return "", "", matrixSite("spawn.remote-control-name", e)
 		}
+		if agent == "codex" && !validJobCheckout(cwd, receipt.dispatch.Issue.Number) {
+			return "", "", matrixSite("spawn.checkout-trust", errAgentRegistration)
+		}
 		remote = &remoteControlRun{Cwd: cwd, Name: name, Model: ovr.Model, Effort: ovr.Effort}
 	}
 	if !strings.HasSuffix(agent, "-run") {
@@ -2304,6 +2307,7 @@ func newCoord(cfg *Config) *Coord {
 // startOwnerGrantsWithTargets loads the cockpit targets before the owner-grant
 // store recovers, so a saved grant for a cockpit repository is valid on restart.
 func (c *Coord) startOwnerGrantsWithTargets(ctx context.Context) {
+	c.reconcileCheckoutTrust(ctx) // guard:trust-startup-reconcile
 	c.refreshCockpitTargets()
 	c.startOwnerNativeGrants(ctx)
 }
@@ -2546,6 +2550,7 @@ func (c *Coord) activeHosts() []Host {
 }
 
 func (c *Coord) tick(ctx context.Context) {
+	c.reconcileCheckoutTrust(ctx) // guard:trust-tick-reconcile
 	// The cockpit's target list first, so every step of this tick reads it.
 	c.refreshCockpitTargets()
 	c.actionTick(ctx)
@@ -4200,9 +4205,17 @@ func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool 
 		return true
 	}
 	c.st.mu.Lock()
-	defer c.st.mu.Unlock()
-	if !c.stopMissed(j) {
+	released := c.stopMissed(j)
+	c.st.mu.Unlock()
+	if !released {
 		return false
+	}
+	if host, ok := c.hosts[j.Host]; ok {
+		cleanup, done := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if err := host.revokeJobCheckoutTrust(cleanup, j); err != nil { // guard:trust-bound-release
+			log.Printf("issue #%d: released checkout trust removal pending reconciliation", n)
+		}
+		done()
 	}
 	log.Printf("issue #%d: native stop unconfirmed after %d attempts; run ended, capacity released", n, j.StopMisses)
 	return true
@@ -4310,7 +4323,9 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 	rmcancel()
 	if cleanupErr != nil {
 		log.Printf("issue #%d: worktree cleanup unconfirmed reason=%s", n, closedGoalReason(cleanupErr))
-		return false
+		if errors.Is(cleanupErr, errCodexTrustRemoval) { // guard:trust-only-blocks-cleanup
+			return false
+		}
 	}
 	log.Printf("issue #%d: torn down (was on %s/%s)", n, j.Host, j.Label)
 

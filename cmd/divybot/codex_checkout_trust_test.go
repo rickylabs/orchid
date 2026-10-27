@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -59,7 +60,7 @@ func TestCodexCheckoutTrustRefusesUnconfirmedWrites(t *testing.T) {
 
 func TestCodexCheckoutTrustCapabilityIsNarrow(t *testing.T) {
 	p, w := remoteFixturePort(func(string, map[string]any) any { return trustWriteOK() }, "")
-	for _, cwd := range []string{"", "/", "relative", "/fixture/../issue-7", "/fixture/line\nbreak", strings.Repeat("/a", 2100)} {
+	for _, cwd := range []string{"", "/", "relative", "/fixture/project", "/fixture/issue-0", "/fixture/issue-01", "/fixture/issue--1", "/fixture/issue-7/child", "/fixture/../issue-7", "/fixture/line\nbreak", strings.Repeat("/a", 2100)} {
 		if p.setCheckoutTrust(cwd, true) == nil || p.setCheckoutTrust(cwd, false) == nil {
 			t.Fatal("unscoped trust path accepted")
 		}
@@ -140,6 +141,9 @@ func TestCodexCheckoutCleanupRemovesTrustBeforeDirectory(t *testing.T) {
 			err := h.cleanupCheckout(ctx, j)
 			if (err == nil) != (status == "ok") || len(writes) != 1 || !<-writes {
 				t.Fatal("cleanup lost the exact checkout or native removal ordering")
+			}
+			if status != "ok" && !errors.Is(err, errCodexTrustRemoval) {
+				t.Fatal("failed Codex removal lost its fatal teardown classification")
 			}
 			_, statErr := os.Stat(cwd)
 			if status == "ok" && !os.IsNotExist(statErr) || status != "ok" && statErr != nil {

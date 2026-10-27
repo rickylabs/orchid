@@ -519,7 +519,7 @@ func failPublish(t *testing.T, prefix string) func() {
 // R1: an Orchid shutdown while the Codex client is being checked is the
 // context's fact, never an early client verdict, through the production spawn.
 func TestLaunchAttemptClientSelectionShutdownIsContextFact(t *testing.T) {
-	cwd := t.TempDir()
+	cwd := filepath.Join(t.TempDir(), "issue-7")
 	o := Overrides{Model: "fixture-model", Effort: "low"}
 	r := registrationReceipt(t, "codex", o)
 	r.attempt, _ = fixtureAttempt(t, true, false, nil)

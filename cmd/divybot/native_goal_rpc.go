@@ -130,6 +130,11 @@ func (p *goalRPC) request(method string, params any) (json.RawMessage, error) {
 		if !ok || !write.valid() {
 			return nil, goalError("goal-method-refused")
 		}
+	} else if method == codexConfigRead {
+		read, ok := params.(codexCheckoutTrustRead)
+		if !ok || read.IncludeLayers {
+			return nil, goalError("goal-method-refused")
+		}
 	} else if method != "initialize" && method != "remoteControl/status/read" && method != "thread/start" && method != "thread/loaded/list" {
 		b, e := json.Marshal(params)
 		var scope struct {
@@ -376,7 +381,7 @@ func goalMethodAllowed(method string, serial int) bool {
 		return false
 	}
 	switch method {
-	case codexConfigValueWrite, "thread/goal/get", "thread/goal/set", "thread/goal/clear", "thread/turns/list", "thread/read", "thread/start", "thread/resume", "thread/name/set", "remoteControl/status/read", "turn/interrupt", "thread/queue/list", "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate", "thread/list", "thread/loaded/list", "thread/archive":
+	case codexConfigRead, codexConfigValueWrite, "thread/goal/get", "thread/goal/set", "thread/goal/clear", "thread/turns/list", "thread/read", "thread/start", "thread/resume", "thread/name/set", "remoteControl/status/read", "turn/interrupt", "thread/queue/list", "thread/backgroundTerminals/list", "thread/backgroundTerminals/terminate", "thread/list", "thread/loaded/list", "thread/archive":
 		return true
 	}
 	return false

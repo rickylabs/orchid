@@ -178,7 +178,10 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var methods []string
-			cwd := t.TempDir()
+			cwd := filepath.Join(t.TempDir(), "issue-7")
+			if err := os.Mkdir(cwd, 0700); err != nil {
+				t.Fatal(err)
+			}
 			o := Overrides{Model: "fixture-model", Effort: "low"}
 			r := registrationReceipt(t, "codex", o)
 			name, err := remoteSessionName(r.dispatch.Issue.Number, "Synthetic task")
