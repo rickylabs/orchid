@@ -300,6 +300,17 @@ func TestCodexTrustAdoptionRecordsObservedWorkdir(t *testing.T) {
 	f.check(t, 1, 0, cwd)
 }
 
+func TestCodexTrustReleasedJobNoLongerRetainsCheckout(t *testing.T) {
+	c, f, h := newCheckoutRecoveryFixture(t)
+	cwd := "/fixture/disk/issue-7"
+	f.grant(cwd)
+	c.st.Jobs[7] = &Job{Issue: 7, Host: h.Name, Agent: "codex", Workdir: cwd, StopMisses: stopMissLimit}
+	c.fleet.publish(h.observerKey(), nil, true)
+	c.fleetStatus(context.Background())
+	c.reconcileCheckoutTrust(context.Background())
+	f.check(t, 1, 1)
+}
+
 func TestCodexTrustRecoverySkipsDownAndNonCodexHosts(t *testing.T) {
 	for _, row := range []struct {
 		name                                      string
