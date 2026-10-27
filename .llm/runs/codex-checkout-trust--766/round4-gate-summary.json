@@ -1,0 +1,41 @@
+{
+  "kind": "execution-evidence",
+  "functionalHead": "5381d68af04bf2000269f5fa2978e1547be84728",
+  "image": "golang:bookworm",
+  "fullSuitePasses": 2,
+  "packageElapsedSeconds": [
+    443.485,
+    453.152
+  ],
+  "failedTests": 0,
+  "adoptionBoundaryCasesPerSuite": 8,
+  "trustControlPass": true,
+  "trustMutationsRed": 36,
+  "outsideAndNestedGuardRemovalAssertionRed": true,
+  "trustSourcesRestored": true,
+  "sourceMutationsRed": 50,
+  "sourceSourcesRestored": true,
+  "endpointMutationsRed": 17,
+  "endpointSourcesRestored": true,
+  "rootEndpointSubsetPass": true,
+  "imageExitCode": 0,
+  "endpointImageExitCode": 0,
+  "allExecutionGatesPass": true,
+  "independentReview": "coordinator review pending; no external review requested",
+  "commands": [
+    "go vet ./...",
+    "go build -o <gate-artifact> ./cmd/divybot",
+    "go test -json ./...",
+    "go test -race -json ./...",
+    "python3 .github/scripts/check-codex-checkout-trust-mutants.py",
+    "python3 .github/scripts/check-source-trigger-mutants.py",
+    "isolated two-UID endpoint race subset",
+    "python3 .github/scripts/check-owner-endpoint-mutants.py --root"
+  ],
+  "versions": [
+    "go version go1.27.3 linux/amd64",
+    "deno 2.9.7 (stable, release, x86_64-unknown-linux-gnu)"
+  ],
+  "finalOwnedGateContainersRemoved": true,
+  "supersededEndpointSetupFailure": "dropped operator UID could not write root-owned temporary directory; final isolated run uses a sticky shared directory"
+}

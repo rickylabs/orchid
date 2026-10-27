@@ -1,3 +1,26 @@
+# Codex checkout trust — round 4 execution validation
+
+All requested and configured execution gates PASS on functional head `5381d68af04bf2000269f5fa2978e1547be84728`. The final evidence commit changes run artifacts only. Coordinator review is pending; these are execution results, not independent implementation certification. [Machine-readable results](round4-gate-summary.json).
+
+| Gate | Result |
+| --- | --- |
+| Official golang:bookworm vet and build | PASS |
+| Full normal suite | PASS; explicit package verdict, zero failed tests |
+| Full race suite | PASS; explicit package verdict, zero failed tests/race reports |
+| Adoption boundary cases | Eight pass in each full suite |
+| Checkout-trust mutation wrapper | Green control and 36/36 compiled assertion-red mutations; isolated sources restored |
+| Source-trigger mutation wrapper | 50/50 compiled assertion-red mutations; source bytes restored |
+| Isolated two-UID endpoint race subset | PASS with required root/operator identities |
+| Endpoint mutation wrapper | 17/17 compiled assertion-red mutations; source bytes restored |
+| Both final owned gate containers | Zero exit; owned containers removed after completion |
+| Formatting, diff and added-line privacy checks | PASS |
+
+The parent-guard mutation independently fails both requested outside-root and nested-path cases. Separate mutations remove canonical-path validation and matching-job validation. Positive controls retain both supported roots. Further cases reject unclean paths, wrong issue keys, invalid roots and unknown hosts. The fixtures reload saved state, invoke production teardown with isolated fleet discovery, record the real rm target and verify only the root issue checkout disappears while unrelated directories survive (cmd/divybot/checkout_storage_test.go:56).
+
+Execution uses unprivileged normal/race tests with a seeded module cache and Deno in the requested image. Mutation builders run sequentially after the full suites; the kernel endpoint subset runs separately in an owned disposable image. The initial endpoint-only container had a root-owned temporary directory that the dropped operator UID could not write. Its fixture setup failed before the protocol assertions. A fresh container with a shared sticky temporary directory runs the same unchanged checks successfully; that complete run supersedes the setup failure. No product or test source was changed for this correction. No remote CI was polled. No live trust mutation or external review was performed this round, as instructed.
+
+---
+
 # Codex checkout trust — round 3 execution validation
 
 All final execution gates PASS on functional head `9bdeeea71246a1cde98fb2c81d5b0a2cea73b245`. Coordinator review remains pending; the generator claims no independent implementation PASS. [Machine-readable execution evidence](round3-gate-summary.json) records explicit package verdicts, exit codes, guard counts and source restoration.
