@@ -31,6 +31,8 @@ jobs:
         run: python3 .github/scripts/check-owner-endpoint-mutants.py --root
       - name: Compiled source-comment trigger guard mutations
         run: python3 .github/scripts/check-source-trigger-mutants.py
+      - name: Compiled checkout trust guard mutations
+        run: python3 .github/scripts/check-codex-checkout-trust-mutants.py
       - name: Vet
         run: go vet ./...
       - name: Build

@@ -15,7 +15,7 @@ import (
 
 // Codex refuses permission overrides on a remote resume; the prepared thread
 // already carries its approval and sandbox policy. Plain launches keep the flag.
-func TestRemoteCodexResumeDropsOnlyThePermissionOverride(t *testing.T) {
+func TestRemoteCodexResumeDropsPermissionAndProcessTrustOverrides(t *testing.T) {
 	cwd := "/fixture/issue-7"
 	_, plain, err := managedInteractiveAgentArgs("codex", Overrides{Model: "fixture-model", Effort: "high"}, cwd)
 	if err != nil || plain[0] != "--dangerously-bypass-approvals-and-sandbox" {
@@ -26,9 +26,10 @@ func TestRemoteCodexResumeDropsOnlyThePermissionOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := append(append([]string{}, plain[1:]...), "-c", `tui.status_line=["thread-id"]`, "--remote", "unix://", "resume", id)
+	want := []string{"-m", "fixture-model", "-c", `model_reasoning_effort="high"`, "-c", "check_for_update_on_startup=false",
+		"-c", `tui.status_line=["thread-id"]`, "--remote", "unix://", "resume", id}
 	if strings.Join(remote, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("remote resume argv changed beyond the permission override: %q", remote)
+		t.Fatalf("remote resume argv changed beyond permission and process trust overrides: %q", remote)
 	}
 }
 
@@ -50,6 +51,8 @@ func TestRemoteCodexPreparationMaterializesThread(t *testing.T) {
 		}
 		calls = append(calls, method)
 		switch method {
+		case codexConfigValueWrite:
+			return map[string]string{"status": "ok", "version": "fixture-version"}
 		case "remoteControl/status/read":
 			return map[string]string{"status": "connected"}
 		case "thread/start", "thread/read", "thread/read+turns":

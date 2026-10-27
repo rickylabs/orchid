@@ -380,12 +380,19 @@ func (h Host) prepareRemoteCodex(ctx context.Context, run *remoteControlRun, env
 	if err != nil {
 		return err
 	}
+	if !validTrustCheckout(run.Cwd) { // guard:trust-grant-checkout
+		return goalError("checkout-root-invalid")
+	}
 	return h.withCanonicalConnection(ctx, "", func(p *goalRPC) error {
 		// The pinned client must still match the daemon that owns the new thread.
 		if run.ClientVersion == "" || p.serverVersion != run.ClientVersion { // guard:client-version-unchanged
 			return codexClientUnavailable
 		}
-		return p.prepareRemoteThread(run, params)
+		if err := p.prepareRemoteThread(run, params); err != nil {
+			return err
+		}
+		// Remote TUI startup reads daemon config, not thread/CLI trust overrides.
+		return p.setCheckoutTrust(run.Cwd, true)
 	})
 }
 

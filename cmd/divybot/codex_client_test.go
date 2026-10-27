@@ -165,6 +165,7 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 		wantClient  string // "" = refused before spawn; "recheck" = refused before agent start
 	}{
 		{"matching-release-beats-newer-path-client", map[string]string{"9.1.0-x86_64-fixture": "9.1.0"}, "9.2.0", false, "", "codex-cli 9.1.0"},
+		{"comment-job-key-differs-from-source-issue", map[string]string{"9.1.0-x86_64-fixture": "9.1.0"}, "9.2.0", false, "", "codex-cli 9.1.0"},
 		{"no-matching-client-refuses-before-spawn", map[string]string{"9.0.0-x86_64-fixture": "9.0.0"}, "9.2.0", false, "", ""},
 		// An updater re-points the PATH alias after selection: the verified binary still runs.
 		{"path-alias-retargeted-after-selection", nil, "", true, `ln -sfn "$HOME/opt/9.2.0/bin/codex" "$HOME/.local/bin/codex"`, "codex-cli 9.1.0"},
@@ -178,7 +179,16 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var methods []string
-			cwd := t.TempDir()
+			root := t.TempDir()
+			cwd := filepath.Join(root, "issue-7")
+			if tc.name == "comment-job-key-differs-from-source-issue" {
+				// /swarm comments use the comment's job key for the checkout;
+				// the dispatch home still names source issue 7.
+				cwd = filepath.Join(root, "issue-6440000001")
+			}
+			if err := os.Mkdir(cwd, 0700); err != nil {
+				t.Fatal(err)
+			}
 			o := Overrides{Model: "fixture-model", Effort: "low"}
 			r := registrationReceipt(t, "codex", o)
 			name, err := remoteSessionName(r.dispatch.Issue.Number, "Synthetic task")
@@ -192,6 +202,8 @@ func TestRemoteCodexSpawnPinsDaemonClient(t *testing.T) {
 				methods = append(methods, method)
 				mu.Unlock()
 				switch method {
+				case codexConfigValueWrite:
+					return trustWriteOK()
 				case "remoteControl/status/read":
 					return map[string]string{"status": "connected"}
 				case "thread/start", "thread/read":

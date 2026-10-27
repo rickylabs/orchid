@@ -83,21 +83,49 @@ systemctl stop orchid            # stop the old multi-file orchid
 
 ### Native Codex goals
 
-Before interactive Codex registration, divybot supplies a process-local `-c`
-projects table that trusts only the exact checkout prepared for that dispatch.
-Codex 0.159.3 asks for folder consent even with approvals and sandbox bypassed;
-Herdr waits for readiness before returning from `agent start`, so accepting
-consent later during goal delivery cannot resolve this startup wait. The
-override uses a TOML inline table to preserve paths containing dots or quotes,
-and does not write the user's Codex config or trust the checkout's parent.
-Invalid or unscoped paths refuse before workspace creation.
+Before remote Codex registration, divybot grants trust to exactly the prepared
+checkout using the daemon's `config/value/write` API on its existing canonical
+connection. Codex 0.164's remote TUI checks daemon configuration before resume;
+thread and CLI overrides alone cannot satisfy that lookup. The private typed
+write capability permits only a checkout trust entry, quotes the whole path as
+one key segment, and requires an unoverridden native acknowledgement. No parent
+or sibling checkout is trusted, and no config file is edited by Orchid.
 
-If Herdr times out while missing a wrapped folder-consent dialog, divybot makes
-bounded read-only checks of the exact owned Codex pane and reports
-`startup_blocked` when its occupant and sequence remain stable around the live
-dialog. Missing proof retains `startup_timeout`. The diagnostic never submits
-input, retries registration, or exposes screen text, paths, or native errors.
-Registration, native identity and goal-delivery confirmation remain required.
+`codex_checkout_trust.go` owns both grant and removal. Checkout cleanup removes
+that same entry with a null API value before deleting the recorded directory;
+a failed acknowledgement retains cleanup responsibility. Failed startup also
+attempts removal with a separate bounded context. After the first fleet snapshot
+and adoption, the serialized dispatcher reads native config to recover orphan
+grants under the configured persistent and compatibility worktree roots. All
+raw fleet working folders and retained jobs share one protected path set across
+hosts, including occupants excluded from issue adoption. Adopted jobs record the
+observed working folder for later ticks and restarts only when it is a canonical
+`issue-N` checkout matching that job key and directly beneath one of that host's
+checkout roots. Other observed folders protect trust without becoming deletion
+targets; adoption leaves Workdir empty and cleanup retains its legacy fallback.
+
+Ordinary recovery runs at most once per host per `fleetRecoveryEvery`; failed
+reads are paced too. Failed Codex launches, failed trust revokes and bounded stop
+releases request immediate recovery, deferred until the first post-adoption pass
+if necessary.
+Down hosts and hosts with neither enabled Codex launches nor recorded or observed
+Codex jobs are skipped. Disabling launches still allows cleanup of existing jobs.
+Only trusted direct `issue-N` entries without a retained owner are removed;
+other roots, nested paths and untrusted entries stay untouched. Bounded release
+also attempts exact-checkout revocation directly. There is no new timer or
+app-side trigger. Invalid checkout cleanup skips, and ordinary deletion errors
+remain best effort; only failed Codex trust revocation blocks teardown.
+
+Grant and removal both validate a canonical positive `issue-N` checkout through
+`validJobCheckout`. Here N is the internal job key; for a `/swarm` comment it is
+the comment ID, while the dispatch home still names the source issue number.
+
+Per-thread trust remains necessary for initial thread creation, which precedes
+the persistent grant. The redundant process trust argument is removed from
+remote resumes; plain Codex launches keep their process-only TOML override.
+The startup update-prompt suppression and native registration, thread identity
+and goal-delivery checks remain in place. No screen is read or answered to
+establish folder trust.
 
 AGY checks effective settings and existing onboarding-cache readability before
 creating a native workspace. Unreadable files produce the fixed

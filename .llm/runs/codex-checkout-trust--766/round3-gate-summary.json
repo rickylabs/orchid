@@ -1,0 +1,31 @@
+{
+  "functionalHead": "9bdeeea71246a1cde98fb2c81d5b0a2cea73b245",
+  "fullSuitePasses": 2,
+  "failedTests": 0,
+  "imageExitCode": 0,
+  "trustControlPass": true,
+  "trustMutationsRed": 33,
+  "trustSourcesRestored": true,
+  "sourceExitCode": 0,
+  "sourceMutationsRed": 50,
+  "sourceSourcesRestored": true,
+  "endpointMutationsRed": 17,
+  "endpointSourcesRestored": true,
+  "allExecutionGatesPass": true,
+  "kind": "execution-evidence",
+  "independentReview": "coordinator review pending; no external review requested this round",
+  "image": "golang:bookworm",
+  "versions": [
+    "go version go1.27.3 linux/amd64",
+    "deno 2.9.7 (stable, release, x86_64-unknown-linux-gnu)"
+  ],
+  "commands": [
+    "go vet ./...",
+    "go build -o <gate-artifact> ./cmd/divybot",
+    "go test -json ./...",
+    "go test -race -json ./...",
+    "python3 .github/scripts/check-codex-checkout-trust-mutants.py",
+    "python3 .github/scripts/check-source-trigger-mutants.py"
+  ],
+  "endpointNote": "unchanged endpoint controls completed before the final first-recovery ordering guard"
+}
