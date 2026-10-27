@@ -66,3 +66,24 @@ func (h Host) jobCheckout(j *Job) string {
 func validJobCheckout(path string, n int) bool {
 	return validRemoteCwd(path) && filepath.Base(path) == fmt.Sprintf("issue-%d", n) && !strings.ContainsAny(path, "\x00\r\n")
 }
+
+// cleanupCheckout pairs managed Codex trust removal with recorded-path deletion.
+// Revoke first so a failed deletion cannot leave a trusted abandoned checkout.
+func (h Host) cleanupCheckout(ctx context.Context, j *Job) error {
+	wd := h.jobCheckout(j)
+	if !validJobCheckout(wd, j.Issue) {
+		return goalError("checkout-root-invalid")
+	}
+	if j.Agent == "codex" && j.RemoteControl != nil {
+		if j.RemoteControl.Cwd != wd {
+			return goalError("remote-control-binding-invalid")
+		}
+		if err := h.removeCheckoutTrust(ctx, wd); err != nil {
+			return err
+		}
+	}
+	if _, err := h.runRemote(ctx, "rm -rf "+shq(wd)); err != nil {
+		return goalError("checkout-cleanup-unconfirmed")
+	}
+	return nil
+}

@@ -83,21 +83,26 @@ systemctl stop orchid            # stop the old multi-file orchid
 
 ### Native Codex goals
 
-Before interactive Codex registration, divybot supplies a process-local `-c`
-projects table that trusts only the exact checkout prepared for that dispatch.
-Codex 0.159.3 asks for folder consent even with approvals and sandbox bypassed;
-Herdr waits for readiness before returning from `agent start`, so accepting
-consent later during goal delivery cannot resolve this startup wait. The
-override uses a TOML inline table to preserve paths containing dots or quotes,
-and does not write the user's Codex config or trust the checkout's parent.
-Invalid or unscoped paths refuse before workspace creation.
+Before remote Codex registration, divybot grants trust to exactly the prepared
+checkout using the daemon's `config/value/write` API on its existing canonical
+connection. Codex 0.164's remote TUI checks daemon configuration before resume;
+thread and CLI overrides alone cannot satisfy that lookup. The private typed
+write capability permits only a checkout trust entry, quotes the whole path as
+one key segment, and requires an unoverridden native acknowledgement. No parent
+or sibling checkout is trusted, and no config file is edited by Orchid.
 
-If Herdr times out while missing a wrapped folder-consent dialog, divybot makes
-bounded read-only checks of the exact owned Codex pane and reports
-`startup_blocked` when its occupant and sequence remain stable around the live
-dialog. Missing proof retains `startup_timeout`. The diagnostic never submits
-input, retries registration, or exposes screen text, paths, or native errors.
-Registration, native identity and goal-delivery confirmation remain required.
+`codex_checkout_trust.go` owns both grant and removal. Checkout cleanup removes
+that same entry with a null API value before deleting the recorded directory;
+a failed acknowledgement retains cleanup responsibility. Failed startup also
+attempts removal with a separate bounded context. All work stays in divybot's
+launch/teardown paths and introduces no polling or app-side trigger.
+
+Per-thread trust remains necessary for initial thread creation, which precedes
+the persistent grant. The redundant process trust argument is removed from
+remote resumes; plain Codex launches keep their process-only TOML override.
+The startup update-prompt suppression and native registration, thread identity
+and goal-delivery checks remain in place. No screen is read or answered to
+establish folder trust.
 
 AGY checks effective settings and existing onboarding-cache readability before
 creating a native workspace. Unreadable files produce the fixed

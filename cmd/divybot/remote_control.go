@@ -108,7 +108,12 @@ func remoteCodexArgs(args []string, cwd, native string) ([]string, error) {
 	// thread/resume. The prepared thread already carries approvalPolicy=never and
 	// sandbox=danger-full-access from thread/start, so the bypass flag is dropped.
 	out := make([]string, 0, len(args)+6)
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-c" && i+1 < len(args) && strings.HasPrefix(args[i+1], "projects={") {
+			i++ // Remote trust is owned by the daemon checkout lifecycle.
+			continue
+		}
 		if a == "--dangerously-bypass-approvals-and-sandbox" { // guard:remote-no-permission-override
 			continue
 		}

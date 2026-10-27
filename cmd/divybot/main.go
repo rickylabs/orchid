@@ -947,6 +947,15 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
 				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
 			}
+			defer func() {
+				if err != nil {
+					cleanup, done := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					defer done()
+					if e := h.removeCheckoutTrust(cleanup, cwd); e != nil {
+						log.Printf("issue #%d: failed launch trust cleanup unconfirmed reason=%s", receipt.dispatch.Issue.Number, closedGoalReason(e))
+					}
+				}
+			}()
 			nativeArgs, err = remoteCodexArgs(nativeArgs, cwd, remote.NativeSessionID)
 			if err != nil {
 				return pane, ws, matrixSite("spawn.remote-control-render", err)
@@ -4296,13 +4305,12 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 	// on-disk clone (orch-work/issue-N), and each carries a multi-GB build/target
 	// dir — left behind they accumulate without bound (115 GB of dead worktrees
 	// filled the mac-mini and ground builds to a halt). rm it on teardown.
-	wd := host.jobCheckout(j)
-	if validJobCheckout(wd, n) { // belt-and-suspenders: never rm a root
-		rmctx, rmcancel := context.WithTimeout(ctx, 30*time.Second)
-		if _, err := host.runRemote(rmctx, "rm -rf "+shq(wd)); err != nil {
-			log.Printf("issue #%d: worktree cleanup %s failed: %v", n, wd, err)
-		}
-		rmcancel()
+	rmctx, rmcancel := context.WithTimeout(ctx, 30*time.Second)
+	cleanupErr := host.cleanupCheckout(rmctx, j)
+	rmcancel()
+	if cleanupErr != nil {
+		log.Printf("issue #%d: worktree cleanup unconfirmed reason=%s", n, closedGoalReason(cleanupErr))
+		return false
 	}
 	log.Printf("issue #%d: torn down (was on %s/%s)", n, j.Host, j.Label)
 

@@ -286,6 +286,8 @@ func TestRemoteControlCanonicalPreparationOverRealFraming(t *testing.T) {
 	proofs := make(chan bool, 2)
 	h := canonicalFixtureHost(t, "valid", func(method string, params map[string]any) any {
 		switch method {
+		case codexConfigValueWrite:
+			return map[string]string{"status": "ok", "version": "fixture-version"}
 		case "remoteControl/status/read":
 			return map[string]string{"status": "connected"}
 		case "thread/start":

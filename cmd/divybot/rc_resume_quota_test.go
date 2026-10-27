@@ -26,9 +26,17 @@ func TestRemoteCodexResumeDropsOnlyThePermissionOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := append(append([]string{}, plain[1:]...), "-c", `tui.status_line=["thread-id"]`, "--remote", "unix://", "resume", id)
+	var kept []string
+	for i := 1; i < len(plain); i++ {
+		if plain[i] == "-c" && i+1 < len(plain) && strings.HasPrefix(plain[i+1], "projects={") {
+			i++
+			continue
+		}
+		kept = append(kept, plain[i])
+	}
+	want := append(kept, "-c", `tui.status_line=["thread-id"]`, "--remote", "unix://", "resume", id)
 	if strings.Join(remote, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("remote resume argv changed beyond the permission override: %q", remote)
+		t.Fatalf("remote resume argv changed beyond permission and process trust overrides: %q", remote)
 	}
 }
 
@@ -50,6 +58,8 @@ func TestRemoteCodexPreparationMaterializesThread(t *testing.T) {
 		}
 		calls = append(calls, method)
 		switch method {
+		case codexConfigValueWrite:
+			return map[string]string{"status": "ok", "version": "fixture-version"}
 		case "remoteControl/status/read":
 			return map[string]string{"status": "connected"}
 		case "thread/start", "thread/read", "thread/read+turns":
