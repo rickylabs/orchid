@@ -42,6 +42,19 @@ func reaperHelper(ctx context.Context, mode string) *exec.Cmd {
 	return cmd
 }
 
+// The owned event-stream child must not postpone collection of unrelated orphans.
+func TestReaperCollectsOrphanWhileOwnedChildLives(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := reaperHelper(ctx, "starvation").CombinedOutput()
+	if err != nil || string(out) != "REAPER-STARVATION-PASS\n" {
+		if strings.Contains(string(out), "orphan remained waitable while an owned child was live") {
+			t.Log("orphan remained waitable while an owned child was live")
+		}
+		t.Fatal("isolated owned-child starvation regression failed")
+	}
+}
+
 func TestReaperHelper(t *testing.T) {
 	mode := os.Getenv("ORCHID_REAPER_TEST")
 	if mode == "" {
@@ -71,7 +84,7 @@ func TestReaperHelper(t *testing.T) {
 		// Intentionally do not wait: this child must be adopted by the scenario process.
 		os.Exit(0)
 	}
-	if mode != "scenario" {
+	if mode != "scenario" && mode != "starvation" {
 		t.Fatal("unknown helper role")
 	}
 	// Linux offers the same authoritative orphan adoption/wait contract to a subreaper.
@@ -104,6 +117,34 @@ func TestReaperHelper(t *testing.T) {
 		t.Fatal("kernel did not adopt the fixture orphan")
 	}
 	var gate childGate
+	if mode == "starvation" {
+		release := gate.hold()
+		control, report, owned := startReaperFixture(t, "live")
+		defer func() {
+			control.Close()
+			report.Close()
+			_ = owned.Wait()
+			release()
+		}()
+		fmt.Fprintln(orphanControl, "exit")
+		deadline := time.Now().Add(time.Second)
+		count := 0
+		for count == 0 && time.Now().Before(deadline) {
+			count += gate.reapOrphans()
+			if count == 0 {
+				time.Sleep(time.Millisecond)
+			}
+		}
+		if count != 1 {
+			t.Fatal("orphan remained waitable while an owned child was live")
+		}
+		fmt.Fprintln(control, "ping")
+		if scanner := bufio.NewScanner(report); !scanner.Scan() || scanner.Text() != "alive" {
+			t.Fatal("owned stream stopped during orphan collection")
+		}
+		fmt.Println("REAPER-STARVATION-PASS")
+		return
+	}
 	collected := make(chan int, 1)
 	go func() { collected <- gate.reapOrphans() }()
 	select {
