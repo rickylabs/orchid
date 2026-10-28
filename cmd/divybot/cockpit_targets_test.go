@@ -280,26 +280,26 @@ func unpinnedAttemptFixture(t *testing.T, head string) (*Coord, matrixAttemptDep
 		launch: func(_ context.Context, _ int, _ Issue, _ Host, _ string, _ Overrides, r *durableMatrixReceipt) error {
 			mu.Lock()
 			defer mu.Unlock()
-			*launched = r.baseRevision()
+			*launched = r.admissionRevision()
 			return nil
 		},
 	}
 	return c, deps, refusal, launched
 }
 
-func TestUnpinnedLaunchRecordsTheHeadAsBaseRevision(t *testing.T) {
+func TestUnpinnedLaunchRecordsTheHeadAsAdmissionRevision(t *testing.T) {
 	head := strings.Repeat("e", 40)
 	c, deps, refusal, launched := unpinnedAttemptFixture(t, head)
 	if _, ok := c.matrixAttempt(context.Background(), 1, attemptIssue, Target{Repo: "example/project"}, map[string]int{"claude": 1}, deps); !ok || *launched != head {
 		t.Fatalf("unpinned launch did not start from the head: ok=%v base=%q refusal=%+v", ok, *launched, *refusal)
 	}
 	files, _ := filepath.Glob(filepath.Join(c.cfg.Matrix.ReceiptRoot, "*", "record", "binding.json"))
-	var binding struct{ BaseRevision string }
+	var binding struct{ AdmissionRevision string }
 	if len(files) != 1 {
 		t.Fatal("binding record missing")
 	}
 	raw, _ := os.ReadFile(files[0])
-	if json.Unmarshal(raw, &binding) != nil || binding.BaseRevision != head {
+	if json.Unmarshal(raw, &binding) != nil || binding.AdmissionRevision != head {
 		t.Fatalf("binding.json does not record the base: %s", raw)
 	}
 	pin := strings.Repeat("c", 40)
@@ -331,12 +331,12 @@ exit 0
 	is := Issue{ID: "fixture-node", Number: 7, Title: "fix", Body: "/swarm\nharness: claude\nrepo: fixture/upstream\n\nfix it", Labels: []string{"harness"}}
 	r := registrationReceipt(t, "claude", parseOverrides(is.Body))
 	base := strings.Repeat("e", 40)
-	r.base = base
+	r.admission = base
 	delete(c.cfg.Matrix.TargetRevisions, "fixture/upstream")
 	_ = c.spawn(context.Background(), 7, is, h, "claude", parseOverrides(is.Body), r)
 	raw, _ := os.ReadFile(scripts)
-	if !strings.Contains(string(raw), "git fetch --depth=1 origin '"+base+"'") {
-		t.Fatalf("the checkout is not the recorded base: %q", raw)
+	if !strings.Contains(string(raw), "git fetch --depth=1 --no-tags origin 'HEAD'") {
+		t.Fatalf("the checkout did not fetch the default branch independently of admission metadata: %q", raw)
 	}
 }
 

@@ -447,7 +447,7 @@ func prepareMatrixRequest(cfg MatrixConfig, is Issue, repo string, o Overrides) 
 	if is.ID == "" {
 		return req, matrixReason("issue-identity-missing")
 	}
-	if o.RoutingInvalid {
+	if o.RoutingInvalid || o.BaseInvalid || (o.Base != "" && !validRunBase(o.Base)) {
 		return req, matrixReason("brief-routing-invalid")
 	}
 	count := 0
@@ -562,24 +562,24 @@ type dispatchBinding struct {
 }
 
 type durableMatrixReceipt struct {
-	mu       sync.Mutex
-	file     string
-	digest   string
-	command  string
-	claimed  bool
-	owner    *receiptOwner
-	dispatch *dispatchBinding
-	profile  *workerProfile
-	base     string         // the target commit recorded as BaseRevision; the checkout uses it
-	attempt  *launchAttempt // nil outside a matrix launch
+	mu        sync.Mutex
+	file      string
+	digest    string
+	command   string
+	claimed   bool
+	owner     *receiptOwner
+	dispatch  *dispatchBinding
+	profile   *workerProfile
+	admission string         // authorization/worklog revision; never a checkout base
+	attempt   *launchAttempt // nil outside a matrix launch
 }
 
-// baseRevision is the recorded launch base, or "" without a matrix launch.
-func (r *durableMatrixReceipt) baseRevision() string {
+// admissionRevision is authorization metadata, independent of checkout preparation.
+func (r *durableMatrixReceipt) admissionRevision() string {
 	if r == nil {
 		return ""
 	}
-	return r.base
+	return r.admission
 }
 
 // workerProfile is the Harness profile the dispatcher read and pinned for this launch.
@@ -783,10 +783,10 @@ func readTargetHead(ctx context.Context, repo string) (string, error) {
 	return string(out), nil
 }
 
-// targetBase is the commit a launch starts from: the optional pin in
+// targetAdmissionRevision selects authorization/worklog evidence: the optional pin in
 // matrix.target_revisions, else the default-branch head read now. ok=false when
 // the pin is not a full lowercase commit or the head cannot be read.
-func targetBase(ctx context.Context, m MatrixConfig, repo string, head func(context.Context, string) (string, error)) (string, bool) {
+func targetAdmissionRevision(ctx context.Context, m MatrixConfig, repo string, head func(context.Context, string) (string, error)) (string, bool) {
 	if pin, pinned := m.TargetRevisions[repo]; pinned {
 		return pin, sourceRevision.MatchString(pin)
 	}
@@ -848,13 +848,13 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		report(refusalFor(e))
 		return "", false
 	}
-	// The base commit is the pin when one is set, else the default-branch head,
+	// The admission evidence revision is the pin when set, else the default-branch head,
 	// read once per attempt only when it is needed.
 	revision, based := "", false
 	base := func() bool {
 		if !based {
 			var ok bool
-			if revision, ok = targetBase(ctx, cfg, target.Repo, d.head); !ok {
+			if revision, ok = targetAdmissionRevision(ctx, cfg, target.Repo, d.head); !ok {
 				revision = ""
 			}
 			based = true
@@ -997,7 +997,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		IssueID, Repo, BriefDigest, ProfileRevision, ProfileDigest, Host string
 		Request                                                          matrixRequest
 		Route                                                            matrixRoute
-		BaseRevision                                                     string
+		AdmissionRevision                                                string
 	}{is.ID, target.Repo, briefDigest(is), profileRevision, shaText([]byte(req.ProfileText)), host.Name, req, route, revision}
 	// Same brief cannot be automatically launched twice, including after ambiguous transport failure.
 	key := shaText([]byte(is.ID + "\x00" + target.Repo + "\x00" + briefDigest(is)))
@@ -1025,7 +1025,7 @@ func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Targe
 		Provider: route.Provider, Model: route.Model, Role: route.Role, Effort: route.Effort,
 		TokenBudget: resolvedBudget, BudgetSource: budgetSource}
 	handle.profile = &workerProfile{Name: o.Profile, Revision: profileRevision, Text: req.ProfileText} // guard:worker-profile
-	handle.base = revision
+	handle.admission = revision
 	if e := handle.writeDispatch("reserved", nil); e != nil {
 		report(refusalWithReason(e, "dispatch-persistence-failed"))
 		return "", false

@@ -25,7 +25,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -334,6 +333,7 @@ type tracker struct {
 }
 
 type Job struct {
+	StartSHA              string            `json:"start_sha,omitempty"` // verified launch checkout commit
 	NativeSessionID       string            `json:"native_session_id,omitempty"`
 	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
 	HerdrScope            *herdrScope       `json:"herdr_scope,omitempty"`
@@ -3476,35 +3476,18 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	}
 	label := fmt.Sprintf("%s-%d", agent, n)
 
-	// 2. Worktree (clone + branch) before the agent runs.
-	// The checkout is exactly the base the launch recorded; without a matrix
-	// receipt (never a production launch) it is the optional pin.
-	base := receipt.baseRevision()
-	if base == "" {
-		base = c.cfg.Matrix.TargetRevisions[tgt.Repo]
-	}
+	// 2. Only checkout preparation selects the run base; admission pins do not.
 	pctx, pcancel := context.WithTimeout(ctx, 120*time.Second)
-	prep := fmt.Sprintf(`set -e
-mkdir -p %s; cd %s
-if [ ! -d .git ]; then find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true; git clone --depth=1 https://github.com/%s . ; fi
-o=$(git config --get remote.origin.url || true); o=${o%%.git}; o=${o%%/}
-[ "$(printf %%s "$o" | tr A-Z a-z)" = "$(printf %%s %s | tr A-Z a-z)" ] || exit %d
-git fetch --depth=1 origin %s >/dev/null 2>&1
-git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
-		shq(workdir), shq(workdir), tgt.Repo, shq("https://github.com/"+tgt.Repo), worktreeOriginMismatch, shq(base), shq(branch))
-	if _, err := host.runRemote(pctx, prep); err != nil {
+	startSHA, prepErr := host.prepareRunCheckout(pctx, tgt.Repo, workdir, branch, ovr)
+	if prepErr == nil {
+		prepErr = receipt.recordRunStart(ovr, startSHA)
+	}
+	if prepErr != nil {
 		attempt.contextEnded(pctx)
-		// The checkout must prove it is the resolved repository before any agent
-		// starts: an existing workspace with another origin is refused, never
-		// reused or replaced.
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == worktreeOriginMismatch { // guard:worktree-origin
-			pcancel()
-			log.Printf("issue #%d: workspace origin is not the source repository", n)
+		pcancel()
+		if errors.Is(prepErr, errWorktreeOrigin) {
 			return matrixSite("launch.worktree-origin", errMatrix)
 		}
-		pcancel()
-		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.worktree", errMatrix)
 	}
 	pcancel()
@@ -3624,7 +3607,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		HerdrScope: host.herdrScope(), TerminalID: receipt.dispatch.Location.TerminalID,
 		DispatchKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"),
 		Target:      tgt.Label, Repo: tgt.Repo,
-		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
+		StartSHA: startSHA, Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 		FinalReportManaged: !runMode,
 		Home:               is.home(),

@@ -29,6 +29,8 @@ import (
 )
 
 type Overrides struct {
+	Base             string `json:"base,omitempty"` // explicit remote Git ref or commit; empty uses remote HEAD
+	BaseInvalid      bool   `json:"-"`
 	MaxTokensPresent bool   `json:"max_tokens_present,omitempty"`
 	Tier             string `json:"tier,omitempty"`
 	Role             string `json:"role,omitempty"`
@@ -96,6 +98,9 @@ func parseOverrides(text string) Overrides {
 			if emptyGoalBudgetKey.MatchString(t) {
 				o.MaxTokensPresent = true
 			} // Detect invalid explicit emptiness without changing prompt parsing.
+			if t == "base:" {
+				o.BaseInvalid = true
+			}
 			if emptyRepoKey.MatchString(t) { // guard:repo-empty-declaration
 				o.RepoInvalid = true // an empty repo declaration refuses; the line still falls to the prompt
 			}
@@ -110,13 +115,18 @@ func parseOverrides(text string) Overrides {
 					canonical = "router"
 				}
 				switch canonical {
-				case "tier", "role", "pin", "profile", "model", "effort", "harness", "router":
+				case "tier", "role", "pin", "profile", "model", "effort", "harness", "router", "base":
 					if seenRouting[canonical] || val == "" {
 						o.RoutingInvalid = true
 					}
 					seenRouting[canonical] = true
 				}
 				switch key {
+				case "base":
+					o.Base = val
+					if val != strings.TrimSpace(m[2]) || !validRunBase(val) {
+						o.BaseInvalid = true
+					}
 				case "tier":
 					o.Tier = val
 				case "role":

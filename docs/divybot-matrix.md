@@ -222,3 +222,15 @@ gate requirement without revealing spend percentages or timestamps: `blocked by 
 (admission budget exhausted), `absent` (meter missing, unverified or without published
 windows), `stale` (sample timestamp expired or skewed), `expired` (published window
 reset elapsed), or `over ceiling` (usage at or over weekly ceiling).
+
+## Run checkout base
+
+`cmd/divybot/run_checkout.go` owns launch base resolution. Every new run fetches the
+remote default branch through remote `HEAD`, independent of admission pins, local
+branches and cached `origin/HEAD`. A `/swarm` `base: <remote-ref-or-full-commit>`
+explicitly selects another base. Failed fetches refuse rather than using a local ref.
+The private binding records `AdmissionRevision` separately from `BaseRef` and the
+verified `StartSHA`; the saved job also carries `start_sha`. These are persisted
+before a seat is created. Restoring a job does not reset its checkout. A new retry
+operation prepares and records a new start. Owner grant `TargetRevision` remains
+an immutable authorization-evidence revision, not an implicit run base.

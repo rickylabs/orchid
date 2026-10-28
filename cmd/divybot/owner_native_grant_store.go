@@ -386,9 +386,9 @@ func (s *ownerNativeGrantStore) revisionAllowed(target, revision string) bool {
 	return sourceRevision.MatchString(revision) && (!pinned || pin == revision)
 }
 
-// installRevision is the target revision a new record carries: the pin when one
+// installRevision pins authorization evidence, not the run checkout: the pin when one
 // is set, else the default-branch head read now. A retried install keeps the
-// revision its first attempt recorded, so one operation never binds two bases.
+// revision its first attempt recorded; checkout preparation resolves its own fresh base.
 // "" when the head cannot be read.
 func (s *ownerNativeGrantStore) installRevision(ctx context.Context, r ownerNativeInstallRequest) string {
 	if pin, pinned := s.cfg.Matrix.TargetRevisions[r.Target]; pinned {
@@ -403,7 +403,7 @@ func (s *ownerNativeGrantStore) installRevision(ctx context.Context, r ownerNati
 			return prior.TargetRevision
 		}
 	}
-	head, ok := targetBase(ctx, s.cfg.Matrix, r.Target, s.deps.head)
+	head, ok := targetAdmissionRevision(ctx, s.cfg.Matrix, r.Target, s.deps.head)
 	if !ok {
 		return ""
 	}
