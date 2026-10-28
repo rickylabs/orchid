@@ -7,3 +7,5 @@ Plan round 1 FAIL_FIX: distinguish admission revisions from checkout authority; 
 The five-minute safety tick cannot meet a 15-second backoff. One timer in the existing Coord.run select wakes the same supervision loop at the earliest persisted due time; no extra goroutine or app-read dependency. Auth screen probes are suppressed during native capacity recovery.
 
 Implementation review correction: status-only active readback proves continuation only on the shared canonical daemon. Non-RC recovery is refused as unproven. The initial plan review accepted that cross-process claim too broadly; its historical verdict remains preserved, and the implementation now fails closed at the physical transport boundary. The recovery timer services only due recoveries, preserving the ordinary five-minute board safety tick.
+
+The new 27-guard mutation command runs as an independent CI job to preserve the existing matrix-gate time budget. Final workflow reconciliation also identified the inherited checkout-trust mutation scan, which is included in the local gate sequence.

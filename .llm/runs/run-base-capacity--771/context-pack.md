@@ -3,3 +3,5 @@ Both fixes implemented; draft Orchid PR 130. Same-session implementation review 
 Independent same-session repair verification PASS. Persistence-failure timer note addressed. Final source needs serialized full image gates after mutation builds, because a 100-ms existing fixture expired once under concurrent load (20 repeated controls pass on candidate and baseline). Expanded final mutation script now has 27 unique guards.
 
 Public red/green evidence, dated lessons and reconciliation notes added. Final 26-guard predecessor run PASS; current 27-guard run includes the last persistence-failure wake fix. Next: serialized final image gates, final artifact commit/PR READY and verified canonical publication.
+
+Serialized full tests PASS: 3,020 passes, zero failures, six environment skips. Vet/build PASS. Race and inherited checkout-trust mutation scan remain before READY. New recovery CI checks run independently to preserve the serial matrix-gate budget.

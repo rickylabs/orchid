@@ -23,3 +23,5 @@ Design checkpoint:
 2026-10-28: Retained independent evaluator verified the one repair pass and returned PASS. Its nonblocking persistence-failure note was addressed with a bounded overdue-wake floor and an injected-save-failure control. An unrelated 100-ms readiness fixture expired before its first read under concurrent gate load; 20 isolated repetitions pass on both candidate and original baseline. The final full suite will be rerun on the final source without competing mutation builds.
 
 2026-10-28: Final 26-guard mutation run passed with 26 restored green controls. The final-source run adds the persistence-failure wake guard, with scoped mutation controls and a required nonempty test execution. Broader suite rerun remains pending until mutation compilation finishes.
+
+2026-10-28: Serialized vet/build/full test PASS (3,020 test/subtest passes, six explicit skips). Race run in progress. Workflow reconciliation includes the inherited checkout-trust mutation scan; new recovery mutations use a separate CI job to avoid extending the existing serial gate.
