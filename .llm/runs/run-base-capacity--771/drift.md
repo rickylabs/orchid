@@ -9,3 +9,5 @@ The five-minute safety tick cannot meet a 15-second backoff. One timer in the ex
 Implementation review correction: status-only active readback proves continuation only on the shared canonical daemon. Non-RC recovery is refused as unproven. The initial plan review accepted that cross-process claim too broadly; its historical verdict remains preserved, and the implementation now fails closed at the physical transport boundary. The recovery timer services only due recoveries, preserving the ordinary five-minute board safety tick.
 
 The new 27-guard mutation command runs as an independent CI job to preserve the existing matrix-gate time budget. Final workflow reconciliation also identified the inherited checkout-trust mutation scan, which is included in the local gate sequence.
+
+Validation fixture surface expanded to registration_test.go, agy_settings_block_test.go, final_comment_body_test.go, opencode_full_goal_test.go and source_repo_test.go. These model the new verified-SHA preparation output and immutable object metadata; production guards were retained. Final validation required no further product changes.

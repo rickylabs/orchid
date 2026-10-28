@@ -9,3 +9,5 @@ The stale-base defect is the implicit routing pin, and capacity stalls have no d
 - Goal lifecycle: https://github.com/openai/codex/blob/main/codex-rs/ext/goal/src/runtime.rs (retrieved 2026-10-28), lines 175-225 apply_external_goal_set marks active then calls continue_if_idle; lines 293-319 map turn-error to blocked and usage-limit to usageLimited.
 - Native goal parameters/status: https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/typescript/v2/ThreadGoalSetParams.ts and ThreadGoalStatus.ts (retrieved 2026-10-28). Status-only active update preserves objective and budget; origin distinguishes automatic recovery from user action.
 - Native API has no expected-revision/status CAS in ThreadGoalSetParams. Re-read after persisting an attempt, and document the remaining external-write race.
+
+- Turn metadata shape and item-detail projection verified at https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/typescript/v2/Turn.ts and ThreadTurnsListParams.ts (retrieved 2026-10-28): error/status are turn metadata, while itemsView controls item detail.
