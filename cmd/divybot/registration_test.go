@@ -14,7 +14,7 @@ import (
 func registrationReceipt(t *testing.T, agent string, o Overrides) *durableMatrixReceipt {
 	t.Helper()
 	key := strings.Repeat("d", 64)
-	r, err := persistMatrixReceipt(privateTestRoot(t), key, mustBuildAgentCmd(t, agent, o), receiptFor(MatrixConfig{}, syntheticRoute()), nil)
+	r, err := persistMatrixReceipt(privateTestRoot(t), key, mustBuildAgentCmd(t, agent, o), receiptFor(MatrixConfig{}, syntheticRoute()), map[string]any{})
 	if err != nil {
 		t.Fatal("fixture matrix receipt failed")
 	}

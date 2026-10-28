@@ -25,7 +25,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -334,41 +333,44 @@ type tracker struct {
 }
 
 type Job struct {
-	NativeSessionID       string            `json:"native_session_id,omitempty"`
-	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
-	HerdrScope            *herdrScope       `json:"herdr_scope,omitempty"`
-	TerminalID            string            `json:"terminal_id,omitempty"`
-	NativeRestoreTerminal string            `json:"-"` // in-memory resume registration for the current occupant
-	RemoteCleanup         string            `json:"remote_cleanup,omitempty"`
-	RemoteStopOperation   string            `json:"remote_stop_operation,omitempty"`
-	RemoteControl         *remoteControlRun `json:"remote_control,omitempty"`
-	FinalReportManaged    bool              `json:"final_report_managed,omitempty"`
-	FinalDoneAt           time.Time         `json:"final_done_at,omitempty"`  // legacy, unread: an ended turn starts no failure grace
-	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"` // legacy, unread
-	OwnerMismatchNotice   string            `json:"owner_mismatch_notice,omitempty"`
-	CompletionUnprovenSeq *uint64           `json:"completion_unproven_seq,omitempty"`
-	CompletionCheckedAt   time.Time         `json:"completion_checked_at,omitempty"`
-	CompletionCheckedSeq  uint64            `json:"completion_checked_seq,omitempty"`
-	GoalDelivery          string            `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
-	GoalDeliveryCommit    string            `json:"goal_delivery_commit,omitempty"` // RC Codex on-time native commit marker
-	NativeGoal            *dispatchGoal     `json:"native_goal,omitempty"`
-	DispatchKey           string            `json:"dispatch_key,omitempty"` // private launch receipt key
-	Issue                 int               `json:"issue"`
-	Home                  *dispatchIssue    `json:"home,omitempty"` // a comment binding's source issue; nil = inbox issue
-	Host                  string            `json:"host"`
-	Label                 string            `json:"label"`             // display name (claude-<n>)
-	Pane                  string            `json:"pane"`              // herdr send/read target (pane id)
-	Workdir               string            `json:"workdir,omitempty"` // exact checkout selected at launch
-	Workspace             string            `json:"workspace"`         // herdr teardown handle
-	Target                string            `json:"target"`
-	Repo                  string            `json:"repo"`
-	Branch                string            `json:"branch"`
-	Agent                 string            `json:"agent"`
-	Title                 string            `json:"title"`
-	Goal                  string            `json:"goal"`
-	PR                    int               `json:"pr"`
-	SpawnedAt             time.Time         `json:"spawned_at"`
-	LastPoke              time.Time         `json:"last_poke"`
+	GoalRecoveryObservation *goalRecoveryObservation `json:"goal_recovery_observation,omitempty"`
+	GoalRecovery            *goalRecovery            `json:"goal_recovery,omitempty"`
+	StartSHA                string                   `json:"start_sha,omitempty"` // verified launch checkout commit
+	NativeSessionID         string                   `json:"native_session_id,omitempty"`
+	HerdrAlerts             map[string]string        `json:"herdr_alerts,omitempty"`
+	HerdrScope              *herdrScope              `json:"herdr_scope,omitempty"`
+	TerminalID              string                   `json:"terminal_id,omitempty"`
+	NativeRestoreTerminal   string                   `json:"-"` // in-memory resume registration for the current occupant
+	RemoteCleanup           string                   `json:"remote_cleanup,omitempty"`
+	RemoteStopOperation     string                   `json:"remote_stop_operation,omitempty"`
+	RemoteControl           *remoteControlRun        `json:"remote_control,omitempty"`
+	FinalReportManaged      bool                     `json:"final_report_managed,omitempty"`
+	FinalDoneAt             time.Time                `json:"final_done_at,omitempty"`  // legacy, unread: an ended turn starts no failure grace
+	FinalDoneSeq            uint64                   `json:"final_done_seq,omitempty"` // legacy, unread
+	OwnerMismatchNotice     string                   `json:"owner_mismatch_notice,omitempty"`
+	CompletionUnprovenSeq   *uint64                  `json:"completion_unproven_seq,omitempty"`
+	CompletionCheckedAt     time.Time                `json:"completion_checked_at,omitempty"`
+	CompletionCheckedSeq    uint64                   `json:"completion_checked_seq,omitempty"`
+	GoalDelivery            string                   `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
+	GoalDeliveryCommit      string                   `json:"goal_delivery_commit,omitempty"` // RC Codex on-time native commit marker
+	NativeGoal              *dispatchGoal            `json:"native_goal,omitempty"`
+	DispatchKey             string                   `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue                   int                      `json:"issue"`
+	Home                    *dispatchIssue           `json:"home,omitempty"` // a comment binding's source issue; nil = inbox issue
+	Host                    string                   `json:"host"`
+	Label                   string                   `json:"label"`             // display name (claude-<n>)
+	Pane                    string                   `json:"pane"`              // herdr send/read target (pane id)
+	Workdir                 string                   `json:"workdir,omitempty"` // exact checkout selected at launch
+	Workspace               string                   `json:"workspace"`         // herdr teardown handle
+	Target                  string                   `json:"target"`
+	Repo                    string                   `json:"repo"`
+	Branch                  string                   `json:"branch"`
+	Agent                   string                   `json:"agent"`
+	Title                   string                   `json:"title"`
+	Goal                    string                   `json:"goal"`
+	PR                      int                      `json:"pr"`
+	SpawnedAt               time.Time                `json:"spawned_at"`
+	LastPoke                time.Time                `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -2346,6 +2348,24 @@ func (c *Coord) run(ctx context.Context) {
 	c.startHerdrFleet(ctx)
 	t := time.NewTicker(fleetRecoveryEvery)
 	defer t.Stop()
+	recoveryTimer := time.NewTimer(time.Hour)
+	recoveryTimer.Stop()
+	defer recoveryTimer.Stop()
+	var recoveryWake <-chan time.Time
+	armRecovery := func() {
+		if !recoveryTimer.Stop() {
+			select {
+			case <-recoveryTimer.C:
+			default:
+			}
+		}
+		recoveryWake = nil
+		if delay := c.nextGoalRecoveryDelay(time.Now()); delay > 0 {
+			recoveryTimer.Reset(delay)
+			recoveryWake = recoveryTimer.C
+		}
+	}
+	armRecovery()
 	for {
 		select {
 		case <-ctx.Done():
@@ -2355,7 +2375,10 @@ func (c *Coord) run(ctx context.Context) {
 			c.tick(ctx)
 		case <-t.C:
 			c.tick(ctx)
+		case <-recoveryWake:
+			c.capacityRecoveryPass(ctx)
 		}
+		armRecovery()
 	}
 }
 
@@ -2913,6 +2936,9 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 }
 
 func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
+	if capacityRecoveryOwns(j) {
+		return true
+	}
 	if j != nil && j.RemoteControl != nil {
 		return true
 	} // released only after native and paired absence proof
@@ -3476,35 +3502,18 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	}
 	label := fmt.Sprintf("%s-%d", agent, n)
 
-	// 2. Worktree (clone + branch) before the agent runs.
-	// The checkout is exactly the base the launch recorded; without a matrix
-	// receipt (never a production launch) it is the optional pin.
-	base := receipt.baseRevision()
-	if base == "" {
-		base = c.cfg.Matrix.TargetRevisions[tgt.Repo]
-	}
+	// 2. Only checkout preparation selects the run base; admission pins do not.
 	pctx, pcancel := context.WithTimeout(ctx, 120*time.Second)
-	prep := fmt.Sprintf(`set -e
-mkdir -p %s; cd %s
-if [ ! -d .git ]; then find . -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true; git clone --depth=1 https://github.com/%s . ; fi
-o=$(git config --get remote.origin.url || true); o=${o%%.git}; o=${o%%/}
-[ "$(printf %%s "$o" | tr A-Z a-z)" = "$(printf %%s %s | tr A-Z a-z)" ] || exit %d
-git fetch --depth=1 origin %s >/dev/null 2>&1
-git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
-		shq(workdir), shq(workdir), tgt.Repo, shq("https://github.com/"+tgt.Repo), worktreeOriginMismatch, shq(base), shq(branch))
-	if _, err := host.runRemote(pctx, prep); err != nil {
+	startSHA, prepErr := host.prepareRunCheckout(pctx, tgt.Repo, workdir, branch, ovr)
+	if prepErr == nil {
+		prepErr = receipt.recordRunStart(ovr, startSHA)
+	}
+	if prepErr != nil {
 		attempt.contextEnded(pctx)
-		// The checkout must prove it is the resolved repository before any agent
-		// starts: an existing workspace with another origin is refused, never
-		// reused or replaced.
-		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == worktreeOriginMismatch { // guard:worktree-origin
-			pcancel()
-			log.Printf("issue #%d: workspace origin is not the source repository", n)
+		pcancel()
+		if errors.Is(prepErr, errWorktreeOrigin) {
 			return matrixSite("launch.worktree-origin", errMatrix)
 		}
-		pcancel()
-		log.Printf("issue #%d: launch-effect-failed", n)
 		return matrixSite("launch.worktree", errMatrix)
 	}
 	pcancel()
@@ -3624,7 +3633,7 @@ git checkout -fB %s FETCH_HEAD >/dev/null 2>&1`,
 		HerdrScope: host.herdrScope(), TerminalID: receipt.dispatch.Location.TerminalID,
 		DispatchKey: strings.TrimPrefix(receipt.dispatch.RunID, "orchid-"),
 		Target:      tgt.Label, Repo: tgt.Repo,
-		Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
+		StartSHA: startSHA, Branch: branch, Agent: agent, Title: is.Title, Goal: truncate(is.Body, 1500), SpawnedAt: time.Now(),
 		Overrides: ovr, RunMode: runMode,
 		FinalReportManaged: !runMode,
 		Home:               is.home(),
@@ -3814,7 +3823,8 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		}
 		c.observeRemoteControl(ctx, host, j)
 	}
-	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && (ref.CompletionSeq != 0 || j.Agent == "claude"))
+	recovering := c.recoverCapacityStall(ctx, host, j, ref, known)
+	suppressInput := recovering || !matched || ref.Status == "done" || (ref.Status == "idle" && (ref.CompletionSeq != 0 || j.Agent == "claude"))
 	if matched && j.Agent == "agy" {
 		c.bindAGYLiveIdentity(ctx, host, j)
 	}
@@ -3907,7 +3917,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	// string match on pane scrollback is far too fragile to kill a live session
 	// over (stale 401s sit deep in scrollback; central auth-sync prevents real
 	// auth-death anyway). Read only the last few lines, and only when idle/blocked.
-	if matched && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
+	if matched && !recovering && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
 		rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 		txt := host.read(rctx, j.Pane, 4)
 		rcancel()
@@ -3922,7 +3932,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
 	// PR events may resume a matched, unfenced done worker; goal replays may not.
-	c.pollPR(ctx, n, j, host, ref.Status, !matched)
+	c.pollPR(ctx, n, j, host, ref.Status, !matched || recovering)
 
 	// Stranded: persistently idle with no PR → re-inject the goal (a poke that
 	// re-delivers the task, not a bare Enter — fixes the gcp strandings). See
@@ -3936,7 +3946,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 
 	// Blocked: agent waiting for input it can't get in the swarm → escalate.
-	if matched && ref.Status == "blocked" {
+	if matched && !recovering && ref.Status == "blocked" {
 		c.emitHerdrAlert(ctx, j, "native-block", "")
 		c.transitionGoal(ctx, j, "blocked")
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)

@@ -41,6 +41,7 @@ func goalNumber(n int64) bool { return n >= 0 && n <= maxGoalNumber }
 
 // A separate write capability. Harness's read-only transport is not widened.
 type goalRPC struct {
+	canonical  bool // shared app-server transport, never a short-lived native daemon
 	ctx        context.Context
 	input      io.Writer
 	scan       *bufio.Scanner

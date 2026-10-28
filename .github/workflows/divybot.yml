@@ -37,3 +37,14 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./cmd/divybot
+  run-recovery-mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Compiled run checkout and capacity recovery mutations
+        run: python3 scripts/check-run-recovery-mutations.py

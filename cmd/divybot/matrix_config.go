@@ -264,7 +264,7 @@ func validateMatrixIssue(ctx context.Context, cfg *Config, is Issue, repo string
 		return configProblem("matrix.profile_revision", "profile-unavailable")
 	}
 	if req.Override != nil {
-		revision, ok := targetBase(ctx, cfg.Matrix, repo, d.head)
+		revision, ok := targetAdmissionRevision(ctx, cfg.Matrix, repo, d.head)
 		if !ok {
 			return configProblem(matrixReasons["target-revision-invalid"].field, "target-revision-invalid")
 		}

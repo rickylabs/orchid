@@ -23,6 +23,7 @@ func goalTransportHost(t *testing.T, mode string) Host {
 import sys,json,os,time
 mode=os.environ.get('GOAL_RPC_FIXTURE','')
 goal=None
+if mode=='capacity-stall':goal={'threadId':'fixture-thread','objective':'fixture/inbox#7: synthetic task','tokenBudget':100,'status':'blocked','tokensUsed':10,'timeUsedSeconds':2,'createdAt':1,'updatedAt':3}
 if mode in ('existing','existing-complete'):goal={'threadId':'fixture-thread','objective':'fixture/inbox#7: synthetic task','tokenBudget':100,'status':'complete' if mode=='existing-complete' else 'active','tokensUsed':10,'timeUsedSeconds':2,'createdAt':1,'updatedAt':3}
 def send(v): print(json.dumps(v),flush=True)
 for line in sys.stdin:
@@ -31,6 +32,7 @@ for line in sys.stdin:
  if mode=='timeout':time.sleep(5);continue
  if method=='initialize':
   send({'id':i,'result':{'userAgent':'' if mode=='bad-initialize' else 'fixture'}});continue
+ if method=='thread/turns/list':send({'id':i,'result':{'data':[{'id':'fixture-turn','status':'failed','error':{'codexErrorInfo':'serverOverloaded'}}]}});continue
  if method=='thread/goal/get':send({'id':i,'result':{'goal':goal}});continue
  if method=='thread/goal/set':
   if goal is None:goal={'threadId':p['threadId'],'objective':p['objective'],'tokenBudget':p['tokenBudget'],'status':p['status'],'tokensUsed':0,'timeUsedSeconds':0,'createdAt':1,'updatedAt':1}
