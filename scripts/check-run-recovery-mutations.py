@@ -27,7 +27,7 @@ MUTATIONS = [
     ("private native binding not checked", RECOVERY, 'native != p.thread', 'false'),
     ("post-checkpoint goal change ignored", RECOVERY, '!reflect.DeepEqual(goal, current)', 'false'),
     ("resume writes goal intent again", RECOVERY, '"status": "active", "origin": "automatic"', '"status": "active", "origin": "automatic", "objective": intent.Objective'),
-    ("native resume missing", RECOVERY, 'err = resumeCapacityGoal(p, current, j.NativeGoal.Intent)', 'err = error(nil)'),
+    ("native resume missing", RECOVERY, 'resumed, err := resumeCapacityGoal(p, current, j.NativeGoal.Intent)', 'resumed, err := current, error(nil)'),
     ("native accounting verification removed", RECOVERY, 'after.TokensUsed < before.TokensUsed', 'false'),
     ("running slot released during recovery", MAIN, 'if capacityRecoveryOwns(j) {\n\t\treturn true\n\t}', 'if capacityRecoveryOwns(j) {\n\t\treturn false\n\t}'),
     ("ordinary blocked supervision wins", MAIN, 'if matched && !recovering && ref.Status == "blocked" {', 'if matched && ref.Status == "blocked" {'),
@@ -40,6 +40,16 @@ MUTATIONS = [
     ("unchanged idle probes repeated", RECOVERY, '} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery {', '} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery && false {'),
     ("recovery timer polls the entire board", MAIN, 'case <-recoveryWake:\n\t\t\tc.capacityRecoveryPass(ctx)', 'case <-recoveryWake:\n\t\t\tc.tick(ctx)'),
     ("completion capacity hook removed", COMPLETION, 'c.recoverCapacityWithPort(ctx, j, p, time.Now())', 'false, error(nil)'),
+    ("manual native resume ignored", RECOVERY, 'if owned && j.GoalRecovery.State == recoveryExhausted && goal.Status == "active" {', 'if owned && j.GoalRecovery.State == recoveryExhausted && goal.Status == "active" && false {'),
+    ("exhausted supervision never observes resumes", RECOVERY, 'changed := capacityObservationChanged(j, ref)\n\tif owned && j.GoalRecovery.State != recoveryExhausted {', 'changed := capacityObservationChanged(j, ref)\n\tif owned && j.GoalRecovery.State == recoveryExhausted { return true }; if owned {'),
+    ("exhausted observations bypass debounce", RECOVERY, 'changed := capacityObservationChanged(j, ref)\n\tif owned && j.GoalRecovery.State != recoveryExhausted {', 'changed := capacityObservationChanged(j, ref)\n\tif owned {'),
+    ("native release keeps suppression", RECOVERY, 'next.State = ""', 'next.State = recoveryExhausted'),
+    ("unchanged automatic exhaustion releases ownership", RECOVERY, 'if turn == next.TurnID {', 'if turn == next.TurnID && false {'),
+    ("native update timestamp ignored", RECOVERY, 'goal.UpdatedAt != prior.ObservedGoalUpdatedAt', 'false'),
+    ("automatic readback snapshot lost", RECOVERY, 'next.ObservedGoalStatus = resumed.Status', 'next.ObservedGoalStatus = "blocked"'),
+    ("exhaustion snapshot stale after lost acknowledgement", RECOVERY, 'next.ObservedGoalStatus = goal.Status', 'next.ObservedGoalStatus = "blocked"'),
+    ("same failed turn notice repeated", RECOVERY, 'if notified {', 'if notified && false {'),
+    ("legacy exhaustion notice history lost", RECOVERY, 'next.ExhaustedTurnID = next.TurnID // migrate exhausted records written before notice tracking', 'next.ExhaustedTurnID = "" // migrate exhausted records written before notice tracking'),
 ]
 
 

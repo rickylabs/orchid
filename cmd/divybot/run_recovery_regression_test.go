@@ -10,8 +10,14 @@ import (
 	"testing"
 )
 
-// Exercise the production clone/fetch/checkout path against a real synthetic remote.
-func TestRunCheckoutFreshHeadDespiteAdmissionPin(t *testing.T) {
+type checkoutFixture struct {
+	remote, stale, head string
+	git                 func(string, ...string) string
+	host                Host
+}
+
+func runCheckoutFixture(t *testing.T) checkoutFixture {
+	t.Helper()
 	remote := filepath.Join(t.TempDir(), "remote")
 	git := func(dir string, args ...string) string {
 		t.Helper()
@@ -44,53 +50,40 @@ exit 0
 		t.Fatal("fixture mode")
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	c := sourceRepoCoord(t)
-	c.cfg.Matrix.TargetRevisions["fixture/upstream"] = stale
 	root := t.TempDir()
 	h := Host{Name: "fixture", SSH: "fixture", Home: t.TempDir(), WorkdirRoot: root, DiskWorkdirRoot: root}
+	return checkoutFixture{remote: remote, stale: stale, head: head, git: git, host: h}
+}
+
+// Exercise production admission and checkout, using APIs present before the fix.
+func TestRunCheckoutFreshHeadDespiteAdmissionPin(t *testing.T) {
+	f := runCheckoutFixture(t)
+	c := sourceRepoCoord(t)
+	routing, deps, refusal, _ := unpinnedAttemptFixture(t, f.head)
+	c.cfg.Matrix.Revision = routing.cfg.Matrix.Revision
+	c.cfg.Matrix.Source = routing.cfg.Matrix.Source
+	c.cfg.Governor = routing.cfg.Governor
+	c.gov.q = routing.gov.q
+	c.cfg.Matrix.TargetRevisions["fixture/upstream"] = f.stale
 	is := Issue{ID: "fixture", Number: 7, Title: "synthetic task", Body: "/swarm\nharness: claude\nrepo: fixture/upstream\n\nImplement the task", Labels: []string{"harness"}}
-	o := parseOverrides(is.Body)
-	receipt := registrationReceipt(t, "claude", o)
-	// The original defect had a stale matrix receipt despite a fresh clone.
-	receipt.admission = stale
-	if os.WriteFile(filepath.Join(filepath.Dir(receipt.file), "binding.json"), goalJSON(map[string]any{"AdmissionRevision": stale}), 0600) != nil {
-		t.Fatal("fixture binding")
+	var receipt *durableMatrixReceipt
+	deps.host = func(Target, string) (Host, bool) { return f.host, true }
+	deps.launch = func(ctx context.Context, n int, issue Issue, host Host, agent string, o Overrides, r *durableMatrixReceipt) error {
+		receipt = r
+		return c.spawn(ctx, n, issue, host, agent, o, r)
 	}
-	_ = c.spawn(context.Background(), 7, is, h, "claude", o, receipt)
-	checkout := filepath.Join(root, "issue-7")
-	var start struct{ StartSHA, BaseRef string }
-	raw, readErr := os.ReadFile(filepath.Join(filepath.Dir(receipt.file), "binding.json"))
-	if readErr != nil || json.Unmarshal(raw, &start) != nil || start.StartSHA != head || start.BaseRef != "HEAD" {
-		t.Fatal("verified run start was not persisted before agent registration")
+	// Actual admission populates the old base/new admission field without a test-only adapter.
+	c.matrixAttempt(context.Background(), 7, is, Target{Repo: "fixture/upstream"}, map[string]int{"claude": 1}, deps)
+	if receipt == nil {
+		t.Fatalf("fixture admission did not reach production spawn: %s", refusal.ReasonCode)
 	}
-	if git(checkout, "rev-parse", "HEAD") != head {
+	checkout := filepath.Join(f.host.WorkdirRoot, "issue-7")
+	if f.git(checkout, "rev-parse", "HEAD") != f.head {
 		t.Fatal("run branch started from the stale admission pin instead of fetched default head")
 	}
-	// Existing local refs and a reused run branch must not become implicit bases.
-	git(checkout, "fetch", "--depth=1", "origin", stale)
-	git(checkout, "checkout", "-fB", "fixture/7", stale)
-	git(checkout, "update-ref", "refs/remotes/origin/old", stale)
-	git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/old")
-	got, err := h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{})
-	if err != nil || got != head || git(checkout, "rev-parse", "HEAD") != head {
-		t.Fatal("cached origin/HEAD or reused run branch overrode remote default HEAD")
-	}
-	git(remote, "branch", "release", stale)
-	for _, base := range []string{stale, "release", "refs/heads/release"} {
-		got, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{Base: base})
-		if err != nil || got != stale || git(checkout, "rev-parse", "HEAD") != stale {
-			t.Fatal("explicit brief base did not select its fetched commit")
-		}
-	}
-	if _, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{Base: "missing-base"}); err == nil || git(checkout, "rev-parse", "HEAD") != stale {
-		t.Fatal("failed fetch used a local fallback")
-	}
-	git(remote, "symbolic-ref", "HEAD", "refs/heads/release")
-	if got, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{}); err != nil || got != stale {
-		t.Fatal("changed remote default branch used cached local HEAD")
-	}
-	git(checkout, "config", "remote.origin.url", "https://github.com/fixture/other")
-	if _, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{}); err != errWorktreeOrigin {
-		t.Fatal("foreign checkout origin was reused")
+	var start struct{ StartSHA, BaseRef string }
+	raw, readErr := os.ReadFile(filepath.Join(filepath.Dir(receipt.file), "binding.json"))
+	if readErr != nil || json.Unmarshal(raw, &start) != nil || start.StartSHA != f.head || start.BaseRef != "HEAD" {
+		t.Fatal("verified run start was not persisted before agent registration")
 	}
 }

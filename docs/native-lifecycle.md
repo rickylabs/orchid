@@ -73,6 +73,18 @@ to this owner. Explicit stop, operator timeout and normal completion fences rema
 authoritative. Exhaustion is saved and notified, requiring inspection rather than
 silently launching another run.
 
+Exhaustion does not permanently suppress supervision. The recovery owner observes
+native goal changes independently of whether the run PR is open. After retry
+exhaustion observed the goal blocked, a matching active goal releases ownership
+durably. An unproven automatic resume already left the goal active: its unchanged
+native status/update timestamp and failed turn retain ownership until a later
+native update or turn progress. Older unproven records without that snapshot
+require native turn progress. These observations use the same sequence/status
+debounce and five-minute safety backstop; unchanged ticks add no reads or state
+writes. Lifetime attempt counts and failed-turn notice history survive release
+and restart, so re-entering exhaustion on the same failed turn cannot notify
+twice. A manual pause or limit retains its existing authority.
+
 Each attempt is durable before its status-only `thread/goal/set` request. The
 request preserves the objective, token budget and accumulated usage, verifies its
 native update notification and readback, and consumes an attempt even if the

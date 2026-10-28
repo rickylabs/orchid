@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,6 +33,206 @@ func capacityFixture(t *testing.T) (*Coord, *Job) {
 	c := &Coord{cfg: &Config{Inbox: "fixture/inbox", Matrix: MatrixConfig{ReceiptRoot: root}}, st: loadState(filepath.Join(t.TempDir(), "state.json"))}
 	c.st.Jobs[j.Issue] = j
 	return c, j
+}
+
+func TestCapacityRecoveryExhaustedNativeObservation(t *testing.T) {
+	for _, mode := range []string{"unchanged-active", "manual-active", "new-turn", "blocked", "paused", "wrong-goal", "read-failed", "save-failed", "legacy-active"} {
+		t.Run(mode, func(t *testing.T) {
+			c, j := capacityFixture(t)
+			goal := fixtureGoal("active")
+			j.GoalRecovery = &goalRecovery{State: recoveryExhausted, Attempts: 1, TurnID: "capacity-turn", ExhaustedTurnID: "capacity-turn", Reason: "goal-capacity-resume-unproven", ObservedGoalStatus: "active", ObservedGoalUpdatedAt: goal.UpdatedAt}
+			turn := "capacity-turn"
+			switch mode {
+			case "manual-active", "save-failed":
+				goal.UpdatedAt++
+			case "new-turn":
+				turn = "next-turn"
+			case "blocked", "paused":
+				goal.Status = mode
+			case "wrong-goal":
+				goal.Objective = "different objective"
+			case "legacy-active":
+				j.GoalRecovery.ObservedGoalStatus = ""
+				j.GoalRecovery.ObservedGoalUpdatedAt = 0
+			}
+			if c.st.save() != nil {
+				t.Fatal("fixture state")
+			}
+			writes := 0
+			c.st.fs = &stateFS{hold: func(stage string) {
+				if stage == "state-file" {
+					writes++
+				}
+			}}
+			if mode == "save-failed" {
+				c.st.fs.rename = func(string, string) error { return errors.New("fixture") }
+			}
+			p, input := capacityReadPort(goal, turn, "failed", "serverOverloaded")
+			if mode == "read-failed" {
+				p, _ = goalPort()
+				p.input = input
+				p.canonical = true
+			}
+			owns, err := c.recoverCapacityWithPort(context.Background(), j, p, time.Now())
+			released := mode == "manual-active" || mode == "new-turn" || mode == "paused"
+			wantError := mode == "wrong-goal" || mode == "read-failed" || mode == "save-failed"
+			if owns == released || capacityRecoveryOwns(j) == released || (err != nil) != wantError {
+				t.Fatal("exhausted recovery ignored native continuation, uncertainty or operator authority")
+			}
+			if !released && !wantError && writes != 0 {
+				t.Fatal("unchanged exhausted recovery rewrote durable state")
+			}
+			if strings.Contains(input.String(), "thread/goal/set") {
+				t.Fatal("exhausted observation wrote to the native goal")
+			}
+			saved := loadState(c.st.path).Jobs[j.Issue]
+			if capacityRecoveryOwns(saved) == released || saved.GoalRecovery.Attempts != 1 {
+				t.Fatal("exhausted observation lost its durable ownership or attempt bound")
+			}
+		})
+	}
+}
+
+func TestCapacityRecoveryExhaustedNoticeOncePerTurn(t *testing.T) {
+	c, j := capacityFixture(t)
+	var notices bytes.Buffer
+	prior := log.Writer()
+	log.SetOutput(&notices)
+	t.Cleanup(func() { log.SetOutput(prior) })
+	now := time.Now()
+	j.GoalRecovery = &goalRecovery{State: recoveryWaiting, Attempts: capacityRetryLimit, TurnID: "capacity-turn", NextAttemptAt: now}
+	p, _ := capacityReadPort(fixtureGoal("blocked"), "capacity-turn", "failed", "serverOverloaded")
+	if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now); !owns || err != nil {
+		t.Fatal("retry exhaustion failed")
+	}
+	for round := 0; round < 2; round++ {
+		// Retry exhaustion was observed blocked; native active proves an external resume.
+		p, _ = capacityReadPort(fixtureGoal("active"), "capacity-turn", "failed", "serverOverloaded")
+		if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now); owns || err != nil {
+			t.Fatal("manual resume did not release exhausted ownership")
+		}
+		c.st = loadState(c.st.path)
+		j = c.st.Jobs[j.Issue]
+		p, _ = capacityReadPort(fixtureGoal("blocked"), "capacity-turn", "failed", "serverOverloaded")
+		if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now); !owns || err != nil || j.GoalRecovery.State != recoveryWaiting {
+			t.Fatal("same capacity turn did not re-enter bounded backoff")
+		}
+		p, _ = capacityReadPort(fixtureGoal("blocked"), "capacity-turn", "failed", "serverOverloaded")
+		if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, j.GoalRecovery.NextAttemptAt); !owns || err != nil || j.GoalRecovery.State != recoveryExhausted {
+			t.Fatal("same capacity turn lost its exhausted lifetime bound")
+		}
+	}
+	if strings.Count(notices.String(), "native capacity recovery stopped") != 1 {
+		t.Fatal("exhaustion notice repeated for the same failed turn after manual resume and restart")
+	}
+	p, _ = capacityReadPort(fixtureGoal("blocked"), "next-turn", "failed", "serverOverloaded")
+	if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now); !owns || err != nil {
+		t.Fatal("new capacity turn lost recovery")
+	}
+	p, _ = capacityReadPort(fixtureGoal("blocked"), "next-turn", "failed", "serverOverloaded")
+	if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, j.GoalRecovery.NextAttemptAt); !owns || err != nil {
+		t.Fatal("new turn did not retain the exhausted attempt bound")
+	}
+	if strings.Count(notices.String(), "native capacity recovery stopped") != 2 {
+		t.Fatal("a distinct failed turn did not get its own exhaustion notice")
+	}
+}
+
+func TestCapacityRecoveryExhaustedObservationsAreDebounced(t *testing.T) {
+	c, j := capacityFixture(t)
+	run := syntheticRemoteRun(t)
+	run.NativeSessionID = "fixture-thread"
+	j.RemoteControl = run
+	j.GoalDeliveryCommit = deliveryCommitMark
+	j.GoalRecovery = &goalRecovery{State: recoveryExhausted, Attempts: capacityRetryLimit, TurnID: "capacity-turn", Reason: "goal-capacity-retry-exhausted"}
+	var reads atomic.Int32
+	base := remoteIdleHandler(run, "valid")
+	h := canonicalFixtureHost(t, "multi", func(method string, _ map[string]any) any {
+		if method == "thread/goal/get" {
+			reads.Add(1)
+			return map[string]any{"goal": fixtureGoal("active")}
+		}
+		return base(method, nil)
+	}).forJob(j)
+	ref := agentRef{Host: j.Host, Agent: j.Agent, Pane: j.Pane, Workspace: j.Workspace, Status: "idle", StateChangeSeq: 4, CompletionSeq: 2}
+	if !c.markCapacityObservation(j, ref, time.Now()) {
+		t.Fatal("fixture checkpoint")
+	}
+	writes := 0
+	c.st.fs = &stateFS{hold: func(stage string) {
+		if stage == "state-file" {
+			writes++
+		}
+	}}
+	for tick := 0; tick < 3; tick++ {
+		if !c.recoverCapacityStall(context.Background(), h, j, ref, true) {
+			t.Fatal("unchanged observation released recovery without a native read")
+		}
+	}
+	if reads.Load() != 0 || writes != 0 {
+		t.Fatal("unchanged exhausted ticks performed native reads or state writes")
+	}
+	// No fleet event is required: the existing bounded safety backstop still observes goals.
+	j.GoalRecoveryObservation.At = time.Now().Add(-fleetRecoveryEvery)
+	if c.recoverCapacityStall(context.Background(), h, j, ref, true) || reads.Load() != 1 || capacityRecoveryOwns(j) {
+		t.Fatal("exhausted safety observation did not release native manual resume")
+	}
+}
+
+func TestCapacityRecoveryAutomaticExhaustionKeepsNativeObservation(t *testing.T) {
+	for _, mode := range []string{"readback", "lost-acknowledgement"} {
+		t.Run(mode, func(t *testing.T) {
+			c, j := capacityFixture(t)
+			now := time.Now()
+			j.GoalRecovery = &goalRecovery{State: recoveryWaiting, Attempts: 1, TurnID: "capacity-turn", NextAttemptAt: now, WatchUntil: now.Add(capacityResumeTimeout), ObservedGoalStatus: "blocked"}
+			active := fixtureGoal("active")
+			active.UpdatedAt++
+			if mode == "readback" {
+				p, _ := capacityResumePort(fixtureGoal("blocked"), active, "capacity-turn", true)
+				if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now); !owns || err != nil {
+					t.Fatal("automatic resume failed")
+				}
+				if j.GoalRecovery.ObservedGoalStatus != "active" || j.GoalRecovery.ObservedGoalUpdatedAt != active.UpdatedAt {
+					t.Fatal("successful resume did not preserve the native active readback")
+				}
+			}
+			// Even an acknowledgement lost while still recorded blocked must exhaust
+			// against the fresh native active observation, never its stale snapshot.
+			p, _ := capacityReadPort(active, "capacity-turn", "failed", "serverOverloaded")
+			if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, j.GoalRecovery.WatchUntil); !owns || err != nil || j.GoalRecovery.State != recoveryExhausted {
+				t.Fatal("automatic start deadline did not exhaust")
+			}
+			if j.GoalRecovery.ObservedGoalStatus != "active" || j.GoalRecovery.ObservedGoalUpdatedAt != active.UpdatedAt {
+				t.Fatal("exhaustion retained a stale goal observation")
+			}
+			c.st = loadState(c.st.path)
+			j = c.st.Jobs[j.Issue]
+			writes := 0
+			c.st.fs = &stateFS{hold: func(stage string) {
+				if stage == "state-file" {
+					writes++
+				}
+			}}
+			for tick := 0; tick < 2; tick++ {
+				p, _ := capacityReadPort(active, "capacity-turn", "failed", "serverOverloaded")
+				if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now.Add(time.Hour)); !owns || err != nil {
+					t.Fatal("unchanged automatic exhaustion released ownership")
+				}
+			}
+			if writes != 0 {
+				t.Fatal("unchanged automatic exhaustion repeated its state write")
+			}
+		})
+	}
+}
+
+func TestCapacityRecoveryLegacyExhaustedNoticeMigration(t *testing.T) {
+	c, j := capacityFixture(t)
+	j.GoalRecovery = &goalRecovery{State: recoveryExhausted, Attempts: capacityRetryLimit, TurnID: "capacity-turn", Reason: "goal-capacity-retry-exhausted"}
+	p, _ := capacityReadPort(fixtureGoal("active"), "capacity-turn", "failed", "serverOverloaded")
+	if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, time.Now()); owns || err != nil || j.GoalRecovery.ExhaustedTurnID != "capacity-turn" {
+		t.Fatal("release forgot that the legacy exhausted turn had already been reported")
+	}
 }
 
 func capacityTurnResult(id, status, code string) any {
@@ -209,7 +412,7 @@ func TestCapacityRecoveryResumePreservesAccounting(t *testing.T) {
 				read.Status = "paused"
 			}
 			p, input := goalPort(response(2, map[string]any{"goal": after}), updated(after), response(3, map[string]any{"goal": read}))
-			err := resumeCapacityGoal(p, before, fixtureIntent())
+			_, err := resumeCapacityGoal(p, before, fixtureIntent())
 			if (err == nil) != (mode == "valid") || strings.Count(input.String(), `"method":"thread/goal/set"`) != 1 {
 				t.Fatal("resume did not require matching native accounting and readback")
 			}
@@ -313,17 +516,19 @@ func TestCapacityRecoveryRequiresSharedCanonicalDaemon(t *testing.T) {
 
 func TestCapacityRecoveryCanonicalTransportCapability(t *testing.T) {
 	h := canonicalFixtureHost(t, "valid", func(string, map[string]any) any { return map[string]any{} })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// Allow subprocess startup under shared CI load.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	called := false
-	if h.withCanonicalConnection(ctx, "fixture-thread", func(p *goalRPC) error {
+	err := h.withCanonicalConnection(ctx, "fixture-thread", func(p *goalRPC) error {
 		called = true
 		if !p.canonical {
 			t.Fatal("shared native connection lost its capability")
 		}
 		return nil
-	}) != nil || !called {
-		t.Fatal("canonical app-server transport unavailable")
+	})
+	if err != nil || !called {
+		t.Fatalf("canonical app-server transport unavailable: %v", err)
 	}
 	legacy := goalTransportHost(t, "")
 	if legacy.withGoalConnection(ctx, "fixture-thread", func(p *goalRPC) error {

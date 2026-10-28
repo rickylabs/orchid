@@ -1,0 +1,10 @@
+# Round 2 regression evidence
+
+Both required regressions are assertion-red on the supplied prior head and green with the repair. The optional checkout cleanup is also verified against unmodified original production.
+
+- Baseline 94d0809204f9a861557faf4d21c2536c0a7a3695, with only goal_recovery_regression_test.go copied in: go test ./cmd/divybot -run '^TestCapacityRecoveryManualResume' -count=1 -json exits 1. Both tests compile and reach their intended assertions: manual native resume retains exhausted ownership; an open PR prevents release and its relay remains suppressed.
+- Candidate focused command: go test ./cmd/divybot -run '^(TestRunCheckout|TestCapacity|TestUnpinned)' -count=1 -json exits 0, with 64 test/subtest passes and zero failures. The PR-open test exercises supervise, the actual pending-PR retirement guard, native goal observation, durable release and the restored review relay; the worker stays managed.
+- Original production 22f14e0eca84ba0b600a83eb782db653d66d88b9, with only the unmodified run_recovery_regression_test.go copied in: go test ./cmd/divybot -run '^TestRunCheckoutFreshHeadDespiteAdmissionPin$' -count=1 -json compiles, exits 1, and its first assertion is the stale-base defect. No renamed production fields or new checkout helpers are needed. Corresponding candidate checkout controls pass.
+- Additional focused controls cover unchanged automatic exhaustion, native update timestamps, lost-acknowledgement snapshots, one notice per failed turn across release/restart, distinct failed turns, legacy notice migration, pause/identity/read/save failures, lifetime attempts, native-only observations and debounced state writes.
+
+Gate correction: the inherited one-second canonical-capability fixture failed once in 20 isolated repetitions on both prior and candidate code. A test-only five-second startup budget and sanitized error diagnostic preserve capability assertions; all 20 isolated repetitions pass afterward. Production deadlines and their tests are unchanged. Both failed gate attempts remain retained privately. Full final-image verification is recorded separately in round2-gate-evidence.md.

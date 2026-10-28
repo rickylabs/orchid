@@ -280,7 +280,7 @@ func unpinnedAttemptFixture(t *testing.T, head string) (*Coord, matrixAttemptDep
 		launch: func(_ context.Context, _ int, _ Issue, _ Host, _ string, _ Overrides, r *durableMatrixReceipt) error {
 			mu.Lock()
 			defer mu.Unlock()
-			*launched = r.admissionRevision()
+			*launched = r.admission
 			return nil
 		},
 	}

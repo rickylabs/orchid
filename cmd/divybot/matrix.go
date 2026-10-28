@@ -574,14 +574,6 @@ type durableMatrixReceipt struct {
 	attempt   *launchAttempt // nil outside a matrix launch
 }
 
-// admissionRevision is authorization metadata, independent of checkout preparation.
-func (r *durableMatrixReceipt) admissionRevision() string {
-	if r == nil {
-		return ""
-	}
-	return r.admission
-}
-
 // workerProfile is the Harness profile the dispatcher read and pinned for this launch.
 // The worker receives this exact text; it never reads a profile from the target checkout.
 type workerProfile struct {

@@ -29,12 +29,15 @@ type goalRecoveryObservation struct {
 }
 
 type goalRecovery struct {
-	WatchUntil    time.Time `json:"watch_until,omitempty"`
-	Attempts      int       `json:"attempts"`
-	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
-	TurnID        string    `json:"turn_id,omitempty"`
-	State         string    `json:"state,omitempty"`
-	Reason        string    `json:"reason,omitempty"`
+	WatchUntil            time.Time `json:"watch_until,omitempty"`
+	Attempts              int       `json:"attempts"`
+	NextAttemptAt         time.Time `json:"next_attempt_at,omitempty"`
+	TurnID                string    `json:"turn_id,omitempty"`
+	State                 string    `json:"state,omitempty"`
+	Reason                string    `json:"reason,omitempty"`
+	ExhaustedTurnID       string    `json:"exhausted_turn_id,omitempty"`
+	ObservedGoalStatus    string    `json:"observed_goal_status,omitempty"`
+	ObservedGoalUpdatedAt int64     `json:"observed_goal_updated_at,omitempty"`
 }
 
 func capacityRetryDelay(attempts int) time.Duration {
@@ -88,25 +91,25 @@ func (p *goalRPC) capacityTurn() (string, string, bool, error) {
 }
 
 // A narrow resume operation preserves the objective, budget and accumulated usage.
-func resumeCapacityGoal(p *goalRPC, before *nativeGoal, intent goalIntent) error {
+func resumeCapacityGoal(p *goalRPC, before *nativeGoal, intent goalIntent) (*nativeGoal, error) {
 	if !sameGoalIntent(before, intent) || before.Status != "blocked" {
-		return goalError("goal-ownership-mismatch")
+		return nil, goalError("goal-ownership-mismatch")
 	}
 	after, err := p.set(map[string]any{"threadId": p.thread, "status": "active", "origin": "automatic"}, intent, "active")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if after.CreatedAt != before.CreatedAt || after.TokensUsed < before.TokensUsed || after.SecondsUsed < before.SecondsUsed || after.UpdatedAt < before.UpdatedAt {
-		return goalError("goal-accounting-regressed")
+		return nil, goalError("goal-accounting-regressed")
 	}
 	read, err := p.get()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !sameGoalIntent(read, intent) || read.Status != "active" || read.CreatedAt != before.CreatedAt || read.TokensUsed < after.TokensUsed || read.SecondsUsed < after.SecondsUsed {
-		return goalError("goal-readback-mismatch")
+		return nil, goalError("goal-readback-mismatch")
 	}
-	return nil
+	return read, nil
 }
 
 func (c *Coord) saveGoalRecovery(j *Job, next goalRecovery) error {
@@ -119,12 +122,30 @@ func (c *Coord) saveGoalRecovery(j *Job, next goalRecovery) error {
 		return goalError("goal-dispatch-binding-invalid")
 	}
 	prior := j.GoalRecovery
+	if prior != nil && *prior == next {
+		return nil
+	}
 	j.GoalRecovery = &next
 	if err := c.st.saveLocked(); err != nil {
 		j.GoalRecovery = prior
 		return goalError("goal-state-persistence-failed")
 	}
 	return nil
+}
+
+// Keep lifetime attempts and the notice identity after native continuation resumes.
+func (c *Coord) releaseCapacityRecovery(j *Job) (bool, error) {
+	next := *j.GoalRecovery
+	if next.State == recoveryExhausted && next.ExhaustedTurnID == "" {
+		next.ExhaustedTurnID = next.TurnID // migrate exhausted records written before notice tracking
+	}
+	next.State = ""
+	next.NextAttemptAt = time.Time{}
+	next.WatchUntil = time.Time{}
+	if err := c.saveGoalRecovery(j, next); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 // Called only by daemon supervision/completion, never an application read.
@@ -142,14 +163,19 @@ func (c *Coord) recoverCapacityWithPort(ctx context.Context, j *Job, p *goalRPC,
 	if !sameGoalIntent(goal, j.NativeGoal.Intent) {
 		return owned, goalError("goal-ownership-mismatch")
 	}
+	if owned && j.GoalRecovery.State == recoveryExhausted && goal.Status == "active" {
+		prior := j.GoalRecovery
+		// Retry exhaustion observed blocked. An unproven automatic start already
+		// observed active, so only a later native update (or turn progress below)
+		// proves external continuation. Old unproven records require turn progress.
+		if prior.ObservedGoalStatus == "blocked" || prior.Reason == "goal-capacity-retry-exhausted" ||
+			(prior.ObservedGoalStatus == "active" && goal.UpdatedAt != prior.ObservedGoalUpdatedAt) {
+			return c.releaseCapacityRecovery(j)
+		}
+	}
 	if goal.Status != "blocked" && !(owned && goal.Status == "active") {
 		if owned {
-			next := *j.GoalRecovery
-			next.State = ""
-			next.NextAttemptAt = time.Time{}
-			if err := c.saveGoalRecovery(j, next); err != nil {
-				return true, err
-			}
+			return c.releaseCapacityRecovery(j)
 		}
 		return false, nil // pauses, budget/usage limits and completion are never resumed
 	}
@@ -159,12 +185,7 @@ func (c *Coord) recoverCapacityWithPort(ctx context.Context, j *Job, p *goalRPC,
 	}
 	if !capacity {
 		if owned {
-			next := *j.GoalRecovery
-			next.State = ""
-			next.NextAttemptAt = time.Time{}
-			if err := c.saveGoalRecovery(j, next); err != nil {
-				return true, err
-			}
+			return c.releaseCapacityRecovery(j)
 		}
 		return false, nil
 	}
@@ -178,6 +199,16 @@ func (c *Coord) recoverCapacityWithPort(ctx context.Context, j *Job, p *goalRPC,
 	if !p.canonical {
 		return false, goalError("goal-capacity-canonical-required")
 	}
+	if next.State == recoveryExhausted {
+		if turn == next.TurnID {
+			return true, nil
+		}
+		if goal.Status == "active" {
+			return c.releaseCapacityRecovery(j)
+		}
+	}
+	next.ObservedGoalStatus = goal.Status
+	next.ObservedGoalUpdatedAt = goal.UpdatedAt
 	if goal.Status == "active" {
 		// A successful status write must produce native progress within one persisted
 		// deadline. Polling cannot keep extending an unproven start indefinitely.
@@ -190,9 +221,6 @@ func (c *Coord) recoverCapacityWithPort(ctx context.Context, j *Job, p *goalRPC,
 	}
 	if status != "failed" {
 		return false, nil
-	}
-	if next.State == recoveryExhausted {
-		return true, nil
 	}
 	if next.TurnID != turn || next.State == "" || next.State == recoveryWatching {
 		next.TurnID = turn
@@ -241,10 +269,12 @@ func (c *Coord) recoverCapacityWithPort(ctx context.Context, j *Job, p *goalRPC,
 	if err != nil || currentID != native || !reflect.DeepEqual(receipt.dispatch, verified.dispatch) || ctx.Err() != nil {
 		return true, goalError("goal-dispatch-binding-invalid")
 	}
-	err = resumeCapacityGoal(p, current, j.NativeGoal.Intent)
+	resumed, err := resumeCapacityGoal(p, current, j.NativeGoal.Intent)
 	next.State = recoveryWaiting
 	next.Reason = closedGoalReason(err)
 	if err == nil {
+		next.ObservedGoalStatus = resumed.Status
+		next.ObservedGoalUpdatedAt = resumed.UpdatedAt
 		next.State = recoveryWatching
 		next.NextAttemptAt = next.WatchUntil
 		next.Reason = ""
@@ -256,11 +286,16 @@ func (c *Coord) recoverCapacityWithPort(ctx context.Context, j *Job, p *goalRPC,
 }
 
 func (c *Coord) exhaustCapacityRecovery(j *Job, next goalRecovery, reason string) error {
+	notified := next.ExhaustedTurnID == next.TurnID || (next.State == recoveryExhausted && next.ExhaustedTurnID == "")
 	next.State = recoveryExhausted
+	next.ExhaustedTurnID = next.TurnID
 	next.NextAttemptAt = time.Time{}
 	next.Reason = reason
 	if err := c.saveGoalRecovery(j, next); err != nil {
 		return err
+	}
+	if notified {
+		return nil
 	}
 	log.Printf("issue #%d: native capacity recovery stopped after %d attempts; reason=%s", j.Issue, next.Attempts, reason)
 	c.notify("Native capacity recovery stopped; the managed run requires inspection")
@@ -330,15 +365,12 @@ func (c *Coord) recoverCapacityStall(ctx context.Context, h Host, j *Job, ref ag
 	}
 	now := time.Now()
 	changed := capacityObservationChanged(j, ref)
-	if owned {
-		if j.GoalRecovery.State == recoveryExhausted {
-			return true
-		}
+	if owned && j.GoalRecovery.State != recoveryExhausted {
 		if now.Before(j.GoalRecovery.NextAttemptAt) && !changed {
 			return true
 		}
 	} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery {
-		return false
+		return owned
 	}
 	if !c.markCapacityObservation(j, ref, now) {
 		return owned
