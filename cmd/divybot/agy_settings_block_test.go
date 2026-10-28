@@ -34,6 +34,7 @@ func TestAGYUnreadableStateBlocksBeforeNativeSeatAndSurvivesRestart(t *testing.T
 			ssh := `#!/usr/bin/env python3
 import os,subprocess,sys
 s=sys.argv[-1]
+if 'git fetch --depth=1' in s:print('a'*40);sys.exit(0)
 if '# orchid-checkout-root' in s or 'pwd -P' in s or s.startswith('if test -f ') or 'exec head -c' in s or 'command -v awk' in s or '__DIVYBOT_EOF__' in s or 'git rev-parse --git-path info/exclude' in s:
  p=subprocess.run(['/bin/bash','-c',s]);sys.exit(p.returncode)
 if "'workspace' 'create'" in s or "'agent' 'start'" in s:

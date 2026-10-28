@@ -132,13 +132,13 @@ func TestAdmissionTargetRefusesPlainly(t *testing.T) {
 	}
 }
 
-// Production spawn clones the SOURCE repository at its pinned revision, never
+// Production spawn clones the SOURCE repository at its fresh default head, never
 // the inbox; a mismatched binding stops before any host effect.
 func TestSpawnClonesSourceRepo(t *testing.T) {
 	for _, tc := range []struct {
 		name, title, body, clone, rev string
 	}{
-		{"repo-key", "[fixture/upstream#41] fix", "/swarm\nharness: claude\nrepo: fixture/upstream\n\nfix it", "https://github.com/fixture/upstream", strings.Repeat("b", 40)},
+		{"repo-key", "[fixture/upstream#41] fix", "/swarm\nharness: claude\nrepo: fixture/upstream\n\nfix it", "https://github.com/fixture/upstream", "HEAD"},
 		{"title-mismatch-stops", "[fixture/upstream#41] fix", "/swarm\nharness: claude\n\nfix it", "", ""},
 		{"empty-repo-key-stops", "plain native task", "/swarm\nharness: claude\nrepo:\n\nfix it", "", ""},
 		{"empty-duplicate-stops", "plain native task", "/swarm\nharness: claude\nrepo: fixture/inbox\nrepo:\n\nfix it", "", ""},
@@ -169,8 +169,8 @@ exit 0
 				}
 				return
 			}
-			if !strings.Contains(string(scripts), "git clone --depth=1 "+tc.clone+" .") || !strings.Contains(string(scripts), tc.rev) {
-				t.Fatalf("spawn did not clone the source repository at its pin: err=%v scripts=%q", err, scripts)
+			if !strings.Contains(string(scripts), "git clone --depth=1 "+tc.clone+" .") || !strings.Contains(string(scripts), "git fetch --depth=1 --no-tags origin '"+tc.rev+"'") {
+				t.Fatalf("spawn did not fetch the source repository default head: err=%v scripts=%q", err, scripts)
 			}
 			if strings.Contains(string(scripts), "github.com/fixture/inbox") {
 				t.Fatal("spawn touched the inbox repository")
@@ -271,7 +271,7 @@ exit 0
 				t.Fatalf("workspace origin %q is not the source repository", got)
 			}
 			if git(work, "rev-parse", "HEAD") != shared || git(work, "rev-parse", "--abbrev-ref", "HEAD") != "fixture/7" {
-				t.Fatal("workspace not at the pinned revision on the issue branch")
+				t.Fatal("workspace not at the fetched default head on the issue branch")
 			}
 		})
 	}

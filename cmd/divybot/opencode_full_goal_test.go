@@ -153,7 +153,8 @@ if '-N' in sys.argv:
  signal.pause()
  sys.exit(0)
 script=sys.argv[-1]
-if 'git fetch --depth=1' in script or '.credentials.json' in script or 'SJ="$HOME/.claude/settings.json"' in script:sys.exit(0)
+if 'git fetch --depth=1' in script:print('a'*40);sys.exit(0)
+if '.credentials.json' in script or 'SJ="$HOME/.claude/settings.json"' in script:sys.exit(0)
 sys.exit(subprocess.run(['/bin/sh','-c',script]).returncode)
 `
 	writeFixture(t, filepath.Join(h.Home, ".local", "bin", "ssh"), fakeSSH)

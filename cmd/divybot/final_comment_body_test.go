@@ -297,6 +297,7 @@ import json,os,pathlib,subprocess,sys
 script=sys.argv[-1]
 with open(os.environ['FINAL_COMMENT_CALLS'],'a') as f:f.write(json.dumps(script)+'\n')
 root=pathlib.Path(os.environ['FINAL_COMMENT_WORKDIR'])
+if 'git fetch --depth=1' in script:print('a'*40);sys.exit(0)
 if '# orchid-checkout-root' in script or 'command -v awk' in script or '__DIVYBOT_EOF__' in script:
  p=subprocess.run(['/bin/sh','-c',script]);sys.exit(p.returncode)
 if "'workspace' 'create'" in script:

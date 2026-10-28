@@ -33,6 +33,8 @@ jobs:
         run: python3 .github/scripts/check-source-trigger-mutants.py
       - name: Compiled checkout trust guard mutations
         run: python3 .github/scripts/check-codex-checkout-trust-mutants.py
+      - name: Compiled run checkout and capacity recovery mutations
+        run: python3 scripts/check-run-recovery-mutations.py
       - name: Vet
         run: go vet ./...
       - name: Build

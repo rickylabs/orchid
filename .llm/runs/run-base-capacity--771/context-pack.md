@@ -1,1 +1,3 @@
 Both repairs implemented and focused controls GREEN. Draft Orchid PR 130. Base: fresh remote HEAD or explicit brief ref, persisted verified StartSHA; admission revision separate. Recovery: typed serverOverloaded + blocked owned goal, five durable lifetime attempts/backoff, daemon timer and suppression of conflicting input; managed capacity held. Baseline controls RED. Next: full image vet/build/test, compiled mutation controls, same-session independent implementation review, one repair pass, final report and READY. No live resource mutation.
+
+Initial broad-run failures were fixture response drift, fixed and confirmed by the full launch-path fixture subset. Independent implementation review is running in the retained Claude session. New mutation gate is wired into CI.
