@@ -66,4 +66,31 @@ exit 0
 	if git(checkout, "rev-parse", "HEAD") != head {
 		t.Fatal("run branch started from the stale admission pin instead of fetched default head")
 	}
+	// Existing local refs and a reused run branch must not become implicit bases.
+	git(checkout, "fetch", "--depth=1", "origin", stale)
+	git(checkout, "checkout", "-fB", "fixture/7", stale)
+	git(checkout, "update-ref", "refs/remotes/origin/old", stale)
+	git(checkout, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/old")
+	got, err := h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{})
+	if err != nil || got != head || git(checkout, "rev-parse", "HEAD") != head {
+		t.Fatal("cached origin/HEAD or reused run branch overrode remote default HEAD")
+	}
+	git(remote, "branch", "release", stale)
+	for _, base := range []string{stale, "release", "refs/heads/release"} {
+		got, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{Base: base})
+		if err != nil || got != stale || git(checkout, "rev-parse", "HEAD") != stale {
+			t.Fatal("explicit brief base did not select its fetched commit")
+		}
+	}
+	if _, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{Base: "missing-base"}); err == nil || git(checkout, "rev-parse", "HEAD") != stale {
+		t.Fatal("failed fetch used a local fallback")
+	}
+	git(remote, "symbolic-ref", "HEAD", "refs/heads/release")
+	if got, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{}); err != nil || got != stale {
+		t.Fatal("changed remote default branch used cached local HEAD")
+	}
+	git(checkout, "config", "remote.origin.url", "https://github.com/fixture/other")
+	if _, err = h.prepareRunCheckout(context.Background(), "fixture/upstream", checkout, "fixture/7", Overrides{}); err != errWorktreeOrigin {
+		t.Fatal("foreign checkout origin was reused")
+	}
 }

@@ -333,6 +333,7 @@ type tracker struct {
 }
 
 type Job struct {
+	GoalRecovery          *goalRecovery     `json:"goal_recovery,omitempty"`
 	StartSHA              string            `json:"start_sha,omitempty"` // verified launch checkout commit
 	NativeSessionID       string            `json:"native_session_id,omitempty"`
 	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
@@ -2346,6 +2347,8 @@ func (c *Coord) run(ctx context.Context) {
 	c.startHerdrFleet(ctx)
 	t := time.NewTicker(fleetRecoveryEvery)
 	defer t.Stop()
+	recoveryTimer := time.NewTimer(c.nextGoalRecoveryDelay(time.Now()))
+	defer recoveryTimer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -2355,7 +2358,16 @@ func (c *Coord) run(ctx context.Context) {
 			c.tick(ctx)
 		case <-t.C:
 			c.tick(ctx)
+		case <-recoveryTimer.C:
+			c.tick(ctx)
 		}
+		if !recoveryTimer.Stop() {
+			select {
+			case <-recoveryTimer.C:
+			default:
+			}
+		}
+		recoveryTimer.Reset(c.nextGoalRecoveryDelay(time.Now()))
 	}
 }
 
@@ -2913,6 +2925,9 @@ func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
 }
 
 func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
+	if capacityRecoveryOwns(j) {
+		return true
+	}
 	if j != nil && j.RemoteControl != nil {
 		return true
 	} // released only after native and paired absence proof
@@ -3797,7 +3812,8 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		}
 		c.observeRemoteControl(ctx, host, j)
 	}
-	suppressInput := !matched || ref.Status == "done" || (ref.Status == "idle" && (ref.CompletionSeq != 0 || j.Agent == "claude"))
+	recovering := c.recoverCapacityStall(ctx, host, j, ref, known)
+	suppressInput := recovering || !matched || ref.Status == "done" || (ref.Status == "idle" && (ref.CompletionSeq != 0 || j.Agent == "claude"))
 	if matched && j.Agent == "agy" {
 		c.bindAGYLiveIdentity(ctx, host, j)
 	}
@@ -3890,7 +3906,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	// string match on pane scrollback is far too fragile to kill a live session
 	// over (stale 401s sit deep in scrollback; central auth-sync prevents real
 	// auth-death anyway). Read only the last few lines, and only when idle/blocked.
-	if matched && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
+	if matched && !recovering && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
 		rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
 		txt := host.read(rctx, j.Pane, 4)
 		rcancel()
@@ -3905,7 +3921,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
 	// PR events may resume a matched, unfenced done worker; goal replays may not.
-	c.pollPR(ctx, n, j, host, ref.Status, !matched)
+	c.pollPR(ctx, n, j, host, ref.Status, !matched || recovering)
 
 	// Stranded: persistently idle with no PR → re-inject the goal (a poke that
 	// re-delivers the task, not a bare Enter — fixes the gcp strandings). See
@@ -3919,7 +3935,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 
 	// Blocked: agent waiting for input it can't get in the swarm → escalate.
-	if matched && ref.Status == "blocked" {
+	if matched && !recovering && ref.Status == "blocked" {
 		c.emitHerdrAlert(ctx, j, "native-block", "")
 		c.transitionGoal(ctx, j, "blocked")
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)

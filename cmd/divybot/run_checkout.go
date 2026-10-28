@@ -88,8 +88,11 @@ func (r *durableMatrixReceipt) recordRunStart(o Overrides, sha string) error {
 	if err != nil || decodeNativeJSON(raw, &binding) != nil || binding == nil {
 		return goalError("run-start-unproven")
 	}
-	if prior, ok := binding["StartSHA"]; ok && string(prior) != string(goalJSONBytes(sha)) {
-		return goalError("run-start-already-recorded")
+	if prior, ok := binding["StartSHA"]; ok {
+		var previousSHA, previousRef string
+		if json.Unmarshal(prior, &previousSHA) != nil || json.Unmarshal(binding["BaseRef"], &previousRef) != nil || previousSHA != sha || previousRef != base {
+			return goalError("run-start-already-recorded")
+		}
 	}
 	binding["StartSHA"] = goalJSONBytes(sha)
 	binding["BaseRef"] = goalJSONBytes(base)

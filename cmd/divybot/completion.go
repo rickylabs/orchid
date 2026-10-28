@@ -98,6 +98,12 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 		goalAllowed := j.NativeGoal == nil
 		err := h.forJob(j).withGoalConnection(ctx, native, func(p *goalRPC) error {
 			var e error
+			if recovering, err := c.recoverCapacityWithPort(ctx, j, p, time.Now()); recovering || err != nil {
+				if err != nil {
+					return err
+				}
+				return goalError("goal-capacity-recovering")
+			}
 			if j.RemoteControl != nil {
 				if e = p.remoteWorkIdle(false); e != nil {
 					return e
@@ -364,6 +370,9 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			j.CompletionCheckedAt = time.Now()
 			_ = c.st.saveLocked()
 			c.st.mu.Unlock()
+		}
+		if err == goalError("goal-capacity-recovering") || capacityRecoveryOwns(j) {
+			return false
 		}
 		if err != nil || !complete {
 			// An ended turn is never completion: a coordinator ends its turn to
