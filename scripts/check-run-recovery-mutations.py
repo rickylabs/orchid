@@ -35,6 +35,7 @@ MUTATIONS = [
     ("daemon timer ignores pending recovery", RECOVERY, 'if delay == 0 || next < delay {', 'if delay == 0 || next < delay { next = fleetRecoveryEvery;'),
     ("noncanonical resume allowed", RECOVERY, 'if !p.canonical {', 'if !p.canonical && false {'),
     ("canonical capability lost", TRANSPORT, 'p.canonical = true', 'p.canonical = false'),
+    ("failed state saves create a hot timer", RECOVERY, 'next = capacityRetryInitial // durability failures must not busy-loop the daemon', 'next = time.Millisecond // durability failures must not busy-loop the daemon'),
     ("watch deadline ignored", RECOVERY, 'if next.WatchUntil.IsZero() || !now.Before(next.WatchUntil) {', 'if next.WatchUntil.IsZero() || !now.Before(next.WatchUntil) && false {'),
     ("unchanged idle probes repeated", RECOVERY, '} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery {', '} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery && false {'),
     ("recovery timer polls the entire board", MAIN, 'case <-recoveryWake:\n\t\t\tc.capacityRecoveryPass(ctx)', 'case <-recoveryWake:\n\t\t\tc.tick(ctx)'),

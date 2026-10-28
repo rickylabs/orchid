@@ -403,7 +403,7 @@ func (c *Coord) nextGoalRecoveryDelay(now time.Time) time.Duration {
 		}
 		next := j.GoalRecovery.NextAttemptAt.Sub(now)
 		if next <= 0 {
-			next = time.Millisecond
+			next = capacityRetryInitial // durability failures must not busy-loop the daemon
 		}
 		if delay == 0 || next < delay {
 			delay = next

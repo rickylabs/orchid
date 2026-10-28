@@ -61,3 +61,31 @@ Repair disposition:
 - R1: one persisted 30-second native-start deadline, never renewed by observation; expired/unproven starts exhaust visibly. A dedicated timer handles only pending recovery work and is disabled otherwise. Native progress and unchanged-start controls cover this boundary across restart.
 - R2: the physical canonical transport marks the RPC capability; automatic resume requires that shared daemon capability. Legacy recovery refuses visibly, and a transport-boundary test proves it cannot gain native write authority. The integration regression now uses the canonical Unix-socket protocol boundary.
 - R3: native observations are debounced by state/completion sequence, status and a five-minute backstop. Completion marks the same checkpoint, so one tick cannot double-read an unchanged idle run. Native source failures postpone observations rather than busy-looping.
+
+## Same-session repair verification
+
+**PASS.** I found no remaining blockers. I verified the code and tests directly rather than relying on the dispositions in `implementation-review.md`. I read files only; I didn't run any gates. The final full image run and the expanded mutation runs are still in progress, so this PASS covers the code, not those results.
+
+**R1 (endless "watching"): fixed.**
+- `WatchUntil` is set once, when an attempt is reserved (`goal_recovery.go:212`). Later observations never extend it: lines 181-189 point the next wake at it and nothing more.
+- Once the deadline passes, if the goal is `active` but its newest turn is still the old failed one, recovery stops with `goal-capacity-resume-unproven` and sends a notification (`goal_recovery.go:184-185, 258-267`).
+- The recovery timer now runs `capacityRecoveryPass`, which does no GitHub polling, and only when a recovery wake is pending. With nothing pending the timer is off (`main.go:2351-2381`, `goal_recovery.go:366-413`).
+- `TestCapacityRecoveryWatchHasOnePersistedDeadline` covers this, including across a restart.
+
+**R2 (resume might not reach the live Codex pane): fixed by limiting recovery.**
+- Only a canonical shared-daemon connection gets `p.canonical` (`remote_control_transport.go:200`).
+- A resume needs that capability (`goal_recovery.go:178-180`), and Codex runs without Remote Control are refused before any connection is opened (`goal_recovery.go:314-327`).
+- No state is saved before the canonical check, so a short-lived connection can never become the recovery owner.
+- `goal_recovery_regression_test.go` now drives `completionEvidence` through the canonical socket fixture with the native thread and turn shapes. `TestCapacityRecoveryCanonicalTransportCapability` checks the capability on both kinds of transport.
+
+**R3 (a native connection on every tick): fixed.**
+- When recovery doesn't own a run, a native read only happens when the pane's status, state sequence or completion sequence changes, or at most once every 5 minutes. The checkpoint is saved to disk (`goal_recovery.go:270-291, 332-345`).
+- Completion records the same checkpoint before reading (`completion.go:366`), so one tick doesn't read the same unchanged run twice.
+- When the native source fails, the next attempt is pushed back by at least the backoff delay (`goal_recovery.go:293-307, 348-361`).
+
+**Not blockers, but you should know:**
+- **Codex panes without Remote Control get no recovery.** That was the R2 option I offered, but it means the operator's "must be resumed" requirement holds only for Remote Control Codex. A capacity stall in an ordinary herdr Codex pane still ends in completion-unproven.
+- **Misleading diagnostic.** `goal_recovery.go:314-322` sets `NativeGoal.Reason = "goal-capacity-canonical-required"` and logs it once for every owned Codex run without Remote Control, even when there's no stall. That reason only feeds internal retry checks for goals that aren't owned, so it's noise, not a fault.
+- **Tight loop if state saves keep failing.** If `saveLocked` fails persistently, `markCapacityObservation`/`saveGoalRecovery` roll the change back and the due time stays in the past. `nextGoalRecoveryDelay` then returns 1ms, and `capacityRecoveryPass` repeats `fleetStatus` and `checkRemoteHook` (an SSH call) in a tight loop. This only happens while divybot's state saves are failing, but it is a hot loop of SSH calls.
+
+Nonblocking timer note addressed: an overdue wake has a 15-second floor when persistence cannot advance it, with a failure-injection control and compiled mutation. Positive future deadlines remain exact. No further review repair loop was entered.

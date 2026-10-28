@@ -378,3 +378,16 @@ func TestCapacityRecoveryObservationsAreDebounced(t *testing.T) {
 		t.Fatal("unavailable native source created a tight retry loop")
 	}
 }
+
+func TestCapacityRecoveryStateFailureKeepsBoundedWake(t *testing.T) {
+	c, j := capacityFixture(t)
+	now := time.Now()
+	j.GoalRecovery = &goalRecovery{State: recoveryWaiting, NextAttemptAt: now.Add(-time.Second)}
+	c.st.fs = &stateFS{rename: func(string, string) error { return errors.New("fixture") }}
+	if c.saveGoalRecovery(j, goalRecovery{State: recoveryWaiting, NextAttemptAt: now.Add(time.Minute)}) == nil {
+		t.Fatal("fixture did not fail state persistence")
+	}
+	if c.nextGoalRecoveryDelay(now) < capacityRetryInitial {
+		t.Fatal("state persistence failure created a hot recovery timer")
+	}
+}
