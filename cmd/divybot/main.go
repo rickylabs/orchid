@@ -333,43 +333,44 @@ type tracker struct {
 }
 
 type Job struct {
-	GoalRecovery          *goalRecovery     `json:"goal_recovery,omitempty"`
-	StartSHA              string            `json:"start_sha,omitempty"` // verified launch checkout commit
-	NativeSessionID       string            `json:"native_session_id,omitempty"`
-	HerdrAlerts           map[string]string `json:"herdr_alerts,omitempty"`
-	HerdrScope            *herdrScope       `json:"herdr_scope,omitempty"`
-	TerminalID            string            `json:"terminal_id,omitempty"`
-	NativeRestoreTerminal string            `json:"-"` // in-memory resume registration for the current occupant
-	RemoteCleanup         string            `json:"remote_cleanup,omitempty"`
-	RemoteStopOperation   string            `json:"remote_stop_operation,omitempty"`
-	RemoteControl         *remoteControlRun `json:"remote_control,omitempty"`
-	FinalReportManaged    bool              `json:"final_report_managed,omitempty"`
-	FinalDoneAt           time.Time         `json:"final_done_at,omitempty"`  // legacy, unread: an ended turn starts no failure grace
-	FinalDoneSeq          uint64            `json:"final_done_seq,omitempty"` // legacy, unread
-	OwnerMismatchNotice   string            `json:"owner_mismatch_notice,omitempty"`
-	CompletionUnprovenSeq *uint64           `json:"completion_unproven_seq,omitempty"`
-	CompletionCheckedAt   time.Time         `json:"completion_checked_at,omitempty"`
-	CompletionCheckedSeq  uint64            `json:"completion_checked_seq,omitempty"`
-	GoalDelivery          string            `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
-	GoalDeliveryCommit    string            `json:"goal_delivery_commit,omitempty"` // RC Codex on-time native commit marker
-	NativeGoal            *dispatchGoal     `json:"native_goal,omitempty"`
-	DispatchKey           string            `json:"dispatch_key,omitempty"` // private launch receipt key
-	Issue                 int               `json:"issue"`
-	Home                  *dispatchIssue    `json:"home,omitempty"` // a comment binding's source issue; nil = inbox issue
-	Host                  string            `json:"host"`
-	Label                 string            `json:"label"`             // display name (claude-<n>)
-	Pane                  string            `json:"pane"`              // herdr send/read target (pane id)
-	Workdir               string            `json:"workdir,omitempty"` // exact checkout selected at launch
-	Workspace             string            `json:"workspace"`         // herdr teardown handle
-	Target                string            `json:"target"`
-	Repo                  string            `json:"repo"`
-	Branch                string            `json:"branch"`
-	Agent                 string            `json:"agent"`
-	Title                 string            `json:"title"`
-	Goal                  string            `json:"goal"`
-	PR                    int               `json:"pr"`
-	SpawnedAt             time.Time         `json:"spawned_at"`
-	LastPoke              time.Time         `json:"last_poke"`
+	GoalRecoveryObservation *goalRecoveryObservation `json:"goal_recovery_observation,omitempty"`
+	GoalRecovery            *goalRecovery            `json:"goal_recovery,omitempty"`
+	StartSHA                string                   `json:"start_sha,omitempty"` // verified launch checkout commit
+	NativeSessionID         string                   `json:"native_session_id,omitempty"`
+	HerdrAlerts             map[string]string        `json:"herdr_alerts,omitempty"`
+	HerdrScope              *herdrScope              `json:"herdr_scope,omitempty"`
+	TerminalID              string                   `json:"terminal_id,omitempty"`
+	NativeRestoreTerminal   string                   `json:"-"` // in-memory resume registration for the current occupant
+	RemoteCleanup           string                   `json:"remote_cleanup,omitempty"`
+	RemoteStopOperation     string                   `json:"remote_stop_operation,omitempty"`
+	RemoteControl           *remoteControlRun        `json:"remote_control,omitempty"`
+	FinalReportManaged      bool                     `json:"final_report_managed,omitempty"`
+	FinalDoneAt             time.Time                `json:"final_done_at,omitempty"`  // legacy, unread: an ended turn starts no failure grace
+	FinalDoneSeq            uint64                   `json:"final_done_seq,omitempty"` // legacy, unread
+	OwnerMismatchNotice     string                   `json:"owner_mismatch_notice,omitempty"`
+	CompletionUnprovenSeq   *uint64                  `json:"completion_unproven_seq,omitempty"`
+	CompletionCheckedAt     time.Time                `json:"completion_checked_at,omitempty"`
+	CompletionCheckedSeq    uint64                   `json:"completion_checked_seq,omitempty"`
+	GoalDelivery            string                   `json:"goal_delivery,omitempty"`        // pending|confirmed|blocked; separate from native goal ownership
+	GoalDeliveryCommit      string                   `json:"goal_delivery_commit,omitempty"` // RC Codex on-time native commit marker
+	NativeGoal              *dispatchGoal            `json:"native_goal,omitempty"`
+	DispatchKey             string                   `json:"dispatch_key,omitempty"` // private launch receipt key
+	Issue                   int                      `json:"issue"`
+	Home                    *dispatchIssue           `json:"home,omitempty"` // a comment binding's source issue; nil = inbox issue
+	Host                    string                   `json:"host"`
+	Label                   string                   `json:"label"`             // display name (claude-<n>)
+	Pane                    string                   `json:"pane"`              // herdr send/read target (pane id)
+	Workdir                 string                   `json:"workdir,omitempty"` // exact checkout selected at launch
+	Workspace               string                   `json:"workspace"`         // herdr teardown handle
+	Target                  string                   `json:"target"`
+	Repo                    string                   `json:"repo"`
+	Branch                  string                   `json:"branch"`
+	Agent                   string                   `json:"agent"`
+	Title                   string                   `json:"title"`
+	Goal                    string                   `json:"goal"`
+	PR                      int                      `json:"pr"`
+	SpawnedAt               time.Time                `json:"spawned_at"`
+	LastPoke                time.Time                `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -2347,8 +2348,24 @@ func (c *Coord) run(ctx context.Context) {
 	c.startHerdrFleet(ctx)
 	t := time.NewTicker(fleetRecoveryEvery)
 	defer t.Stop()
-	recoveryTimer := time.NewTimer(c.nextGoalRecoveryDelay(time.Now()))
+	recoveryTimer := time.NewTimer(time.Hour)
+	recoveryTimer.Stop()
 	defer recoveryTimer.Stop()
+	var recoveryWake <-chan time.Time
+	armRecovery := func() {
+		if !recoveryTimer.Stop() {
+			select {
+			case <-recoveryTimer.C:
+			default:
+			}
+		}
+		recoveryWake = nil
+		if delay := c.nextGoalRecoveryDelay(time.Now()); delay > 0 {
+			recoveryTimer.Reset(delay)
+			recoveryWake = recoveryTimer.C
+		}
+	}
+	armRecovery()
 	for {
 		select {
 		case <-ctx.Done():
@@ -2358,16 +2375,10 @@ func (c *Coord) run(ctx context.Context) {
 			c.tick(ctx)
 		case <-t.C:
 			c.tick(ctx)
-		case <-recoveryTimer.C:
-			c.tick(ctx)
+		case <-recoveryWake:
+			c.capacityRecoveryPass(ctx)
 		}
-		if !recoveryTimer.Stop() {
-			select {
-			case <-recoveryTimer.C:
-			default:
-			}
-		}
-		recoveryTimer.Reset(c.nextGoalRecoveryDelay(time.Now()))
+		armRecovery()
 	}
 }
 

@@ -363,6 +363,9 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		if sequence == j.CompletionCheckedSeq && time.Since(j.CompletionCheckedAt) < completionRetryEvery(j) {
 			return false
 		}
+		if !c.markCapacityObservation(j, agentRef{Status: first.AgentStatus, StateChangeSeq: first.StateChangeSeq, CompletionSeq: first.CompletionSeq}, time.Now()) {
+			return false
+		}
 		complete, err := c.completionEvidence(check, host, j, native)
 		if err == nil && !complete {
 			c.st.mu.Lock()

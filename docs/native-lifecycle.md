@@ -56,9 +56,17 @@ The exact owned goal must be blocked and its newest native failed turn must carr
 `error.codexErrorInfo: serverOverloaded`. A quoted message, idle pane, ordinary
 blocker, manual pause, usage limit or token budget limit cannot trigger recovery.
 
+Recovery requires the shared canonical daemon used by the live TUI. Legacy
+short-lived app-server connections refuse visibly and cannot resume work.
+
 A saved job reserves at most five native resume attempts across restarts, using
 15-second initial backoff, exponential delays and a four-minute ceiling. The
-existing supervision loop has one timer for persisted due times; application
+existing supervision loop has one timer servicing only due recovery work, without
+polling the board. Idle observations are debounced by native state/completion
+sequence and status, with a five-minute backstop. Completion and supervision share
+that observation checkpoint. An acknowledged resume has one persisted 30-second
+deadline for native progress; an unchanged failed turn exhausts visibly. The
+timer is disabled without pending work. Application
 reads do not trigger recovery. Waiting and exhausted recovery retain the managed
 running/admission slot, and ordinary blocked transitions and stranded input defer
 to this owner. Explicit stop, operator timeout and normal completion fences remain

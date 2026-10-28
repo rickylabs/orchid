@@ -10,6 +10,7 @@ CHECKOUT = "cmd/divybot/run_checkout.go"
 RECOVERY = "cmd/divybot/goal_recovery.go"
 MAIN = "cmd/divybot/main.go"
 COMPLETION = "cmd/divybot/completion.go"
+TRANSPORT = "cmd/divybot/remote_control_transport.go"
 COMMAND = ["go", "test", "./cmd/divybot", "-run", "^(TestRunCheckout|TestCapacity)", "-count=1", "-json"]
 MUTATIONS = [
     ("default base uses admission-era stale ref", CHECKOUT, 'return "HEAD", nil', 'return "refs/heads/release", nil'),
@@ -31,7 +32,12 @@ MUTATIONS = [
     ("running slot released during recovery", MAIN, 'if capacityRecoveryOwns(j) {\n\t\treturn true\n\t}', 'if capacityRecoveryOwns(j) {\n\t\treturn false\n\t}'),
     ("ordinary blocked supervision wins", MAIN, 'if matched && !recovering && ref.Status == "blocked" {', 'if matched && ref.Status == "blocked" {'),
     ("stranded input allowed during recovery", MAIN, 'suppressInput := recovering || !matched', 'suppressInput := !matched'),
-    ("daemon timer ignores pending recovery", RECOVERY, 'if next < delay {', 'if next < delay && false {'),
+    ("daemon timer ignores pending recovery", RECOVERY, 'if delay == 0 || next < delay {', 'if delay == 0 || next < delay { next = fleetRecoveryEvery;'),
+    ("noncanonical resume allowed", RECOVERY, 'if !p.canonical {', 'if !p.canonical && false {'),
+    ("canonical capability lost", TRANSPORT, 'p.canonical = true', 'p.canonical = false'),
+    ("watch deadline ignored", RECOVERY, 'if next.WatchUntil.IsZero() || !now.Before(next.WatchUntil) {', 'if next.WatchUntil.IsZero() || !now.Before(next.WatchUntil) && false {'),
+    ("unchanged idle probes repeated", RECOVERY, '} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery {', '} else if !changed && now.Sub(j.GoalRecoveryObservation.At) < fleetRecoveryEvery && false {'),
+    ("recovery timer polls the entire board", MAIN, 'case <-recoveryWake:\n\t\t\tc.capacityRecoveryPass(ctx)', 'case <-recoveryWake:\n\t\t\tc.tick(ctx)'),
     ("completion capacity hook removed", COMPLETION, 'c.recoverCapacityWithPort(ctx, j, p, time.Now())', 'false, error(nil)'),
 ]
 

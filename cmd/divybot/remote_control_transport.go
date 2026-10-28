@@ -197,6 +197,7 @@ func (h Host) withCanonicalConnection(ctx context.Context, thread string, use fu
 	// deadline, framing). Closing on the callback's result alone stays live.
 	var shadow *shadowPublisher
 	err := h.withGoalScript(ctx, script, thread, func(p *goalRPC) error {
+		p.canonical = true
 		shadow = h.ShadowScope.open(shadowCodexCanonical, thread)
 		p.shadow = shadow
 		if h.RemoteRun != nil {

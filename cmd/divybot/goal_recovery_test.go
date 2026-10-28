@@ -40,6 +40,7 @@ func capacityReadPort(goal *nativeGoal, id, status, code string) (*goalRPC, *str
 	p, input := goalPort(response(2, map[string]any{"goal": goal}), response(3, capacityTurnResult(id, status, code)))
 	out := new(strings.Builder)
 	p.input = out
+	p.canonical = true
 	_ = input
 	return p, out
 }
@@ -52,6 +53,7 @@ func capacityResumePort(before, after *nativeGoal, id string, confirm bool) (*go
 	p, _ := goalPort(frames...)
 	out := new(strings.Builder)
 	p.input = out
+	p.canonical = true
 	return p, out
 }
 
@@ -80,7 +82,7 @@ func TestCapacityRecoveryBackoffBoundAndRestart(t *testing.T) {
 			t.Fatal("resume changed goal intent, budget, or sent multiple writes")
 		}
 		saved := loadState(c.st.path).Jobs[j.Issue]
-		if saved.GoalRecovery.Attempts != attempt || !saved.GoalRecovery.NextAttemptAt.Equal(due.Add(capacityRetryDelay(attempt))) {
+		if saved.GoalRecovery.Attempts != attempt || !saved.GoalRecovery.NextAttemptAt.Equal(due.Add(capacityResumeTimeout)) {
 			t.Fatal("attempt reservation did not survive restart")
 		}
 		p, _ = capacityReadPort(fixtureGoal("blocked"), "capacity-turn", "failed", "serverOverloaded")
@@ -166,6 +168,7 @@ func TestCapacityRecoveryReservationPrecedesWriteAndConsumesAmbiguity(t *testing
 					}
 				}}
 			}
+			p.canonical = true
 			owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now)
 			writes := strings.Count(input.String(), `"method":"thread/goal/set"`)
 			if !owns || (err == nil) != (mode == "valid") {
@@ -225,12 +228,12 @@ func TestCapacityRecoveryProgressAndTimer(t *testing.T) {
 	if owns, err := c.recoverCapacityWithPort(context.Background(), j, p, now); owns || err != nil || capacityRecoveryOwns(j) || j.GoalRecovery.Attempts != 2 {
 		t.Fatal("native progress failed to release recovery ownership or reset the lifetime bound")
 	}
-	if c.nextGoalRecoveryDelay(now) != fleetRecoveryEvery {
+	if c.nextGoalRecoveryDelay(now) != 0 {
 		t.Fatal("no pending recovery retained a busy timer")
 	}
 	// A fresh attempt is an explicit run operation, never a side effect of an app read.
 	src, err := os.ReadFile("main.go")
-	if err != nil || !strings.Contains(string(src), "case <-recoveryTimer.C:") {
+	if err != nil || !strings.Contains(string(src), "case <-recoveryWake:\n\t\t\tc.capacityRecoveryPass(ctx)") {
 		t.Fatal("recovery has no daemon-owned wake")
 	}
 	raw, _ := json.Marshal(j.GoalRecovery)
@@ -266,5 +269,112 @@ func TestCapacityRecoveryOwnsIdleAndBlockedSupervision(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCapacityRecoveryWatchHasOnePersistedDeadline(t *testing.T) {
+	c, j := capacityFixture(t)
+	now := time.Now()
+	deadline := now.Add(capacityResumeTimeout)
+	j.GoalRecovery = &goalRecovery{Attempts: 1, State: recoveryWatching, TurnID: "capacity-turn", WatchUntil: deadline, NextAttemptAt: deadline}
+	for _, at := range []time.Time{now, deadline.Add(-time.Millisecond), deadline} {
+		p, input := capacityReadPort(fixtureGoal("active"), "capacity-turn", "failed", "serverOverloaded")
+		owns, err := c.recoverCapacityWithPort(context.Background(), j, p, at)
+		if !owns || err != nil || strings.Contains(input.String(), "thread/goal/set") || !j.GoalRecovery.WatchUntil.Equal(deadline) {
+			t.Fatal("unproven native start extended its deadline or repeated the write")
+		}
+		if at.Before(deadline) {
+			if j.GoalRecovery.State != recoveryWatching || !j.GoalRecovery.NextAttemptAt.Equal(deadline) {
+				t.Fatal("watching changed its persisted deadline")
+			}
+		} else if j.GoalRecovery.State != recoveryExhausted || j.GoalRecovery.Reason != "goal-capacity-resume-unproven" || c.nextGoalRecoveryDelay(at) != 0 {
+			t.Fatal("unproven native start stayed in an unbounded watching loop")
+		}
+		c.st = loadState(c.st.path)
+		j = c.st.Jobs[j.Issue]
+	}
+}
+
+func TestCapacityRecoveryRequiresSharedCanonicalDaemon(t *testing.T) {
+	c, j := capacityFixture(t)
+	p, input := capacityReadPort(fixtureGoal("blocked"), "capacity-turn", "failed", "serverOverloaded")
+	p.canonical = false
+	owns, err := c.recoverCapacityWithPort(context.Background(), j, p, time.Now())
+	if owns || err != goalError("goal-capacity-canonical-required") || j.GoalRecovery != nil || strings.Contains(input.String(), "thread/goal/set") {
+		t.Fatal("temporary app-server connection gained resume authority")
+	}
+	h := goalTransportHost(t, "capacity-stall")
+	j.Host = h.Name
+	ref := agentRef{Host: j.Host, Agent: j.Agent, Pane: j.Pane, Workspace: j.Workspace, Status: "idle"}
+	if c.recoverCapacityStall(context.Background(), h, j, ref, true) || j.NativeGoal.Reason != "goal-capacity-canonical-required" {
+		t.Fatal("legacy transport did not refuse visibly")
+	}
+}
+
+func TestCapacityRecoveryCanonicalTransportCapability(t *testing.T) {
+	h := canonicalFixtureHost(t, "valid", func(string, map[string]any) any { return map[string]any{} })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	called := false
+	if h.withCanonicalConnection(ctx, "fixture-thread", func(p *goalRPC) error {
+		called = true
+		if !p.canonical {
+			t.Fatal("shared native connection lost its capability")
+		}
+		return nil
+	}) != nil || !called {
+		t.Fatal("canonical app-server transport unavailable")
+	}
+	legacy := goalTransportHost(t, "")
+	if legacy.withGoalConnection(ctx, "fixture-thread", func(p *goalRPC) error {
+		if p.canonical {
+			t.Fatal("short-lived native daemon acquired shared transport capability")
+		}
+		return nil
+	}) != nil {
+		t.Fatal("legacy fixture unavailable")
+	}
+}
+
+func TestCapacityRecoveryObservationsAreDebounced(t *testing.T) {
+	c, j := capacityFixture(t)
+	run := syntheticRemoteRun(t)
+	run.NativeSessionID = "fixture-thread"
+	j.RemoteControl = run
+	j.GoalDeliveryCommit = deliveryCommitMark
+	ref := agentRef{Host: j.Host, Agent: j.Agent, Pane: j.Pane, Workspace: j.Workspace, Status: "idle", StateChangeSeq: 4, CompletionSeq: 2}
+	if !c.markCapacityObservation(j, ref, time.Now()) {
+		t.Fatal("native observation checkpoint failed")
+	}
+	// A forbidden transport proves unchanged ticks return before any process/connection.
+	h := goalTransportHost(t, "existing")
+	prior := j.GoalRecoveryObservation.At
+	if c.recoverCapacityStall(context.Background(), h, j, ref, true) {
+		t.Fatal("idle non-recovery acquired ownership")
+	}
+	if !j.GoalRecoveryObservation.At.Equal(prior) {
+		t.Fatal("unchanged tick opened another native observation")
+	}
+	if capacityObservationChanged(j, ref) {
+		t.Fatal("unchanged observation became a new trigger")
+	}
+	c.st = loadState(c.st.path)
+	j = c.st.Jobs[j.Issue]
+	if capacityObservationChanged(j, ref) {
+		t.Fatal("dispatcher restart lost observation debounce")
+	}
+	ref.StateChangeSeq++
+	if !capacityObservationChanged(j, ref) {
+		t.Fatal("native state transition did not trigger observation")
+	}
+	ref.StateChangeSeq--
+	ref.CompletionSeq++
+	if !capacityObservationChanged(j, ref) {
+		t.Fatal("new native completion did not trigger observation")
+	}
+	j.GoalRecovery = &goalRecovery{State: recoveryWaiting, NextAttemptAt: time.Now().Add(-time.Second)}
+	c.postponeCapacityObservation(j, time.Now())
+	if c.nextGoalRecoveryDelay(time.Now()) < capacityRetryInitial-time.Second {
+		t.Fatal("unavailable native source created a tight retry loop")
 	}
 }
