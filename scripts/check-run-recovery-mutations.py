@@ -43,14 +43,20 @@ MUTATIONS = [
 ]
 
 
-def gate(label, green):
-    p = subprocess.run(COMMAND, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+def gate(label, green, selector=None):
+    command = COMMAND.copy()
+    if selector is not None:
+        command[command.index("-run") + 1] = selector
+    p = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
     failures, assertions = [], []
+    passed = 0
     for line in p.stdout.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
+        if event.get("Action") == "pass" and event.get("Test"):
+            passed += 1
         if event.get("Action") == "fail" and event.get("Test"):
             failures.append(event["Test"])
         output = event.get("Output", "").strip()
@@ -60,8 +66,8 @@ def gate(label, green):
     for line in assertions:
         print(line, flush=True)
     if green:
-        if p.returncode != 0:
-            raise RuntimeError("green control failed")
+        if p.returncode != 0 or passed == 0:
+            raise RuntimeError("green control failed or executed no tests")
     elif p.returncode != 1 or not failures:
         raise RuntimeError("mutation survived or did not compile and reach assertions")
 
@@ -76,10 +82,11 @@ def main():
                 raise RuntimeError("mutation anchor is ambiguous: " + label)
             (ROOT / filename).write_text(original.replace(before, after, 1))
             try:
-                gate("mutant: " + label, False)
+                selector = "^TestRunCheckout" if filename == CHECKOUT else "^TestCapacity"
+                gate("mutant: " + label, False, selector)
             finally:
                 (ROOT / filename).write_text(original)
-            gate("restored: " + label, True)
+            gate("restored: " + label, True, selector)
         print(f"PASS: {len(MUTATIONS)} compiled mutants failed assertions; {len(MUTATIONS)} restored controls passed", flush=True)
     finally:
         for filename, content in originals.items():
