@@ -39,6 +39,7 @@ import (
 // ============================ config ============================
 
 type Config struct {
+	NativeRunSocket         string                   `json:"native_run_socket,omitempty"`
 	RemoteControl           RemoteControlConfig      `json:"remote_control"`
 	OwnerNativeGrantPort    *ownerNativePortConfig   `json:"owner_native_grant_port,omitempty"`
 	Matrix                  MatrixConfig             `json:"matrix"`
@@ -403,6 +404,7 @@ type Job struct {
 }
 
 type State struct {
+	nativeRuns    *nativeRunWatch
 	CompletedRuns map[int]completedRun `json:"completed_runs,omitempty"`
 	MatrixNotices map[int]string       `json:"matrix_notices,omitempty"`
 	LaunchBlocks  map[int]launchBlock  `json:"launch_blocks,omitempty"`
@@ -480,7 +482,8 @@ func (s *State) save() error {
 }
 
 // saveLocked commits launch fences before an external effect can occur.
-func (s *State) saveLocked() error {
+func (s *State) saveLocked() (saveErr error) {
+	defer func() { s.publishNativeRunCommit(saveErr == nil) }()
 	b, err := json.MarshalIndent(struct {
 		CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
 		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
@@ -2325,6 +2328,9 @@ func (c *Coord) startOwnerGrantsWithTargets(ctx context.Context) {
 }
 
 func (c *Coord) run(ctx context.Context) {
+	if !c.startNativeRunReads(ctx) {
+		return
+	}
 	c.startOwnerGrantsWithTargets(ctx)
 	if c.cfg.OwnerNativeGrantPort != nil {
 		if c.ownerGrants == nil {
@@ -4729,6 +4735,9 @@ func main() {
 	startReaper(ctx.Done())
 
 	if *once {
+		if !c.startNativeRunReads(ctx) {
+			return
+		}
 		c.startOwnerNativeGrants(ctx)
 		c.tick(ctx)
 		c.st.save()
