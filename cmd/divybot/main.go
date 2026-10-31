@@ -1621,11 +1621,12 @@ func invalidMirrorAssignments(targets json.RawMessage) int {
 }
 
 type PRView struct {
-	Number    int
-	HeadOID   string
-	Mergeable string
-	State     string // OPEN | MERGED | CLOSED
-	Reviews   []struct {
+	BaseRefName string // actual PR base branch reported by GitHub
+	Number      int
+	HeadOID     string
+	Mergeable   string
+	State       string // OPEN | MERGED | CLOSED
+	Reviews     []struct {
 		ID     string
 		Author string
 		Body   string
@@ -1645,12 +1646,13 @@ type PRView struct {
 
 func ghPRView(ctx context.Context, repo string, n int) (*PRView, error) {
 	var raw struct {
-		Number     int    `json:"number"`
-		Mergeable  string `json:"mergeable"`
-		State      string `json:"state"`
-		IsDraft    bool   `json:"isDraft"`
-		HeadRefOid string `json:"headRefOid"`
-		Reviews    []struct {
+		Number      int    `json:"number"`
+		Mergeable   string `json:"mergeable"`
+		State       string `json:"state"`
+		IsDraft     bool   `json:"isDraft"`
+		HeadRefOid  string `json:"headRefOid"`
+		BaseRefName string `json:"baseRefName"`
+		Reviews     []struct {
 			ID     string                 `json:"id"`
 			Author struct{ Login string } `json:"author"`
 			Body   string                 `json:"body"`
@@ -1668,10 +1670,10 @@ func ghPRView(ctx context.Context, repo string, n int) (*PRView, error) {
 		} `json:"statusCheckRollup"`
 	}
 	if err := ghJSON(ctx, &raw, "pr", "view", strconv.Itoa(n), "--repo", repo,
-		"--json", "number,mergeable,state,isDraft,headRefOid,reviews,comments,statusCheckRollup"); err != nil {
+		"--json", "number,mergeable,state,isDraft,headRefOid,baseRefName,reviews,comments,statusCheckRollup"); err != nil {
 		return nil, err
 	}
-	v := &PRView{Number: raw.Number, Mergeable: raw.Mergeable, State: raw.State, HeadOID: raw.HeadRefOid, IsDraft: raw.IsDraft}
+	v := &PRView{BaseRefName: raw.BaseRefName, Number: raw.Number, Mergeable: raw.Mergeable, State: raw.State, HeadOID: raw.HeadRefOid, IsDraft: raw.IsDraft}
 	for _, r := range raw.Reviews {
 		v.Reviews = append(v.Reviews, struct{ ID, Author, Body, State string }{r.ID, r.Author.Login, r.Body, r.State})
 	}
@@ -1782,7 +1784,11 @@ func diff(t *tracker, v *PRView, bot string) (lines []string, changed bool) {
 	switch v.Mergeable {
 	case "CONFLICTING":
 		if !t.Conflicted || t.HeadOID != v.HeadOID {
-			lines = append(lines, "merge-conflict: rebase onto the latest base branch, resolve conflicts, force-push.")
+			base := "the latest base branch"
+			if v.BaseRefName != "" {
+				base = fmt.Sprintf("the latest base branch %q", v.BaseRefName)
+			}
+			lines = append(lines, fmt.Sprintf("merge-conflict: fetch and merge %s into your PR branch, resolve conflicts, and push normally.", base))
 			changed = true
 		}
 		t.Conflicted = true
