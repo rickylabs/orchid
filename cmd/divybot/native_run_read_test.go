@@ -21,7 +21,7 @@ func nativeRunFixture(t *testing.T) *Coord {
 	s.nativeRuns = &nativeRunWatch{generation: c.instance, subs: map[chan struct{}]struct{}{}}
 	s.SourceBindings = map[int]*sourceBinding{701: {Repo: "example/project", Issue: 7, Comment: 701}}
 	s.Jobs[701] = &Job{Issue: 701, Home: &dispatchIssue{Repo: "example/project", Number: 7},
-		Label: "codex-701", Agent: "codex", DispatchKey: fmt.Sprintf("%064x", 701), NativeSessionID: "fixture-native-session"}
+		Host: "fixture-host", HerdrScope: &herdrScope{Session: "dispatch", Machine: "fixture-machine"}, Label: "codex-701", Agent: "codex", DispatchKey: fmt.Sprintf("%064x", 701), NativeSessionID: "fixture-native-session"}
 	return c
 }
 
@@ -48,8 +48,12 @@ func TestNativeRunLookupSurvivesRestartAndHistory(t *testing.T) {
 		after.Records[0].NativeSessionID != before.Records[0].NativeSessionID || after.Generation == before.Generation {
 		t.Fatal("restart changed native association")
 	}
+	metadata := c.st.nativeRunRecordLocked(701, c.st.Jobs[701], c.cfg.Inbox)
+	metadata.Phase = "completed"
+	metadata.ObservedAt = stamp(time.Now())
+	metadata.CompletedAt = metadata.ObservedAt
 	c.st.CompletedRuns = map[int]completedRun{701: {DispatchKey: after.Records[0].DispatchKey,
-		NativeSessionID: after.Records[0].NativeSessionID, Phase: "observed"}}
+		NativeRun: metadata, NativeSessionID: after.Records[0].NativeSessionID, Phase: "observed"}}
 	if c.lookupNativeRuns(q).Records[0].Phase != "completed" {
 		t.Fatal("native completion was lost")
 	}

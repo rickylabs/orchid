@@ -404,14 +404,15 @@ type Job struct {
 }
 
 type State struct {
-	nativeRuns    *nativeRunWatch
-	CompletedRuns map[int]completedRun `json:"completed_runs,omitempty"`
-	MatrixNotices map[int]string       `json:"matrix_notices,omitempty"`
-	LaunchBlocks  map[int]launchBlock  `json:"launch_blocks,omitempty"`
-	RetryFlights  map[int]retryFlight  `json:"retry_flights,omitempty"`
-	mu            sync.Mutex
-	fs            *stateFS     // test-only durability fault injection; nil uses the OS
-	Jobs          map[int]*Job `json:"jobs"`
+	nativeRunInbox string
+	nativeRuns     *nativeRunWatch
+	CompletedRuns  map[int]completedRun `json:"completed_runs,omitempty"`
+	MatrixNotices  map[int]string       `json:"matrix_notices,omitempty"`
+	LaunchBlocks   map[int]launchBlock  `json:"launch_blocks,omitempty"`
+	RetryFlights   map[int]retryFlight  `json:"retry_flights,omitempty"`
+	mu             sync.Mutex
+	fs             *stateFS     // test-only durability fault injection; nil uses the OS
+	Jobs           map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
 	Continued map[string]int `json:"continued"`

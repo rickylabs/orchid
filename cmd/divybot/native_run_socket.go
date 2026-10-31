@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log"
 	"net"
@@ -29,6 +28,15 @@ func decodeNativeRunRPC(raw []byte) (nativeRunRPC, []nativeRunQuery, error) {
 		rpc.ID == "" || len(rpc.ID) > 64 {
 		return rpc, nil, errMatrix
 	}
+	var fields map[string]json.RawMessage
+	if strictJSON(raw, &fields) != nil || len(fields) != 3 {
+		return rpc, nil, errMatrix
+	}
+	for _, name := range []string{"id", "method", "params"} {
+		if v, ok := fields[name]; !ok || string(v) == "null" {
+			return rpc, nil, errMatrix
+		}
+	}
 	if rpc.Method == "run.subscribe" {
 		var p map[string]json.RawMessage
 		if strictJSON(rpc.Params, &p) != nil || p == nil || len(p) != 0 {
@@ -36,21 +44,28 @@ func decodeNativeRunRPC(raw []byte) (nativeRunRPC, []nativeRunQuery, error) {
 		}
 		return rpc, nil, nil
 	}
+	if rpc.Method != "run.lookup" {
+		return rpc, nil, errMatrix
+	}
+	keys, err := decodeNativeRunKeys(rpc.Params)
+	return rpc, keys, err
+}
+
+func decodeNativeRunKeys(raw json.RawMessage) ([]nativeRunQuery, error) {
 	var p struct {
 		Keys []nativeRunQuery `json:"keys"`
 	}
-	if rpc.Method != "run.lookup" || ownerNativeStrictJSON(rpc.Params, &p) != nil ||
-		p.Keys == nil || len(p.Keys) > nativeRunBatchLimit {
-		return rpc, nil, errMatrix
+	if len(raw) > nativeRunFrameLimit || ownerNativeStrictJSON(raw, &p) != nil || p.Keys == nil || len(p.Keys) > nativeRunBatchLimit {
+		return nil, errMatrix
 	}
 	seen := map[string]bool{}
 	for _, q := range p.Keys {
 		if !validNativeRunQuery(q) || seen[q.Key] {
-			return rpc, nil, errMatrix
+			return nil, errMatrix
 		}
 		seen[q.Key] = true
 	}
-	return rpc, p.Keys, nil
+	return p.Keys, nil
 }
 
 // The protocol has only two read methods. There is no path from client input to a coordinator action.
@@ -59,19 +74,28 @@ func (c *Coord) serveNativeRunConnection(ctx context.Context, conn *net.UnixConn
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	uid, peerErr := ownerNativePeerUID(conn)
+	if peerErr != nil || uid != os.Getuid() {
+		return
+	}
 	raw, err := bufio.NewReader(io.LimitReader(conn, nativeRunFrameLimit+1)).ReadBytes('\n')
 	if err != nil || len(raw) > nativeRunFrameLimit {
 		_ = json.NewEncoder(conn).Encode(nativeRunFailure(""))
 		return
 	}
-	rpc, keys, err := decodeNativeRunRPC(raw)
+	rpc, _, err := decodeNativeRunRPC(raw)
 	if err != nil {
 		_ = json.NewEncoder(conn).Encode(nativeRunFailure(rpc.ID))
 		return
 	}
 	enc := json.NewEncoder(conn)
 	if rpc.Method == "run.lookup" {
-		_ = enc.Encode(map[string]any{"id": rpc.ID, "result": c.lookupNativeRuns(keys)})
+		result, e := c.st.nativeRunsLookup(rpc.Params)
+		if e != nil {
+			_ = enc.Encode(nativeRunFailure(rpc.ID))
+			return
+		}
+		_ = enc.Encode(map[string]any{"id": rpc.ID, "result": result})
 		return
 	}
 	changed := make(chan struct{}, 1)
@@ -110,30 +134,36 @@ func (c *Coord) listenNativeRuns(ctx context.Context, path string) (*net.UnixLis
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errMatrix
 	}
-	parent, err := os.Lstat(filepath.Dir(path))
-	canonical, realErr := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil || realErr != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 || canonical != filepath.Dir(path) {
+	uid := os.Getuid()
+	if !ownerNativePrivateDir(filepath.Dir(path), uid) {
 		return nil, errMatrix
 	}
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		return nil, errMatrix
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		return nil, err
+		return nil, errMatrix
 	}
 	listener.SetUnlinkOnClose(false)
-	if err := os.Chmod(path, 0600); err != nil {
-		_ = listener.Close()
-		_ = os.Remove(path)
-		return nil, err
+	created, err := os.Lstat(path)
+	cleanup := func() {
+		listener.Close()
+		if current, e := os.Lstat(path); e == nil && created != nil && os.SameFile(current, created) {
+			_ = os.Remove(path)
+		}
+	}
+	if err != nil || ownerNativeSetSocketOwner(path, created, uid) != nil {
+		cleanup()
+		return nil, errMatrix
 	}
 	owned, err := os.Lstat(path)
-	if err != nil {
-		_ = listener.Close()
-		return nil, err
+	if err != nil || !os.SameFile(created, owned) || owned.Mode()&os.ModeSocket == 0 || owned.Mode().Perm() != 0600 || !ownerNativeOwned(owned, uid) {
+		cleanup()
+		return nil, errMatrix
 	}
 	c.st.mu.Lock()
+	c.st.nativeRunInbox = c.cfg.Inbox
 	c.st.nativeRuns = &nativeRunWatch{generation: c.instance, subs: map[chan struct{}]struct{}{}}
 	c.st.mu.Unlock()
 	go func() {
