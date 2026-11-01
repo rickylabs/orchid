@@ -94,6 +94,17 @@ not substitute a merge timestamp for pickup or file modification time for a
 native event. Keep cross-clock uncertainty explicit and native identifiers out
 of public reports.
 
+In twenty isolated runs on the same clock, the signed source-comment request
+reached wake pickup at p50 **0.224 ms**, p95 **0.391 ms**. The subsequent source
+reconciliation reached its counted fixture launch callback at p50 **9.345 ms**,
+p95 **11.426 ms**. A READY comment naming the exact current head reached wake
+pickup at p50 **0.260 ms**, p95 **0.580 ms**; its authoritative PR reader work was
+p50 **1.618 ms**, p95 **1.941 ms**. The pickup intervals include ingress and
+waiting; work intervals begin after pickup. These are transport/reader controls,
+not deployed native-start latency. The audit's approximately 170-second native
+start sample and 923-second READY-to-merge sample have different endpoints and
+cannot establish a before/after improvement from these fixture results.
+
 To extend the event vocabulary, start with this document, then update
 `githubSupervisionEvent` and its table test. Keep transport separate from state
 authority. Capacity accounting is owned separately and is unchanged here.

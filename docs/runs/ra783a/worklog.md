@@ -1,6 +1,6 @@
 # GitHub supervision wake delivery
 
-Plan & Design — READY FOR REVIEW.
+Design checkpoint: Plan & Design — READY FOR REVIEW, reviewed PASS_PLAN.
 
 1. Public surface: opt-in authenticated native GitHub webhooks invalidate the
    existing supervision owner through its buffered wake channel.
@@ -38,8 +38,34 @@ contains no operator endpoint, native identity or credential. No deployment,
 capacity change, protected run rewrite or generated compatibility copy is part
 of this change.
 
-Implementation review: same independent supervisor returned FAIL_FIX for a
+Implementation review: the same independent supervisor returned FAIL_FIX for a
 fixture permission assumption, then PASS after the explicit mode correction.
-Vet, build and focused race checks exit zero. The original dispatcher full
-Go test baseline also exits zero. Full changed-suite and mutation results are
-still being collected; this checkpoint does not claim those pending gates.
+Final test and measurement review also returned PASS. Both delivery commits
+are supervisor-owned, with no source edit by the sign-off step.
+
+Final local verification:
+
+| Gate | Exit and evidence |
+| --- | --- |
+| `go vet ./...` | 0, no diagnostics |
+| `go build ./cmd/divybot` | 0, no diagnostics |
+| `go test -race -timeout 20m ./... -count=1` | 0, `ok orch/cmd/divybot 309.484s` |
+| Final focused GitHub race controls | 0 |
+| Twenty timing-control repetitions | 0 |
+| New compiled ingress mutations | 0, all 16 assertion-RED; restored controls GREEN |
+| Configured source mutations | 0, all 50 assertion-RED; exact source restoration |
+| Configured owner endpoint mutations | 0, all 17 assertion-RED with privileged checks |
+| Configured checkout-trust mutations | 0, all 36 assertion-RED; restored control GREEN |
+| Configured recovery mutations | 0, all 37 assertion-RED and 37 restored controls GREEN |
+| Privileged endpoint and foreign-peer kernel checks | 0 |
+| Added-line leak scan, whitespace and file cap | 0 |
+
+All 233 Go files in the final isolated verification snapshot match the working
+source bytes. Setup failures and abandoned test copies are excluded from these
+verdicts. The original dispatcher full plain-test baseline also exited zero;
+the quiet-fleet production wake control compiled RED there and GREEN here.
+
+The [measurement guide](../../github-supervision.md) separates controlled
+ingress/pickup from source/PR work and from deployed native task-start evidence.
+Accepted debt: webhook/proxy setup and native before/after correlation remain
+deployment work. No production latency improvement is claimed by fixture times.

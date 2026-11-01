@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -246,9 +247,31 @@ func TestGitHubEventReadyReviewAndChecksReadCurrentHead(t *testing.T) {
 	job := &Job{Repo: "example/project", PR: 7}
 	for _, kind := range []string{"issue_comment", "pull_request", "pull_request_review", "check_run", "check_suite", "status"} {
 		ready := time.Now()
-		// Delayed events name an old head. The production PR reader must fetch the current head.
-		payload := `{"action":"completed","repository":{"full_name":"example/project"},"fixture_event":"` + kind + `","head_sha":"` + strings.Repeat("b", 40) + `"}`
-		githubDeliver(t, client, kind, kind, payload)
+		// READY names the exact current head; delayed reviews/checks can name an old one.
+		payload := map[string]any{"repository": map[string]string{"full_name": "example/project"}}
+		oldHead := strings.Repeat("b", 40)
+		switch kind {
+		case "issue_comment":
+			payload["action"] = "created"
+			payload["issue"] = map[string]int{"number": 7}
+			payload["comment"] = map[string]any{"id": 701, "body": "READY " + head, "created_at": ready.UTC().Format(time.RFC3339Nano)}
+		case "pull_request":
+			payload["action"] = "ready_for_review"
+			payload["pull_request"] = map[string]any{"number": 7, "head": map[string]string{"sha": head}}
+		case "pull_request_review":
+			payload["action"] = "submitted"
+			payload["review"] = map[string]string{"commit_id": oldHead, "state": "approved"}
+		case "check_run", "check_suite":
+			payload["action"] = "completed"
+			payload[kind] = map[string]any{"head_sha": oldHead, "pull_requests": []any{}}
+		case "status":
+			payload["sha"], payload["state"] = oldHead, "success"
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		githubDeliver(t, client, kind, kind, string(raw))
 		pickup := githubPickup(t, c)
 		work := time.Now()
 		c.pollPR(ctx, 7, job, Host{}, "working")
