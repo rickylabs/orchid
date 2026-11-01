@@ -28,8 +28,9 @@ func (h Host) joinedArgs(script string) (string, []string) {
 }
 
 type joinedOptions struct {
-	script string                    // "" selects the canonical end-mode bridge
-	tap    func(io.Reader) io.Reader // test-only read-boundary witness
+	script  string                    // "" selects the canonical end-mode bridge
+	tap     func(io.Reader) io.Reader // test-only read-boundary witness
+	signals func(*goalRPC)            // installs acceptance signal handlers; enables the pump
 }
 
 func (h Host) withJoinedCanonicalConnection(ctx context.Context, thread string, opt joinedOptions, notice func(remoteNativeTurn) error,
@@ -65,7 +66,9 @@ func (h Host) withJoinedCanonicalConnection(ctx context.Context, thread string, 
 			joined = true
 		}
 	}
-	defer join()
+	var pump *framePump
+	// The bridge ends first so a blocked Scan returns; then the pump joins.
+	defer func() { join(); pump.close() }() // guard:pump-joined
 	var reader io.Reader = out
 	if opt.tap != nil {
 		reader = opt.tap(out)
@@ -73,6 +76,11 @@ func (h Host) withJoinedCanonicalConnection(ctx context.Context, thread string, 
 	p := newGoalRPC(in, reader, thread)
 	p.ctx = ctx
 	p.onTurnNotice = notice
+	if opt.signals != nil {
+		pump = startFramePump(p.scan)
+		p.pump, p.frameLimit, p.optOut, p.observeOnly = pump, acceptanceFrameLimit, acceptanceOptOut, true
+		opt.signals(p)
+	}
 	shadow := h.ShadowScope.open(shadowCodexCanonical, thread)
 	p.shadow = shadow
 	defer func() { shadow.close(err) }()
@@ -96,14 +104,15 @@ func (h Host) withJoinedCanonicalConnection(ctx context.Context, thread string, 
 		if frames >= joinedDrainFrames {
 			return deliveryGap("drain")
 		}
-		if !p.scan.Scan() { // guard:drain-scanner
-			if p.scan.Err() != nil {
+		line, ok, err := p.nextLine()
+		if !ok { // guard:drain-scanner
+			if err != nil {
 				return deliveryGap("drain")
 			}
 			break
 		}
 		var m map[string]json.RawMessage
-		if decodeNativeJSON(p.scan.Bytes(), &m) != nil || m == nil { // guard:drain-decode
+		if decodeNativeJSON(line, &m) != nil || m == nil { // guard:drain-decode
 			return deliveryGap("drain")
 		}
 		if drain(m) != nil {
