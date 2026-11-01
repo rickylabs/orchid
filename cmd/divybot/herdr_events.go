@@ -273,6 +273,8 @@ func (f *herdrFleet) publish(host string, agents []AgentInfo, up bool) {
 }
 func (c *Coord) startHerdrFleet(ctx context.Context) {
 	c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	// All observation producers invalidate the same serialized supervision owner.
+	c.startGitHubEvents(ctx)
 	for name, host := range c.fleet.hosts {
 		go watchHerdrFleet(ctx, host.herdrEventConnection, host.agentSnapshot,
 			func(agents []AgentInfo, up bool) { c.fleet.publish(name, agents, up) })
