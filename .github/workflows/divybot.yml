@@ -45,7 +45,7 @@ jobs:
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.9.6
-      - name: Root Bookworm stale-socket repetition and full suite
+      - name: Root Bookworm stale sockets and unprivileged full suite
         run: |
           docker run --rm --user 0:0 \
             --mount "type=bind,source=$PWD,target=/src,readonly" \
@@ -58,8 +58,13 @@ jobs:
               id
               go version
               go test -race ./cmd/divybot -run "^TestNativeRun(StaleCrashSocketReplaced|SharedParentAndStaleSocket)$" -count=20
+              go test -race ./cmd/divybot -run "^TestNativeRun(ForeignUIDKernelPeer|ConfiguredUIDKernelPeer)$" -count=1
               go vet ./...
-              go test ./... -count=1 -timeout=15m
+              # The general suite has chmod-based denial fixtures: run it with
+              # ordinary DAC, as in matrix-gate, rather than root bypass.
+              mkdir /tmp/fixture-home
+              chown -R nobody:nogroup /work /tmp/fixture-home
+              runuser -u nobody -- env HOME=/tmp/fixture-home go test ./... -count=1 -timeout=15m
             '
   run-recovery-mutations:
     runs-on: ubuntu-latest
