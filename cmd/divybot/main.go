@@ -39,6 +39,7 @@ import (
 // ============================ config ============================
 
 type Config struct {
+	NativeRunSocket         string                   `json:"native_run_socket,omitempty"`
 	RemoteControl           RemoteControlConfig      `json:"remote_control"`
 	OwnerNativeGrantPort    *ownerNativePortConfig   `json:"owner_native_grant_port,omitempty"`
 	Matrix                  MatrixConfig             `json:"matrix"`
@@ -403,13 +404,15 @@ type Job struct {
 }
 
 type State struct {
-	CompletedRuns map[int]completedRun `json:"completed_runs,omitempty"`
-	MatrixNotices map[int]string       `json:"matrix_notices,omitempty"`
-	LaunchBlocks  map[int]launchBlock  `json:"launch_blocks,omitempty"`
-	RetryFlights  map[int]retryFlight  `json:"retry_flights,omitempty"`
-	mu            sync.Mutex
-	fs            *stateFS     // test-only durability fault injection; nil uses the OS
-	Jobs          map[int]*Job `json:"jobs"`
+	nativeRunInbox string
+	nativeRuns     *nativeRunWatch
+	CompletedRuns  map[int]completedRun `json:"completed_runs,omitempty"`
+	MatrixNotices  map[int]string       `json:"matrix_notices,omitempty"`
+	LaunchBlocks   map[int]launchBlock  `json:"launch_blocks,omitempty"`
+	RetryFlights   map[int]retryFlight  `json:"retry_flights,omitempty"`
+	mu             sync.Mutex
+	fs             *stateFS     // test-only durability fault injection; nil uses the OS
+	Jobs           map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
 	Continued map[string]int `json:"continued"`
@@ -480,7 +483,8 @@ func (s *State) save() error {
 }
 
 // saveLocked commits launch fences before an external effect can occur.
-func (s *State) saveLocked() error {
+func (s *State) saveLocked() (saveErr error) {
+	defer func() { s.publishNativeRunCommit(saveErr == nil) }()
 	b, err := json.MarshalIndent(struct {
 		CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
 		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
@@ -2325,6 +2329,8 @@ func (c *Coord) startOwnerGrantsWithTargets(ctx context.Context) {
 }
 
 func (c *Coord) run(ctx context.Context) {
+	stopReads := c.startNativeRunReads(ctx)
+	defer stopReads()
 	c.startOwnerGrantsWithTargets(ctx)
 	if c.cfg.OwnerNativeGrantPort != nil {
 		if c.ownerGrants == nil {
@@ -4729,9 +4735,7 @@ func main() {
 	startReaper(ctx.Done())
 
 	if *once {
-		c.startOwnerNativeGrants(ctx)
-		c.tick(ctx)
-		c.st.save()
+		c.runOnce(ctx)
 		return
 	}
 	c.run(ctx)

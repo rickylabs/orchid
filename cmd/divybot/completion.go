@@ -16,12 +16,13 @@ import (
 // never permission to restart a completed run. Cleanup holds capacity until
 // the recorded seat AND its captured native process are independently absent.
 type completedRun struct {
-	DispatchKey            string `json:"dispatchKey"`
-	NativeSessionID        string `json:"nativeSessionId"`
-	StateChangeSeq         uint64 `json:"stateChangeSeq"`
-	Phase                  string `json:"phase"` // retiring | close-failed | close-sent | observed
-	CloseAttempts          int    `json:"closeAttempts"`
-	PublicationUnconfirmed bool   `json:"publicationUnconfirmed,omitempty"`
+	NativeRun              *nativeRunRecord `json:"nativeRun,omitempty"`
+	DispatchKey            string           `json:"dispatchKey"`
+	NativeSessionID        string           `json:"nativeSessionId"`
+	StateChangeSeq         uint64           `json:"stateChangeSeq"`
+	Phase                  string           `json:"phase"` // retiring | close-failed | close-sent | observed
+	CloseAttempts          int              `json:"closeAttempts"`
+	PublicationUnconfirmed bool             `json:"publicationUnconfirmed,omitempty"`
 }
 
 func finalCommentMarker(key string) string {
@@ -394,6 +395,12 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 		c.st.mu.Lock()
 		if c.st.CompletedRuns == nil {
 			c.st.CompletedRuns = map[int]completedRun{}
+		}
+		fence.NativeRun = c.st.nativeRunRecordLocked(n, j, c.cfg.Inbox)
+		if fence.NativeRun != nil {
+			fence.NativeRun.Phase = "completed"
+			fence.NativeRun.ObservedAt = stamp(time.Now())
+			fence.NativeRun.CompletedAt = fence.NativeRun.ObservedAt
 		}
 		c.st.CompletedRuns[n] = fence
 		err = c.st.saveLocked()
