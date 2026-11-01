@@ -90,6 +90,7 @@ type Host struct {
 	ShadowScope     *nativeShadowScope   `json:"-"`
 	Acceptance      *codexAcceptance     `json:"-"`
 	GoalReadiness   *goalReadinessShadow `json:"-"`                       // observe-only native readiness record
+	Stages          *launchStageClock    `json:"-"`                       // per-launch stage evidence; nil is a no-op
 	ClaudeLinks     *claudeLinkStore     `json:"-"`                       // Claude session links agreed by Claude's own bound records
 	HerdrMachine    string               `json:"herdr_machine,omitempty"` // saved profile in the coordinator account
 	HerdrSession    string               `json:"herdr_session,omitempty"` // expected session; default is default
@@ -962,6 +963,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			if e := h.prepareRemoteCodex(ctx, remote, env); e != nil {
 				return pane, ws, matrixSite("spawn.remote-control-prepare", e)
 			}
+			h.Stages.mark(stageMarkThreadPrepared)
 			nativeArgs, err = remoteCodexArgs(nativeArgs, cwd, remote.NativeSessionID)
 			if err != nil {
 				return pane, ws, matrixSite("spawn.remote-control-render", err)
@@ -994,6 +996,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		raw, e := herdrUnwrap(out)
 		if e == nil {
 			attempt.registered() // guard:fact-registered
+			h.Stages.mark(stageMarkRegistered)
 			var started struct {
 				Agent AgentInfo `json:"agent"`
 			}
@@ -1034,12 +1037,17 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if remote != nil {
 		e := h.preGoalRemoteIdentity(ctx, agent, label, remote, location)
 		if e != nil {
+			if o := attachmentOutcomeOf(e); o != "" {
+				log.Printf("issue #%d: attachment %s", receipt.dispatch.Issue.Number, o)
+			}
 			return pane, ws, matrixSite("spawn.remote-control-identity", e)
 		}
+		h.Stages.mark(stageMarkAttached)
 		identity = &remote.NativeSessionID
 		if e = h.remoteProof(ctx, agent, label, remote, location); e != nil {
 			return pane, ws, matrixSite("spawn.remote-control-proof", e)
 		}
+		h.Stages.mark(stageMarkRemoteProof)
 		if agent == "claude" {
 			// Capture the launched process now, independent of the bridge, and
 			// keep it with the run; no later process is ever pinned instead.
@@ -1055,6 +1063,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 	if e := receipt.writeDispatch("dispatched", location); e != nil {
 		return pane, ws, matrixSite("spawn.dispatched-binding", e)
 	}
+	h.Stages.mark(stageMarkDispatched)
 	if agyStore != nil {
 		if receipt.writeAGYStore(agyStore) != nil {
 			return pane, ws, matrixSite("spawn.native-store-binding", errMatrix)
@@ -3474,6 +3483,12 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 	}()
 	attempt := receipt.launchAttempt()
 	attempt.enter(stagePreparation)
+	host.Stages = newLaunchStageClock(time.Now)
+	defer func() {
+		if s := host.Stages.summary(); s != "" {
+			log.Printf("issue #%d: launch stages %s", n, s) // guard:launch-stage-log
+		}
+	}()
 	ownerChoice := receipt != nil && receipt.dispatch != nil && receipt.dispatch.MatrixSource == ownerNativeSource
 	if !ownerChoice {
 		if reason := c.providerBudgetLaunchReason(agent, ovr, time.Now()); reason != "" {
@@ -3720,6 +3735,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 				gcancel()
 				return matrixReason("goal-prompt-unconfirmed")
 			}
+			host.Stages.mark(stageMarkGoalProof)
 		}
 		var deliveryErr error
 		remoteCodex := agent == "codex" && j.RemoteControl != nil
@@ -3767,6 +3783,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 			return matrixReason("goal-prompt-unconfirmed")
 		}
 		recordGoalCommit(attempt, remoteCodex) // guard:fact-goal-committed
+		host.Stages.mark(stageMarkCommitted)
 		log.Printf("issue #%d: goal delivery confirmed", n)
 		gcancel()
 		if agent == "agy" {
