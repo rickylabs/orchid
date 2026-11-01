@@ -48,3 +48,5 @@ jobs:
           cache: false
       - name: Compiled run checkout and capacity recovery mutations
         run: python3 scripts/check-run-recovery-mutations.py
+      - name: Compiled native run capacity and reaper mutations
+        run: python3 scripts/check-run-capacity-mutations.py

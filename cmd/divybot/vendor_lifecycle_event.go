@@ -17,6 +17,7 @@ type vendorLifecycleEvent struct {
 	Terminal  string `json:"terminal"`
 	Session   string `json:"session"`
 	Event     string `json:"event"`
+	Reason    string `json:"reason,omitempty"`
 	Seq       uint64 `json:"seq"`
 }
 

@@ -846,19 +846,8 @@ func (c *Coord) retryAttempts() {
 // reservation key. Callers hold c.st.mu.
 func (c *Coord) activeByAccount() map[string]int {
 	active := map[string]int{}
-	jobs := map[string]bool{}
-	for _, j := range c.st.Jobs {
-		active[accountKey(j.Agent)]++
-		if j.DispatchKey != "" {
-			jobs[j.DispatchKey] = true
-		}
-	}
-	c.attemptsMu.Lock()
-	defer c.attemptsMu.Unlock()
-	for key, t := range c.attempts {
-		if !jobs[key] { // guard:active-dedupe
-			active[t.account]++
-		}
+	for a, count := range c.runCapacityCountsLocked() {
+		active[a] = count.active()
 	}
 	return active
 }

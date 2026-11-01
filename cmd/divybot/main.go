@@ -334,6 +334,7 @@ type tracker struct {
 }
 
 type Job struct {
+	CapacityObservation     *runCapacityObservation  `json:"-"`
 	GoalRecoveryObservation *goalRecoveryObservation `json:"goal_recovery_observation,omitempty"`
 	GoalRecovery            *goalRecovery            `json:"goal_recovery,omitempty"`
 	StartSHA                string                   `json:"start_sha,omitempty"` // verified launch checkout commit
@@ -2527,6 +2528,7 @@ func (c *Coord) governorSample(ctx context.Context) {
 		}
 		samples := c.st.QuotaSamples
 		active := c.activeByAccount()
+		counts := c.runCapacityCountsLocked()
 		prev := map[string]int{}
 		for a, v := range c.st.PrevCap {
 			prev[a] = v
@@ -2537,8 +2539,9 @@ func (c *Coord) governorSample(ctx context.Context) {
 				continue
 			}
 			d := c.cfg.Governor.decide(now, q, samples[a], active[a], prev[a])
-			log.Printf("governor[%s]: weekly %.0f%% (burn %.2f/h, target %.2f/h) / 5h %.0f%% → cap %d active %d (binding %q, projEnd %.0f%%)",
-				a, q.seven.UsedPct, d.burnWeekly, d.targetWeekly, q.five.UsedPct, d.cap, active[a], d.binding, d.projectedEnd)
+			v := counts[a]
+			log.Printf("governor[%s]: weekly %.0f%% (burn %.2f/h, target %.2f/h) / 5h %.0f%% → cap %d active %d (live %d done %d unconfirmed %d, binding %q, projEnd %.0f%%)",
+				a, q.seven.UsedPct, d.burnWeekly, d.targetWeekly, q.five.UsedPct, d.cap, active[a], v.Live, v.Done, v.Unconfirmed, d.binding, d.projectedEnd)
 		}
 		c.st.save()
 	}
@@ -2570,6 +2573,9 @@ func (c *Coord) curCaps() map[string]int {
 		d := c.cfg.Governor.decide(now, qs[a], c.st.QuotaSamples[a], active[a], c.st.PrevCap[a])
 		caps[a] = d.cap
 		c.st.PrevCap[a] = d.cap
+	}
+	for a, v := range c.runCapacityCountsLocked() {
+		log.Printf("governor[%s]: cap %d active %d live %d done %d unconfirmed %d", a, caps[a], v.active(), v.Live, v.Done, v.Unconfirmed)
 	}
 	return caps
 }
@@ -2651,9 +2657,11 @@ func (c *Coord) tick(ctx context.Context) {
 	}
 
 	status, up := c.fleetStatus(ctx)
+	c.refreshRunCapacity(status)
 	c.completionPass(ctx, status)
 	c.finishSource(ctx, allOpen, pollOK)
 	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return c.issueState(ctx, n) })
+	c.reapRemoteRuns(ctx, status, up, allOpen)
 
 	// A persistently absent agent is an abandoned launch, not permission to retry.
 	// Fence it durably before removing tracking so a restart cannot respawn it.
@@ -2922,16 +2930,10 @@ type agentRef struct {
 // admissionBudget is each account's governor cap less its running count. It also
 // publishes the transport availability this tick's admission will act on.
 func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
+	c.refreshRunCapacity(status)
 	caps := c.curCaps()
 	c.st.mu.Lock()
-	running := map[string]int{}
-	for n, j := range c.st.Jobs {
-		ref, known := status[n]
-		_, completing := c.st.CompletedRuns[n]
-		if completing || occupiesAdmissionSlot(j, ref, known) {
-			running[accountKey(j.Agent)]++
-		}
-	}
+	running := c.admissionRunningLocked(status)
 	c.st.mu.Unlock()
 	budget := map[string]int{}
 	for a, cp := range caps {
@@ -2952,8 +2954,8 @@ func occupiesAdmissionSlot(j *Job, ref agentRef, known bool) bool {
 		return true
 	}
 	if j != nil && j.RemoteControl != nil {
-		return true
-	} // released only after native and paired absence proof
+		return !nativeCapacityDoneForRef(j, ref, known)
+	} // native done frees account capacity while the warm record stays managed
 	if j != nil && accountKey(j.Agent) == "claude" {
 		return true // guard:claude-idle-capacity; an ended Claude turn is not the end of its run
 	}
@@ -3951,7 +3953,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	// strandedPoke for when it is due and what it says.
 	if poke := strandedPoke(j, ref.Status, time.Now()); !suppressInput && poke != "" {
 		gctx, gcancel := context.WithTimeout(ctx, 15*time.Second)
-		if host.send(gctx, j.Pane, poke) == nil {
+		if c.actionSend(gctx, host, j.Pane, poke) == nil {
 			j.LastPoke = time.Now()
 		}
 		gcancel()
@@ -4024,7 +4026,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 		if !suppressInput && merged && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 5*time.Minute {
 			msg := "Your PR merged ✅. Keep the loop going: per the tracker, pick the NEXT subtask in scope (or split remaining work into sibling inbox issues so they run in parallel), implement it, and open the next PR. Don't stop while the tracker still has unfinished cells."
 			rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
-			if host.send(rctx, j.Pane, msg) == nil {
+			if c.actionSend(rctx, host, j.Pane, msg) == nil {
 				j.LastPoke = time.Now()
 				log.Printf("issue #%d: PR #%d merged — re-engaged warm worker to continue", n, v.Number)
 			}
@@ -4079,7 +4081,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	if !suppressInput && (status == "idle" || status == "done") && j.Pane != "" && time.Since(j.LastPoke) > 15*time.Minute {
 		if msg := stuckPRNudge(v); msg != "" {
 			rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
-			if host.send(rctx, j.Pane, msg) == nil {
+			if c.actionSend(rctx, host, j.Pane, msg) == nil {
 				j.LastPoke = time.Now()
 				log.Printf("issue #%d: self-repoke PR #%d (%s)", n, j.PR, prShortState(v))
 			}
@@ -4091,6 +4093,7 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	if suppressInput {
 		return // polling/merge may proceed, but no native continuation or relay
 	}
+	previousTrack := cloneTracker(j.Track)
 	lines, changed := diff(&j.Track, v, c.cfg.BotLogin)
 	if !changed {
 		return
@@ -4100,7 +4103,8 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	}
 	msg := "New activity on your PR — address each item, push fixes, keep the PR green:\n" + strings.Join(lines, "\n")
 	rctx, rcancel := context.WithTimeout(ctx, 20*time.Second)
-	if err := host.send(rctx, j.Pane, msg); err != nil {
+	if err := c.actionSend(rctx, host, j.Pane, msg); err != nil {
+		j.Track = previousTrack // a deferred relay must remain observable next tick
 		log.Printf("issue #%d: relay failed: %v", n, err)
 	}
 	rcancel()
@@ -4291,70 +4295,82 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 	if j.RemoteCleanup != "" {
 		cause = j.RemoteCleanup
 	}
+	remoteReleaseEvidence := ""
+	if j.RemoteControl != nil {
+		check, cancel := context.WithTimeout(ctx, runCapacityReadBudget)
+		evidence := c.releaseMissingRemote(check, host, j, nil)
+		cancel()
+		if evidence != "" {
+			remoteReleaseEvidence = evidence
+		}
+	}
 	c.clearRemoteControl(j)
-	nativeCtx, nativeDone := context.WithTimeout(ctx, 20*time.Second)
-	nativeErr := host.stopRemoteRun(nativeCtx, j)
-	nativeDone()
-	if nativeErr != nil {
-		log.Printf("issue #%d: native stop unconfirmed reason=%s; capacity retained", n, closedGoalReason(nativeErr))
-		return false
-	}
-	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	c.bindOpenCodeLiveIdentity(cctx, host, j)
-	ws := j.Workspace
-	if j.RemoteControl != nil && ws == "" {
-		return false
-	}
-	if ws == "" {
-		// Resolve from the live fleet by issue cwd if we never recorded it.
-		if agents, err := host.agentList(cctx); err == nil {
-			for _, a := range agents {
-				if issueFromCwd(a.Cwd) == n {
-					ws = a.WorkspaceID
-					break
-				}
-			}
-		}
-	}
 	c.clearClaudeWorking(j)
-	if ws != "" {
-		// A short AGY run can close its source before the first supervision tick.
-		// Preserve its exact native join while the registered occupant still exists.
-		if j.Agent == "agy" {
-			c.bindAGYLiveIdentity(ctx, host, j)
-		}
-		// Capture a bound native process before closing the workspace. A failed
-		// capture never prevents teardown, but cannot create terminal evidence.
-		if !c.remoteTeardownOccupant(cctx, host, j) {
+	if remoteReleaseEvidence == "" {
+		nativeCtx, nativeDone := context.WithTimeout(ctx, 20*time.Second)
+		nativeErr := host.stopRemoteRun(nativeCtx, j)
+		nativeDone()
+		if nativeErr != nil {
+			log.Printf("issue #%d: native stop unconfirmed reason=%s; capacity retained", n, closedGoalReason(nativeErr))
 			return false
 		}
-		captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)
-		c.teardownStart(captureCtx, n, j, ws, cause)
-		captureDone()
-		if j.RemoteControl != nil {
-			var intent teardownIntent
-			record := filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record")
-			if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &intent) != nil || intent.DispatchKey != j.DispatchKey || intent.NativeSessionID != j.RemoteControl.NativeSessionID || intent.PaneID != j.Pane || intent.WorkspaceID != ws || intent.Cause != cause {
+		cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		defer cancel()
+		c.bindOpenCodeLiveIdentity(cctx, host, j)
+		ws := j.Workspace
+		if j.RemoteControl != nil && ws == "" {
+			return false
+		}
+		if ws == "" {
+			// Resolve from the live fleet by issue cwd if we never recorded it.
+			if agents, err := host.agentList(cctx); err == nil {
+				for _, a := range agents {
+					if issueFromCwd(a.Cwd) == n {
+						ws = a.WorkspaceID
+						break
+					}
+				}
+			}
+		}
+		c.clearClaudeWorking(j)
+		if ws != "" {
+			// A short AGY run can close its source before the first supervision tick.
+			// Preserve its exact native join while the registered occupant still exists.
+			if j.Agent == "agy" {
+				c.bindAGYLiveIdentity(ctx, host, j)
+			}
+			// Capture a bound native process before closing the workspace. A failed
+			// capture never prevents teardown, but cannot create terminal evidence.
+			if !c.remoteTeardownOccupant(cctx, host, j) {
 				return false
 			}
-			if !c.teardownObserveOne(cctx, intent) {
-				if !c.remoteTeardownOccupant(cctx, host, j) {
+			captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)
+			c.teardownStart(captureCtx, n, j, ws, cause)
+			captureDone()
+			if j.RemoteControl != nil {
+				var intent teardownIntent
+				record := filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record")
+				if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &intent) != nil || intent.DispatchKey != j.DispatchKey || intent.NativeSessionID != j.RemoteControl.NativeSessionID || intent.PaneID != j.Pane || intent.WorkspaceID != ws || intent.Cause != cause {
 					return false
 				}
-				_ = c.actionClose(cctx, host, ws)
 				if !c.teardownObserveOne(cctx, intent) {
+					if !c.remoteTeardownOccupant(cctx, host, j) {
+						return false
+					}
+					_ = c.actionClose(cctx, host, ws)
+					if !c.teardownObserveOne(cctx, intent) {
+						return false
+					}
+				}
+				if host.releaseRemoteResources(cctx, j) != nil || cctx.Err() != nil {
 					return false
 				}
+			} else {
+				closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
+				_ = host.closeWorkspace(closeCtx, ws)
+				closeDone()
+				c.teardownObservePending(ctx)
 			}
-			if host.releaseRemoteResources(cctx, j) != nil || cctx.Err() != nil {
-				return false
-			}
-		} else {
-			closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
-			_ = host.closeWorkspace(closeCtx, ws)
-			closeDone()
-			c.teardownObservePending(ctx)
 		}
 	}
 
@@ -4371,7 +4387,11 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 			return false
 		}
 	}
-	log.Printf("issue #%d: torn down (was on %s/%s)", n, j.Host, j.Label)
+	if remoteReleaseEvidence != "" {
+		log.Printf("issue #%d: torn down; capacity released evidence=%s", n, remoteReleaseEvidence)
+	} else {
+		log.Printf("issue #%d: torn down (was on %s/%s)", n, j.Host, j.Label)
+	}
 
 	// A torn-down job means its inbox stub closed — usually because the PR merged.
 	// If that PR was a PARTIAL fix (the worker wrote "Refs #N", so the upstream
@@ -4480,7 +4500,7 @@ func (c *Coord) fanoutGrace(ctx context.Context, n int, j *Job) bool {
 			"remains, do nothing — the orchestrator handles a single follow-up.",
 		pr, ref, c.cfg.Inbox, c.labelFor(j.Repo), ref, c.cfg.Inbox, ref)
 	sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
-	err := host.send(sctx, j.Pane, msg)
+	err := c.actionSend(sctx, host, j.Pane, msg)
 	scancel()
 	if err != nil {
 		log.Printf("issue #%d: fan-out nudge failed: %v — tearing down", n, err)

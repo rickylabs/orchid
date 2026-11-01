@@ -87,6 +87,9 @@ func (c *Coord) actionList(ctx context.Context, h Host) ([]AgentInfo, error) {
 	return h.agentList(ctx)
 }
 func (c *Coord) actionSend(ctx context.Context, h Host, pane, text string) error {
+	if err := c.acquireRunCapacity(h, pane); err != nil {
+		return err
+	}
 	if c.actions.send != nil {
 		return c.actions.send(ctx, h, pane, text)
 	}
