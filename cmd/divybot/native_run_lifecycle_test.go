@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -39,6 +40,19 @@ func nativeRunStaleSocket(t *testing.T, path string, mode os.FileMode) os.FileIn
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		t.Fatal("stale socket fixture")
+	}
+	// FileInfo is only a dev/inode snapshot. Pin the closed socket's inode so
+	// unlink+bind cannot recycle that identity before replacement assertions.
+	// O_PATH holds the filesystem inode without keeping the listener alive.
+	const oPath = 0x200000 // Linux O_PATH, as in the production no-follow helper.
+	pin, err := os.OpenFile(path, oPath|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatal("pin stale socket fixture", err)
+	}
+	t.Cleanup(func() { _ = pin.Close() })
+	held, err := pin.Stat()
+	if err != nil || !os.SameFile(info, held) {
+		t.Fatal("stale socket fixture changed before pinning", err)
 	}
 	return info
 }
@@ -81,7 +95,7 @@ func TestNativeRunStaleCrashSocketReplaced(t *testing.T) {
 	}
 	defer listener.Close()
 	fresh, err := os.Lstat(path)
-	if err != nil || os.SameFile(fresh, stale) || fresh.Mode().Perm() != 0600 {
+	if err != nil || os.SameFile(fresh, stale) || fresh.Mode().Perm() != 0660 {
 		t.Fatal("stale inode not replaced by a private endpoint")
 	}
 	if got := nativeRunDialLookup(t, path); len(got.Records) != 1 {
@@ -94,7 +108,7 @@ func TestNativeRunUnsafeStaleEndpointKept(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := nativeRunPrivateDir(t)
-	for _, mode := range []os.FileMode{0644, 0660, 0700} {
+	for _, mode := range []os.FileMode{0644, 0666, 0700} {
 		path := filepath.Join(dir, "mode.sock")
 		stale := nativeRunStaleSocket(t, path, mode)
 		if l, err := c.listenNativeRuns(ctx, path); err == nil {

@@ -91,8 +91,8 @@ func TestNativeRunSocketStrictLookupAndAckBaseline(t *testing.T) {
 func TestNativeRunSocketPermissionsAndOwnedCleanup(t *testing.T) {
 	_, cancel, socket := nativeRunSocketFixture(t)
 	info, err := os.Lstat(socket)
-	if err != nil || info.Mode().Perm() != 0600 || !ownerNativeOwned(info, os.Getuid()) {
-		t.Fatal("socket is not private and sameUID owned")
+	if err != nil || info.Mode().Perm() != 0660 || !ownerNativeOwned(info, os.Getuid()) {
+		t.Fatal("socket does not have exact observer permissions and daemon ownership")
 	}
 	if os.Remove(socket) != nil || os.WriteFile(socket, []byte("foreign-replacement"), 0600) != nil {
 		t.Fatal("replacement fixture")

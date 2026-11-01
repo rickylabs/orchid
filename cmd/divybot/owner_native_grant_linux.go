@@ -14,6 +14,11 @@ import (
 // Hold the exact no-follow inode before changing ownership or permissions;
 // never chmod/chown a replacement pathname with daemon privileges.
 func ownerNativeSetSocketOwner(path string, created os.FileInfo, uid int) error {
+	return ownerNativeSetSocketMode(path, created, uid, 0600)
+}
+
+// Keep the inherited group and change only the held socket inode, never a replacement path.
+func ownerNativeSetSocketMode(path string, created os.FileInfo, uid int, mode os.FileMode) error {
 	const oPath = 0x200000 // Linux O_PATH, absent from syscall on amd64/386.
 	fd, err := syscall.Open(path, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
@@ -28,7 +33,7 @@ func ownerNativeSetSocketOwner(path string, created os.FileInfo, uid int) error 
 	const atEmptyPath = 0x1000
 	// Fchownat addresses the held inode. Linux's O_PATH descriptor cannot be
 	// fchmod'ed; its kernel-owned proc reference addresses that same inode.
-	if syscall.Fchownat(fd, "", uid, -1, atEmptyPath) != nil || os.Chmod(fmt.Sprintf("/proc/self/fd/%d", fd), 0600) != nil {
+	if syscall.Fchownat(fd, "", uid, -1, atEmptyPath) != nil || os.Chmod(fmt.Sprintf("/proc/self/fd/%d", fd), mode) != nil {
 		return errMatrix
 	}
 	return nil

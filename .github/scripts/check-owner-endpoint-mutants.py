@@ -22,7 +22,7 @@ mutants = [
     ('held-inode', 'linux', '!os.SameFile(created, held)', '!os.SameFile(held, held)', False),
     ('held-daemon-owner', 'linux', '!ownerNativeOwned(held, os.Getuid())', 'false', True),
     ('held-chown', 'linux', 'syscall.Fchownat(fd, "", uid, -1, atEmptyPath) != nil', 'false', True),
-    ('held-permissions', 'linux', 'os.Chmod(fmt.Sprintf("/proc/self/fd/%d", fd), 0600)', 'os.Chmod(fmt.Sprintf("/proc/self/fd/%d", fd), 0660)', False),
+    ('held-permissions', 'linux', 'return ownerNativeSetSocketMode(path, created, uid, 0600)', 'return ownerNativeSetSocketMode(path, created, uid, 0660)', False),
     ('setter-error', 'port', 'prepare(s.options.Socket, created, *s.options.OperatorUID) != nil', '(prepare(s.options.Socket, created, *s.options.OperatorUID) != nil && false)', False),
     ('registered-inode', 'port', '!os.SameFile(created, bound)', '!os.SameFile(bound, bound)', False),
     ('registered-permissions', 'port', 'bound.Mode().Perm() != 0600', 'bound.Mode().Perm() != bound.Mode().Perm()', False),

@@ -26,7 +26,7 @@ jobs:
           trap 'rm -rf "$proof_dir"' EXIT
           chmod 0711 "$proof_dir"
           go test -race -c -o "$proof_dir/endpoint.test" ./cmd/divybot
-          sudo env PATH="$PATH" TMPDIR=/tmp OWNER_ENDPOINT_REQUIRE_ROOT=1 NATIVE_RUN_REQUIRE_ROOT=1 "$proof_dir/endpoint.test" -test.run '^(TestOwnerNative(EndpointTwoUIDs|SocketOwnershipNoFollow|SocketRegistrationGuards)|TestNativeRunForeignUIDKernelPeer)$' -test.v -test.count=1
+          sudo env PATH="$PATH" TMPDIR=/tmp OWNER_ENDPOINT_REQUIRE_ROOT=1 NATIVE_RUN_REQUIRE_ROOT=1 "$proof_dir/endpoint.test" -test.run '^(TestOwnerNative(EndpointTwoUIDs|SocketOwnershipNoFollow|SocketRegistrationGuards)|TestNativeRun(ForeignUIDKernelPeer|ConfiguredUIDKernelPeer))$' -test.v -test.count=1
       - name: Compiled owner endpoint guard mutations
         run: python3 .github/scripts/check-owner-endpoint-mutants.py --root
       - name: Compiled source-comment trigger guard mutations
@@ -37,6 +37,35 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./cmd/divybot
+  stale-socket-root:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.6
+      - name: Root Bookworm stale sockets and unprivileged full suite
+        run: |
+          docker run --rm --user 0:0 \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            --mount "type=bind,source=$(realpath "$(command -v deno)"),target=/usr/local/bin/deno,readonly" \
+            golang:bookworm sh -eu -c '
+              umask 0022
+              mkdir /work
+              cp -R /src/. /work/
+              cd /work
+              id
+              go version
+              go test -race ./cmd/divybot -run "^TestNativeRun(StaleCrashSocketReplaced|SharedParentAndStaleSocket)$" -count=20
+              go test -race ./cmd/divybot -run "^TestNativeRun(ForeignUIDKernelPeer|ConfiguredUIDKernelPeer)$" -count=1
+              go vet ./...
+              # The general suite has chmod-based denial fixtures: run it with
+              # ordinary DAC, as in matrix-gate, rather than root bypass.
+              mkdir /tmp/fixture-home
+              chown -R nobody:nogroup /work /tmp/fixture-home
+              runuser -u nobody -- env HOME=/tmp/fixture-home go test ./... -count=1 -timeout=15m
+            '
   run-recovery-mutations:
     runs-on: ubuntu-latest
     timeout-minutes: 20
