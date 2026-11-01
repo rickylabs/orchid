@@ -16,6 +16,7 @@ MUTATIONS = [
     ("ACTIVE native session mistaken for idle", "cmd/divybot/remote_control_stop.go", 'head.Thread.Status.Type != "idle"', "false", "^TestRemoteRunReaperKeepsActiveAndUnknown$/^active$"),
     ("workspace label ignored", REAPER, " || ws.Label == j.Label", "", "^TestRemoteRunReaperKeepsActiveAndUnknown$/^same-label$"),
     ("done account slot retained", MAIN, "return !nativeCapacityDoneForRef(j, ref, known)", "return true", "^TestRemoteRunDoneReleasesAccountRetainsRecord$"),
+    ("equivalent scope defeats native probe debounce", CAPACITY, "reflect.DeepEqual(old.Ref, ref) && time.Since(old.CheckedAt)", "old.Ref == ref && time.Since(old.CheckedAt)", "^TestRemoteRunDoneProbeDebouncesEquivalentScopes$"),
     ("governor counts done records", "cmd/divybot/launch_attempt.go", "active[a] = count.active()", "active[a] = count.active() + count.Done", "^TestRemoteRunGovernorCategories$"),
     ("closed inbox fallback removed", MAIN, 'if evidence != "" {', 'if evidence != "" && false {', "^TestRemoteRunClosedInboxTeardownWithoutTUIAnchor$"),
     ("closed inbox skips checkout cleanup", MAIN, "remoteReleaseEvidence = evidence", "remoteReleaseEvidence = evidence; return true", "^TestRemoteRunClosedInbox"),

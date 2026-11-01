@@ -54,7 +54,7 @@ func (c *Coord) refreshRunCapacity(status map[int]agentRef) {
 			continue
 		}
 		checked := time.Time{}
-		if old := j.CapacityObservation; old != nil && old.Ref == ref {
+		if old := j.CapacityObservation; old != nil && reflect.DeepEqual(old.Ref, ref) {
 			checked = old.CheckedAt
 		}
 		kind := runCapacityUnknown
@@ -111,7 +111,7 @@ func (c *Coord) observeRemoteDone(ctx context.Context, h Host, j *Job, ref agent
 	}
 	c.st.mu.Lock()
 	old := j.CapacityObservation
-	if old != nil && old.Ref == ref && time.Since(old.CheckedAt) < fleetRecoveryEvery {
+	if old != nil && reflect.DeepEqual(old.Ref, ref) && time.Since(old.CheckedAt) < fleetRecoveryEvery {
 		c.st.mu.Unlock()
 		return
 	}

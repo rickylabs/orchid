@@ -144,6 +144,22 @@ func TestRemoteRunReaperPacingSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestRemoteRunDoneProbeDebouncesEquivalentScopes(t *testing.T) {
+	c, j, h, ref, _, _ := nativeCapacityFixture(t, "valid")
+	ref.HerdrScope = &herdrScope{Session: "default"}
+	c.observeRemoteDone(context.Background(), h, j, ref)
+	if !nativeCapacityDone(j, time.Now()) {
+		t.Fatal("fixture not natively done")
+	}
+	ref.HerdrScope = &herdrScope{Session: "default"} // next fleet snapshot allocates a new scope
+	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
+		t.Fatal("equivalent fleet scope bypassed native probe debounce")
+		return nil, nil
+	}
+	c.refreshRunCapacity(map[int]agentRef{j.Issue: ref})
+	c.observeRemoteDone(context.Background(), h, j, ref)
+}
+
 // Keep behavioral controls connected to the production lifecycle boundaries.
 func TestRemoteRunProductionWiring(t *testing.T) {
 	for _, target := range []struct{ file, fn, call string }{
