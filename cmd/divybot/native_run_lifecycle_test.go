@@ -81,7 +81,7 @@ func TestNativeRunStaleCrashSocketReplaced(t *testing.T) {
 	}
 	defer listener.Close()
 	fresh, err := os.Lstat(path)
-	if err != nil || os.SameFile(fresh, stale) || fresh.Mode().Perm() != 0600 {
+	if err != nil || os.SameFile(fresh, stale) || fresh.Mode().Perm() != 0660 {
 		t.Fatal("stale inode not replaced by a private endpoint")
 	}
 	if got := nativeRunDialLookup(t, path); len(got.Records) != 1 {
@@ -94,7 +94,7 @@ func TestNativeRunUnsafeStaleEndpointKept(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := nativeRunPrivateDir(t)
-	for _, mode := range []os.FileMode{0644, 0660, 0700} {
+	for _, mode := range []os.FileMode{0644, 0666, 0700} {
 		path := filepath.Join(dir, "mode.sock")
 		stale := nativeRunStaleSocket(t, path, mode)
 		if l, err := c.listenNativeRuns(ctx, path); err == nil {

@@ -71,13 +71,13 @@ func decodeNativeRunKeys(raw json.RawMessage) ([]nativeRunQuery, error) {
 }
 
 // The protocol has only two read methods. There is no path from client input to a coordinator action.
-func (c *Coord) serveNativeRunConnection(ctx context.Context, conn *net.UnixConn) {
+func (c *Coord) serveNativeRunConnection(ctx context.Context, conn *net.UnixConn, allowedUID int) {
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	uid, peerErr := ownerNativePeerUID(conn)
-	if peerErr != nil || uid != os.Getuid() {
+	if peerErr != nil || uid != allowedUID {
 		return
 	}
 	raw, err := bufio.NewReader(io.LimitReader(conn, nativeRunFrameLimit+1)).ReadBytes('\n')
@@ -131,7 +131,7 @@ func (c *Coord) serveNativeRunConnection(ctx context.Context, conn *net.UnixConn
 	}
 }
 
-// Native identity is private: require a private canonical parent and never replace a foreign socket.
+// Native identity requires a canonical operator-provisioned parent and an authorized kernel peer.
 func (c *Coord) listenNativeRuns(ctx context.Context, path string) (*net.UnixListener, error) {
 	listener, _, err := c.listenNativeRunsDone(ctx, path)
 	return listener, err
@@ -141,7 +141,7 @@ func (c *Coord) listenNativeRuns(ctx context.Context, path string) (*net.UnixLis
 var errNativeRunLive = errors.New("native-run endpoint live")
 
 // clearStaleNativeRun removes an endpoint left by a crash, kill or --once exit.
-// Only this UID's private 0600 socket that refuses connections is removed, and
+// Only this UID's 0600/0660 socket that refuses connections is removed, and
 // only if the probed inode is still the one at the path.
 func clearStaleNativeRun(path string, uid int) error {
 	info, err := os.Lstat(path)
@@ -151,7 +151,7 @@ func clearStaleNativeRun(path string, uid int) error {
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		return errMatrix
 	}
-	if info.Mode().Perm() != 0600 || !ownerNativeOwned(info, uid) {
+	if (info.Mode().Perm() != 0600 && info.Mode().Perm() != nativeRunSocketMode) || !ownerNativeOwned(info, uid) {
 		return errMatrix
 	}
 	conn, err := net.DialTimeout("unix", path, time.Second)
@@ -180,8 +180,12 @@ func (c *Coord) listenNativeRunsDone(ctx context.Context, path string) (*net.Uni
 		return nil, nil, errMatrix
 	}
 	uid := os.Getuid()
-	if !ownerNativePrivateDir(filepath.Dir(path), uid) {
-		return nil, nil, errMatrix
+	if err := nativeRunParent(filepath.Dir(path), uid); err != nil {
+		return nil, nil, err
+	}
+	allowedUID, err := nativeRunPeerUID()
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := clearStaleNativeRun(path, uid); err != nil {
 		return nil, nil, err
@@ -198,7 +202,7 @@ func (c *Coord) listenNativeRunsDone(ctx context.Context, path string) (*net.Uni
 			_ = os.Remove(path)
 		}
 	}
-	if err != nil || ownerNativeSetSocketOwner(path, created, uid) != nil {
+	if err != nil || ownerNativeSetSocketMode(path, created, uid, nativeRunSocketMode) != nil {
 		cleanup()
 		return nil, nil, errMatrix
 	}
@@ -207,7 +211,7 @@ func (c *Coord) listenNativeRunsDone(ctx context.Context, path string) (*net.Uni
 		cleanup()
 		return nil, nil, errMatrix
 	}
-	if owned.Mode().Perm() != 0600 || !ownerNativeOwned(owned, uid) {
+	if owned.Mode().Perm() != nativeRunSocketMode || !ownerNativeOwned(owned, uid) {
 		cleanup()
 		return nil, nil, errMatrix
 	}
@@ -233,7 +237,7 @@ func (c *Coord) listenNativeRunsDone(ctx context.Context, path string) (*net.Uni
 			}
 			select {
 			case slots <- struct{}{}:
-				go func() { defer func() { <-slots }(); c.serveNativeRunConnection(ctx, conn) }()
+				go func() { defer func() { <-slots }(); c.serveNativeRunConnection(ctx, conn, allowedUID) }()
 			default:
 				_ = conn.Close()
 			}
@@ -257,6 +261,10 @@ func (c *Coord) startNativeRunReads(ctx context.Context) (stop func()) {
 		reason := "endpoint-refused"
 		if errors.Is(err, errNativeRunLive) {
 			reason = "endpoint-live"
+		} else if errors.Is(err, errNativeRunParentMissing) {
+			reason = errNativeRunParentMissing.Error()
+		} else if errors.Is(err, errNativeRunPeerInvalid) {
+			reason = errNativeRunPeerInvalid.Error()
 		}
 		log.Printf("native-run-source unavailable reason=%s; supervision continues", reason)
 		return func() {}

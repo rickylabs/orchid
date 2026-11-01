@@ -16,7 +16,7 @@
   "poll_interval": "30s",
   "branch_prefix": "orch/divybot-",
   "state_file": "/root/divybot/state.json",
-  "native_run_socket": "<ABSOLUTE_PRIVATE_0700_DIRECTORY>/native-run.sock",
+  "native_run_socket": "<ABSOLUTE_PROVISIONED_NATIVE_RUN_DIRECTORY>/native-run.sock",
   "ntfy_topic": "orchid-divy-7f3k9",
 
   "hosts": [
