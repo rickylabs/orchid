@@ -32,12 +32,7 @@ func (c *Coord) startGitHubEvents(ctx context.Context) {
 		log.Printf("github-supervision unavailable reason=endpoint-refused; recovery continues")
 		return
 	}
-	ingress := newGitHubEventIngress(secret, c.githubEventRepository, func() {
-		select {
-		case c.fleet.wake <- struct{}{}:
-		default: // A pending tick will read all current authority; no queue grows per event.
-		}
-	})
+	ingress := newGitHubEventIngress(secret, c.githubEventRelevant, c.fleet.wakes.githubChanged)
 	server := &http.Server{Handler: ingress, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: 8 * 1024, ErrorLog: log.New(io.Discard, "", 0)}

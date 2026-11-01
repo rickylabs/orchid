@@ -20,7 +20,7 @@ import (
 const githubFixtureSecret = "fixture webhook signing material"
 
 // Exercise the producer constructor used by Coord.run with no Herdr producers.
-func githubWakeFixture(t *testing.T, c *Coord) (*http.Client, context.Context) {
+func githubWakeFixture(t *testing.T, c *Coord, timing ...supervisionWakeTiming) (*http.Client, context.Context) {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
@@ -33,8 +33,9 @@ func githubWakeFixture(t *testing.T, c *Coord) (*http.Client, context.Context) {
 	t.Setenv("ORCHID_GITHUB_WEBHOOK_SOCKET", socket)
 	t.Setenv("ORCHID_GITHUB_WEBHOOK_SECRET_FILE", secret)
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	c.startHerdrFleet(ctx)
+	c.startHerdrFleet(ctx, timing...)
+	fleet := c.fleet
+	t.Cleanup(func() { cancel(); <-fleet.wakes.done })
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
@@ -83,6 +84,7 @@ func githubPickup(t *testing.T, c *Coord) time.Time {
 
 func TestGitHubEventProductionWakeQuietFleet(t *testing.T) {
 	c := newCoord(&Config{Inbox: "example/inbox"})
+	c.st.Jobs[7] = &Job{Issue: 7}
 	client, _ := githubWakeFixture(t, c)
 	created := time.Now()
 	githubDeliver(t, client, "issue_comment", "fixture-delivery", `{"action":"created","repository":{"full_name":"example/inbox"},"issue":{"number":7},"comment":{"id":701}}`)
@@ -99,12 +101,10 @@ func TestGitHubEventProductionWakeQuietFleet(t *testing.T) {
 
 func TestGitHubEventCoalescesAndRetainsEventsDuringWork(t *testing.T) {
 	c := newCoord(&Config{Inbox: "example/inbox"})
-	client, _ := githubWakeFixture(t, c)
+	c.st.Jobs[7] = &Job{Issue: 7, Repo: "example/inbox", Branch: "owned-branch"}
+	client, _ := githubWakeFixture(t, c, githubTestWakeTiming())
 	for n := range 20 {
-		githubDeliver(t, client, "check_run", strings.Repeat("a", n+1), `{"repository":{"full_name":"example/inbox"},"check_run":{"id":`+strings.Repeat("1", n+1)+`}}`)
-	}
-	if len(c.fleet.wake) != 1 {
-		t.Fatal("an event burst did not coalesce into one pending tick")
+		githubDeliver(t, client, "check_run", strings.Repeat("a", n+1), `{"repository":{"full_name":"example/inbox"},"check_run":{"id":`+strings.Repeat("1", n+1)+`,"check_suite":{"head_branch":"owned-branch"}}}`)
 	}
 	githubPickup(t, c)
 	// The serial owner has consumed the bit and is now doing authoritative work.
@@ -121,11 +121,11 @@ func TestGitHubEventCoalescesAndRetainsEventsDuringWork(t *testing.T) {
 func TestGitHubEventSourceReconciliation(t *testing.T) {
 	c, source, _ := sourceFixture(t)
 	startSource(t, c)
-	client, ctx := githubWakeFixture(t, c)
+	client, ctx := githubWakeFixture(t, c, githubTestWakeTiming())
 	created := time.Now().UTC()
 	c.st.SourceStarts[sourceRepo], c.st.SourceCursors[sourceRepo] = created.Add(-time.Second), created.Add(-time.Second)
 	source.post(sourceRepo, 2063, 3100000701, ownerGitHubID, sourceTrigger, created)
-	githubDeliver(t, client, "issue_comment", "source-comment", `{"action":"created","repository":{"full_name":"example/netscript"}}`)
+	githubDeliver(t, client, "issue_comment", "source-comment", `{"action":"created","repository":{"full_name":"example/netscript"},"issue":{"number":2063},"comment":{"id":3100000701,"body":"/swarm\nSynthetic task","user":{"id":129366361}}}`)
 	pickup := githubPickup(t, c)
 	work := time.Now()
 	c.sourceTick(ctx)
@@ -136,7 +136,7 @@ func TestGitHubEventSourceReconciliation(t *testing.T) {
 	t.Logf("controlled comment→pickup=%s; queue/work clocks separated; source reconciliation=%s", pickup.Sub(created), time.Since(work))
 	// Payload order never overrides the current GitHub response or the unknown guard.
 	source.failIssue = true
-	githubDeliver(t, client, "issues", "close-with-read-failure", `{"action":"closed","repository":{"full_name":"example/netscript"}}`)
+	githubDeliver(t, client, "issues", "close-with-read-failure", `{"action":"closed","repository":{"full_name":"example/netscript"},"issue":{"number":2063}}`)
 	githubPickup(t, c)
 	open, all = map[int]Issue{}, map[int]bool{}
 	if c.pollSourceBindings(ctx, open, all) || !all[3100000701] || len(open) != 1 {
@@ -145,7 +145,7 @@ func TestGitHubEventSourceReconciliation(t *testing.T) {
 	source.failIssue = false
 	source.issues[sourceRepo+"#2063"] = sourceIssueView{NodeID: "I_source_2063", State: "CLOSED"}
 	// An older reopened payload arrives after closed: only the fresh read decides.
-	githubDeliver(t, client, "issues", "reordered-open", `{"action":"reopened","repository":{"full_name":"example/netscript"}}`)
+	githubDeliver(t, client, "issues", "reordered-open", `{"action":"reopened","repository":{"full_name":"example/netscript"},"issue":{"number":2063}}`)
 	githubPickup(t, c)
 	open, all = map[int]Issue{}, map[int]bool{}
 	if !c.pollSourceBindings(ctx, open, all) || all[3100000701] {
@@ -178,7 +178,7 @@ func TestGitHubEventSourceSingleEffect(t *testing.T) {
 	c.gov.q = map[string]quota{"claude": {ok: true, at: now, five: RateLimit{UsedPct: 10, ResetsAt: now.Add(time.Hour).Unix()}, seven: RateLimit{UsedPct: 20, ResetsAt: now.Add(2 * time.Hour).Unix()}}}
 	c.sourceTick(context.Background())
 	c.st.SourceStarts["example/project"], c.st.SourceCursors["example/project"] = now.Add(-time.Second), now.Add(-time.Second)
-	client, ctx := githubWakeFixture(t, c)
+	client, ctx := githubWakeFixture(t, c, githubTestWakeTiming())
 	launches := 0
 	deps := matrixAttemptDeps{
 		report: func(r matrixRefusal) { t.Logf("fixture admission verdict: %+v", r) },
@@ -208,7 +208,7 @@ func TestGitHubEventSourceSingleEffect(t *testing.T) {
 	}
 	created := time.Now().UTC()
 	source.post("example/project", 7, 3100000703, ownerGitHubID, body, created)
-	payload := `{"action":"created","repository":{"full_name":"example/project"},"comment":{"id":3100000703}}`
+	payload := `{"action":"created","repository":{"full_name":"example/project"},"issue":{"number":7},"comment":{"id":3100000703,"body":"/swarm\nSynthetic task","user":{"id":129366361}}}`
 	githubDeliver(t, client, "issue_comment", "source-launch", payload)
 	pickup := githubPickup(t, c)
 	work := time.Now()
@@ -224,7 +224,7 @@ func TestGitHubEventSourceSingleEffect(t *testing.T) {
 	// Restore state and construct a new receiver with an empty ingress cache.
 	// The identical signed payload now wakes, but still cannot bypass durable admission.
 	c.st = loadState(c.st.path)
-	client, ctx = githubWakeFixture(t, c)
+	client, ctx = githubWakeFixture(t, c, githubTestWakeTiming())
 	githubDeliver(t, client, "issue_comment", "source-launch", payload)
 	githubPickup(t, c)
 	reconcile()
@@ -236,7 +236,9 @@ func TestGitHubEventSourceSingleEffect(t *testing.T) {
 
 func TestGitHubEventReadyReviewAndChecksReadCurrentHead(t *testing.T) {
 	c := newCoord(&Config{Inbox: "example/inbox", Targets: []Target{{Repo: "example/project"}}})
-	client, ctx := githubWakeFixture(t, c)
+	job := &Job{Issue: 7, Repo: "example/project", Branch: "owned-branch", Home: &dispatchIssue{Repo: "example/project", Number: 7}, PR: 7}
+	c.st.Jobs[7] = job
+	client, ctx := githubWakeFixture(t, c, githubTestWakeTiming())
 	bin := t.TempDir()
 	head := strings.Repeat("a", 40)
 	view := `{"number":7,"headRefOid":"` + head + `","mergeable":"MERGEABLE","state":"OPEN","isDraft":false,"reviews":[{"id":"fixture-review","author":{"login":"reviewer"},"state":"APPROVED"}],"statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"}]}`
@@ -244,7 +246,6 @@ func TestGitHubEventReadyReviewAndChecksReadCurrentHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	job := &Job{Repo: "example/project", PR: 7}
 	for _, kind := range []string{"issue_comment", "pull_request", "pull_request_review", "check_run", "check_suite", "status"} {
 		ready := time.Now()
 		// READY names the exact current head; delayed reviews/checks can name an old one.
@@ -257,15 +258,17 @@ func TestGitHubEventReadyReviewAndChecksReadCurrentHead(t *testing.T) {
 			payload["comment"] = map[string]any{"id": 701, "body": "READY " + head, "created_at": ready.UTC().Format(time.RFC3339Nano)}
 		case "pull_request":
 			payload["action"] = "ready_for_review"
-			payload["pull_request"] = map[string]any{"number": 7, "head": map[string]string{"sha": head}}
+			payload["pull_request"] = map[string]any{"number": 7, "head": map[string]any{"sha": head, "ref": "owned-branch", "repo": map[string]string{"full_name": "example/project"}}}
 		case "pull_request_review":
 			payload["action"] = "submitted"
+			payload["pull_request"] = map[string]any{"head": map[string]any{"ref": "owned-branch", "repo": map[string]string{"full_name": "example/project"}}}
 			payload["review"] = map[string]string{"commit_id": oldHead, "state": "approved"}
 		case "check_run", "check_suite":
 			payload["action"] = "completed"
-			payload[kind] = map[string]any{"head_sha": oldHead, "pull_requests": []any{}}
+			payload[kind] = map[string]any{"head_sha": oldHead, "head_branch": "owned-branch", "check_suite": map[string]string{"head_branch": "owned-branch"}, "pull_requests": []any{}}
 		case "status":
 			payload["sha"], payload["state"] = oldHead, "success"
+			payload["branches"] = []any{map[string]string{"name": "owned-branch"}}
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
@@ -280,4 +283,8 @@ func TestGitHubEventReadyReviewAndChecksReadCurrentHead(t *testing.T) {
 		}
 		t.Logf("controlled %s READY→pickup=%s; PR work=%s", kind, pickup.Sub(ready), time.Since(work))
 	}
+}
+
+func githubTestWakeTiming() supervisionWakeTiming {
+	return supervisionWakeTiming{debounce: 2 * time.Millisecond, minSpacing: 10 * time.Millisecond}
 }

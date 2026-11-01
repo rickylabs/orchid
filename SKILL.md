@@ -20,6 +20,10 @@ against quota, and fix the failure classes below before they cascade.
 divybot runs one serialized supervision loop, woken by native Herdr changes and
 authenticated GitHub webhook events when configured. A five-minute recovery
 tick repairs missed events; `poll_interval` no longer sets supervision cadence.
+GitHub wakes are filtered to owned work, coalesced for 250 ms and spaced by at
+least 30 seconds at receive handoff. Native fleet observations remain immediate.
+Source-reader conditional requests and core-reset pauses are separate from PR
+supervision, which has no shared global HTTP rate-limit backoff policy.
 See [GitHub supervision events](docs/github-supervision.md) for receiver setup,
 event subscriptions, replay protection and measurement. Each tick: feed (mirror
 bot-assigned upstream issues of `mirror_assignments` targets into the inbox) →

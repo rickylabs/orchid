@@ -22,7 +22,7 @@ const (
 // Payloads are invalidations, never issue state, grants, PR verdicts or launch requests.
 type githubEventIngress struct {
 	secret []byte
-	allows func(string) bool
+	allows func(string, githubSupervisionNotice) bool
 	wake   func()
 	now    func() time.Time
 	mu     sync.Mutex
@@ -36,7 +36,7 @@ type githubDelivery struct {
 	at       time.Time
 }
 
-func newGitHubEventIngress(secret []byte, allows func(string) bool, wake func()) *githubEventIngress {
+func newGitHubEventIngress(secret []byte, allows func(string, githubSupervisionNotice) bool, wake func()) *githubEventIngress {
 	return &githubEventIngress{secret: secret, allows: allows, wake: wake, now: time.Now, seen: map[[sha256.Size]byte]*githubDelivery{}}
 }
 
@@ -98,11 +98,7 @@ func (g *githubEventIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	var event struct {
-		Repository struct {
-			FullName string `json:"full_name"`
-		} `json:"repository"`
-	}
+	var event githubSupervisionNotice
 	if json.Unmarshal(body, &event) != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -116,7 +112,7 @@ func (g *githubEventIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	if !githubSupervisionEvent(kind) || !g.allows(event.Repository.FullName) {
+	if !githubSupervisionEvent(kind) || !g.allows(kind, event) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}

@@ -33,8 +33,21 @@ Subscribe to these native events:
 
 GitHub's signed `ping` is acknowledged without scheduling work. Unsupported
 events and repositories outside the inbox, effective target list and active job
-bindings are also acknowledged without a wake. Active bindings remain observable
-when a target is disabled or removed; this does not authorize new work there.
+bindings are acknowledged without a wake. Within those repositories, the filter
+accepts tracked inbox/source issues, pending source grants, newly launch-labelled
+inbox issues, configured bot assignments, and new `/swarm` comments by the owner
+or an exact named grant. Ordinary comments on untracked issues do not wake it.
+
+PR events must name the configured bot as PR author, or identify an active job's
+exact branch in the same repository. PR conversation comments must identify the
+bot as the PR author or match a tracked issue/source binding. Checks/statuses
+must identify an owned branch or an owned linked PR. Empty PR-link arrays work
+when a check's suite identifies the owned branch; otherwise ownership is unknown
+and repair handles it. No GitHub ownership lookup runs per webhook. HTTP threads
+read immutable launch scope, not the mutable PR pointer or relay tracker. Active
+bindings remain observable when a target is removed; this does not authorize new
+work there. Grants installed after an otherwise ignored member comment are still
+discovered by repair.
 
 The receiver verifies `X-Hub-Signature-256` against the raw request bytes using
 HMAC-SHA256 and constant-time comparison before parsing or enqueueing. It follows
@@ -51,11 +64,23 @@ inode created by this receiver. Secret rotation requires a coordinator restart.
 
 ## Queue, replay and repair
 
-The receiver shares the existing buffered wake channel with fleet observations.
-A burst leaves one pending tick, and an event received during tick work leaves
-a wake for the next tick. HTTP handlers never run ticks concurrently. The tick
-reads all affected bindings using the existing pagination, ETags, request budgets
-and rate-limit backoff. A failed GitHub read remains unknown; it cannot establish
+The receiver and fleet observations feed a producer-side broker; the existing
+serialized loop remains the only tick owner. Each input has one pending bit.
+GitHub events collect for a bounded 250 ms window, anchored at the first pending
+event so a sustained stream cannot postpone it indefinitely. GitHub-induced
+receive handoffs are spaced by at least 30 seconds after the previous handoff.
+The output is unbuffered: a busy owner's cooldown starts when it actually takes
+the wake, not when a sender previously queued it. Events during work leave one
+pending invalidation for the next eligible handoff. Native fleet invalidations
+retain their immediate path and can reconcile an already-pending GitHub change.
+These limits bound GitHub-induced ticks, not all native fleet activity.
+
+The receiver issues no GitHub reads. Existing source-comment discovery and
+binding checks retain their pagination, conditional ETags, per-tick read budgets,
+and core-remaining/reset pause. Those controls belong to the source reader.
+PR, merge-sweep and inbox reads do not share a global `Retry-After`/403/429 backoff
+policy. This change adds no such policy, and pacing is not an API quota guarantee.
+A failed authoritative read remains unknown; a webhook payload cannot establish
 that a run is closed.
 
 The in-memory cache retains at most 2048 deliveries for 24 hours. It suppresses
@@ -77,7 +102,12 @@ or the reverse proxy, and a successful HTTP acknowledgment is not a launch recei
 ## Measurement and extension
 
 The quiet-fleet regression exercises the production producer constructor and
-the exact wake channel consumed by `Coord.run`, with no hosts. Source controls
+the exact wake channel consumed by `Coord.run`, with no hosts. A production-default
+burst control allows at most one pickup within the minimum-spacing window.
+Accelerated constructor policies test repeated bursts with a continuously ready
+consumer and an explicitly unpaced negative control. A delayed-owner control
+proves spacing is measured from handoff, and a sustained-input control proves the
+debounce cannot starve delivery. Source controls
 then run the existing source reader, grant claim and matrix admission with a
 counted launch callback. Replay and a saved-state reload must leave that count
 at one. Closure, failed reads and a missed-event reader pass use the same
@@ -94,16 +124,14 @@ not substitute a merge timestamp for pickup or file modification time for a
 native event. Keep cross-clock uncertainty explicit and native identifiers out
 of public reports.
 
-In twenty isolated runs on the same clock, the signed source-comment request
-reached wake pickup at p50 **0.224 ms**, p95 **0.391 ms**. The subsequent source
-reconciliation reached its counted fixture launch callback at p50 **9.345 ms**,
-p95 **11.426 ms**. A READY comment naming the exact current head reached wake
-pickup at p50 **0.260 ms**, p95 **0.580 ms**; its authoritative PR reader work was
-p50 **1.618 ms**, p95 **1.941 ms**. The pickup intervals include ingress and
-waiting; work intervals begin after pickup. These are transport/reader controls,
-not deployed native-start latency. The audit's approximately 170-second native
-start sample and 923-second READY-to-merge sample have different endpoints and
-cannot establish a before/after improvement from these fixture results.
+Earlier sub-millisecond fixture pickup samples described the unpaced receiver
+before this review repair; they are not current timing claims. The default
+constructor now includes the debounce and minimum handoff spacing above. Reader
+controls may use shorter injected timing policies and are labelled as controls.
+Deployed native-start and exact-head pickup measurements remain separate work.
+The audit's approximately 170-second native start sample and 923-second
+READY-to-merge sample have different endpoints and cannot establish a before/after
+improvement from these controls.
 
 To extend the event vocabulary, start with this document, then update
 `githubSupervisionEvent` and its table test. Keep transport separate from state

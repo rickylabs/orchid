@@ -1,12 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"path/filepath"
 	"sync"
 	"testing"
 )
+
+func herdrFleetFixture(t *testing.T, hosts map[string]Host) *herdrFleet {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	f := newHerdrFleet(ctx, hosts, supervisionWakeTiming{})
+	t.Cleanup(func() { cancel(); <-f.wakes.done })
+	return f
+}
 
 // The fake CLI uses a second connection to invalidate the subscribed native
 // snapshot. No server, terminal or vendor agent is launched by this fixture.

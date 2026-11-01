@@ -2,36 +2,40 @@
 
 Refs rickylabs/harness#783.
 
-Baseline: `8074c8204293257a9c751ef6c29f8e12e0dc4937`. The assignment's explicit
-operator scope selects Orchid as the implementation repository and requires a
-reference to the Harness issue without a closing keyword.
+Baseline: `8074c8204293257a9c751ef6c29f8e12e0dc4937`. Operator scope selects
+Orchid for implementation and requires a reference without a closing keyword.
+PR 138 carries the change and the coordinator-requested repair of Opus findings
+on `891cb20`; capacity work in PR 137 remains separate.
 
-The receiver is started with the observation producers and sends only a dirty
-bit to the channel already consumed by the serialized dispatcher loop. Main
-supervision, capacity and source/PR state authority remain unchanged. The
-operator guide describes private endpoint setup, subscribed GitHub events,
-bounded replay suppression, repair and stage measurement.
+The signed receiver filters to tracked issue/source subjects, eligible source
+commands, bot-authored PRs and exact owned branches. It reads immutable scope
+without per-event GitHub queries or mutable PR/tracker reads. Unknown check
+ownership stays on repair. A producer broker feeds the existing tick owner
+through an unbuffered channel: first-pending GitHub debounce is 250 ms, minimum
+handoff spacing is 30 seconds, fleet observations remain immediate, and the
+five-minute repair tick remains. Main and capacity source are unchanged.
 
-The independent cross-vendor supervisor passed the design, returned FAIL_FIX
-for an umask-sensitive fixture, and then passed the corrected implementation
-and final READY/measurement update in the same session. Both commits are owned
-by that supervisor. Transport and durable-source controls run without live
-GitHub, Herdr or inference effects.
+Docs distinguish source-reader ETags/read budgets/core-reset pause from absent
+global PR/inbox/sweep HTTP backoff. Previous sub-millisecond fixture samples
+are superseded; the pacing defaults define current behavior.
 
-Vet, build, final full race, focused race, repeated timing controls, all 16 new
-mutations, configured source/owner/trust/recovery mutations, privileged kernel
-checks, leak scan, whitespace and file-cap checks exit zero. The 233 Go files
-in the final verification snapshot match the source bytes. See the worklog for
-actual output and counts. Main and capacity accounting are untouched, and the
-upstream baseline stayed unchanged during reconciliation.
+The same independent cross-vendor supervisor passed the design, implementation,
+exact-head controls and substantive review repair. Round five also passed the final factory/debounce test delta.
+Sign-off commits belong to that supervisor. Fresh baseline default-burst and
+unowned-CI controls compile RED on the reviewed head and GREEN on the repair.
+The accelerated signed burst records two pickups with pacing and 60 when
+explicitly unpaced. Debounce, delayed-owner, no-starvation and immediate-fleet
+controls use the production factory. Durable replay still admits one fixture
+launch; authoritative PR reads still require the current exact head.
 
-Controlled twenty-run source pickup is p50 0.224 ms, with subsequent fixture
-launch-callback work p50 9.345 ms. Exact-head READY pickup is p50 0.260 ms, with
-PR reader work p50 1.618 ms. Deployed native start and READY pickup remain
-unproven until operator ingress setup and rollout; the fixture callback and
-the audit's merge endpoint do not substitute for those measurements.
+Local vet/build, full plain/race, affected race, mutation controls, configured
+guards and privileged kernel checks: all exited zero. The exact isolated
+snapshot contains 239 Go files. See [the worklog](worklog.md) for actual output
+and counts; private logs stay external. No deployment or protected run changes.
 
-For the next contributor, read [the operator and extension guide](../../github-supervision.md)
-and [the checkpoint](worklog.md), then extend the existing invalidation/reader
-seam. A webhook payload cannot establish completion, current head, source grant
-or admission, even when authenticated.
+Deployed native command-to-task-start and exact-head READY-to-pickup remain
+UNPROVEN without verified operator ingress/runtime access. Fixture pickup and
+launch callbacks do not substitute for native start, and merge is not pickup.
+Read [the operator and extension guide](../../github-supervision.md) before
+extending the native-event predicate or broker. Webhooks never establish
+completion, current head, grants or admission.

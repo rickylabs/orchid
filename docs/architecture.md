@@ -57,6 +57,10 @@ supervision owner. The [GitHub receiver](github-supervision.md) accepts issue,
 comment, PR, review and check invalidations through a private HTTP socket; it
 never takes state or launch authority from event payloads. Coalescing and bounded
 delivery deduplication save reads, while durable bindings retain launch identity.
+The owned-subject filter excludes unrelated issue/PR/check traffic. A bounded
+250 ms coalescing window and 30-second receive-handoff spacing limit GitHub-induced
+ticks without delaying the immediate native fleet input. Reader-specific ETags
+and core-reset pauses do not provide global PR/sweep HTTP rate-limit backoff.
 A five-minute safety tick reconciles snapshots and recovers supervision when no
 events arrive or the opt-in receiver is unavailable. The legacy `poll_interval`
 setting no longer controls fleet supervision. Routine Claude observations and

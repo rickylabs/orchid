@@ -93,7 +93,7 @@ func TestHerdrRoleObserversPreserveRecordedSessionOnRestart(t *testing.T) {
 	if len(observed) != 2 {
 		t.Fatal("restart dropped the recorded dispatch observer")
 	}
-	c.fleet = &herdrFleet{hosts: observed, agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	c.fleet = herdrFleetFixture(t, observed)
 	a := completionAgent(j)
 	for key, host := range observed {
 		c.fleet.publish(key, []AgentInfo{a}, true)

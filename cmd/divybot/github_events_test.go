@@ -36,7 +36,9 @@ func TestGitHubEventAuthenticationAndBounds(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			wakes := 0
-			g := newGitHubEventIngress([]byte(githubFixtureSecret), func(repo string) bool { return repo == "example/inbox" }, func() { wakes++ })
+			g := newGitHubEventIngress([]byte(githubFixtureSecret), func(_ string, event githubSupervisionNotice) bool {
+				return event.Repository.FullName == "example/inbox"
+			}, func() { wakes++ })
 			r := githubSignedRequest(t, "issue_comment", "fixture-delivery", test.payload)
 			test.alter(r)
 			w := httptest.NewRecorder()
@@ -56,7 +58,9 @@ func TestGitHubEventVocabularyAndRepositoryScope(t *testing.T) {
 	for index, kind := range []string{"issue_comment", "issues", "pull_request", "pull_request_review", "pull_request_review_comment", "pull_request_review_thread", "check_run", "check_suite", "status", "ping", "push", "workflow_run", "unknown"} {
 		for _, repo := range []string{"example/inbox", "foreign/project", ""} {
 			wakes := 0
-			g := newGitHubEventIngress([]byte(githubFixtureSecret), func(r string) bool { return r == "example/inbox" }, func() { wakes++ })
+			g := newGitHubEventIngress([]byte(githubFixtureSecret), func(_ string, event githubSupervisionNotice) bool {
+				return event.Repository.FullName == "example/inbox"
+			}, func() { wakes++ })
 			payload := fmt.Sprintf(`{"repository":{"full_name":%q}}`, repo)
 			g.ServeHTTP(httptest.NewRecorder(), githubSignedRequest(t, kind, "fixture-delivery", payload))
 			want := 0
@@ -109,7 +113,7 @@ func TestGitHubEventDedupIsBoundedAndExpires(t *testing.T) {
 
 func TestGitHubEventConcurrentRedeliveryWakesOnce(t *testing.T) {
 	var wakes atomic.Int32
-	g := newGitHubEventIngress([]byte(githubFixtureSecret), func(string) bool { return true }, func() { wakes.Add(1) })
+	g := newGitHubEventIngress([]byte(githubFixtureSecret), func(string, githubSupervisionNotice) bool { return true }, func() { wakes.Add(1) })
 	var done sync.WaitGroup
 	for n := 0; n < 50; n++ {
 		r := githubSignedRequest(t, "issue_comment", fmt.Sprint(n), githubFixturePayload)
@@ -123,7 +127,7 @@ func TestGitHubEventConcurrentRedeliveryWakesOnce(t *testing.T) {
 
 func TestGitHubEventInvalidRequestsDoNotPoisonDedup(t *testing.T) {
 	wakes := 0
-	g := newGitHubEventIngress([]byte(githubFixtureSecret), func(string) bool { return true }, func() { wakes++ })
+	g := newGitHubEventIngress([]byte(githubFixtureSecret), func(string, githubSupervisionNotice) bool { return true }, func() { wakes++ })
 	r := githubSignedRequest(t, "issue_comment", "fixture-delivery", githubFixturePayload)
 	r.Header.Del("X-Hub-Signature-256")
 	g.ServeHTTP(httptest.NewRecorder(), r)
