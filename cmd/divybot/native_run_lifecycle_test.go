@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -39,6 +40,19 @@ func nativeRunStaleSocket(t *testing.T, path string, mode os.FileMode) os.FileIn
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		t.Fatal("stale socket fixture")
+	}
+	// FileInfo is only a dev/inode snapshot. Pin the closed socket's inode so
+	// unlink+bind cannot recycle that identity before replacement assertions.
+	// O_PATH holds the filesystem inode without keeping the listener alive.
+	const oPath = 0x200000 // Linux O_PATH, as in the production no-follow helper.
+	pin, err := os.OpenFile(path, oPath|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatal("pin stale socket fixture", err)
+	}
+	t.Cleanup(func() { _ = pin.Close() })
+	held, err := pin.Stat()
+	if err != nil || !os.SameFile(info, held) {
+		t.Fatal("stale socket fixture changed before pinning", err)
 	}
 	return info
 }
