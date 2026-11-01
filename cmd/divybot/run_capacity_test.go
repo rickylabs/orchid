@@ -189,6 +189,24 @@ func TestRemoteRunReaperKeepsActiveAndUnknown(t *testing.T) {
 	}
 }
 
+func TestRemoteRunDoneKeepsActiveAndStreaming(t *testing.T) {
+	for _, mode := range []string{"active-goal", "streaming"} {
+		t.Run(mode, func(t *testing.T) {
+			c, j, h, ref, _, _ := nativeCapacityFixture(t, mode)
+			c.observeRemoteDone(context.Background(), h, j, ref)
+			if nativeCapacityDone(j, time.Now()) {
+				t.Fatal("unfinished native work was marked done")
+			}
+			if c.st.Jobs[j.Issue] != j || c.activeByAccount()["codex"] != 1 {
+				t.Fatal("unfinished native work lost its managed capacity slot")
+			}
+			if budget := c.admissionBudget(map[int]agentRef{j.Issue: ref})["codex"]; budget != 0 {
+				t.Fatal("unfinished native work released admission capacity")
+			}
+		})
+	}
+}
+
 func TestRemoteRunDoneReleasesAccountRetainsRecord(t *testing.T) {
 	c, j, h, ref, _, _ := nativeCapacityFixture(t, "valid")
 	c.st.SourceBindings = map[int]*sourceBinding{j.Issue: {Repo: "example/source", Issue: 9, Comment: 7}}

@@ -16,6 +16,8 @@ MUTATIONS = [
     ("ACTIVE native session mistaken for idle", "cmd/divybot/remote_control_stop.go", 'head.Thread.Status.Type != "idle"', "false", "^TestRemoteRunReaperKeepsActiveAndUnknown$/^active$"),
     ("workspace label ignored", REAPER, " || ws.Label == j.Label", "", "^TestRemoteRunReaperKeepsActiveAndUnknown$/^same-label$"),
     ("done account slot retained", MAIN, "return !nativeCapacityDoneForRef(j, ref, known)", "return true", "^TestRemoteRunDoneReleasesAccountRetainsRecord$"),
+    ("native completion result ignored by observer", CAPACITY, "complete, err := c.capacityCompletionEvidence(check, h, j, id)\n\tif err != nil || !complete {", "_, err = c.capacityCompletionEvidence(check, h, j, id)\n\tif err != nil {", "^TestRemoteRunDoneKeepsActiveAndStreaming$"),
+    ("Codex native completion result ignored", CAPACITY, "return complete && err == nil, err", "return err == nil, err", "^TestRemoteRunDoneKeepsActiveAndStreaming$"),
     ("equivalent scope defeats native probe debounce", CAPACITY, "reflect.DeepEqual(old.Ref, ref) && time.Since(old.CheckedAt)", "old.Ref == ref && time.Since(old.CheckedAt)", "^TestRemoteRunDoneProbeDebouncesEquivalentScopes$"),
     ("governor counts done records", "cmd/divybot/launch_attempt.go", "active[a] = count.active()", "active[a] = count.active() + count.Done", "^TestRemoteRunGovernorCategories$"),
     ("closed inbox fallback removed", MAIN, 'if evidence != "" {', 'if evidence != "" && false {', "^TestRemoteRunClosedInboxTeardownWithoutTUIAnchor$"),
