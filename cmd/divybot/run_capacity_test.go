@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,7 +20,8 @@ func nativeCapacityFixture(t *testing.T, mode string) (*Coord, *Job, Host, agent
 	t.Helper()
 	c, j, _, _, _ := completionFixture(t)
 	r := syntheticRemoteRun(t)
-	r.NativeSessionID, r.Cwd = "thread-fixture", completionAgent(j).Cwd
+	r.NativeSessionID = "thread-fixture"
+	j.Workdir = r.Cwd
 	r.ClientVersion = canonicalFixtureVersion
 	r.Resume = &codexResumeProof{Producer: strings.Repeat("a", 64), Connection: "1"}
 	j.RemoteControl, j.NativeSessionID = r, r.NativeSessionID
@@ -58,11 +60,20 @@ func nativeCapacityFixture(t *testing.T, mode string) (*Coord, *Job, Host, agent
 			}
 			return map[string]any{"data": data, "nextCursor": nil}
 		case "thread/archive":
+			fence := loadState(c.st.path).LaunchBlocks[j.Issue].Reason
+			if fence != "agent_disappeared" && fence != "registration_incomplete" {
+				t.Error("native archive preceded durable release fence")
+			}
 			archives.Add(1)
 			if mode != "archive-stuck" {
 				loaded.Store(false)
 			}
 			return map[string]any{}
+		case codexConfigValueWrite:
+			if mode == "trust-refused" {
+				return map[string]string{"status": "okOverridden"}
+			}
+			return map[string]string{"status": "ok", "version": "fixture-version"}
 		}
 		return base(method, params)
 	})
@@ -74,11 +85,20 @@ func nativeCapacityFixture(t *testing.T, mode string) (*Coord, *Job, Host, agent
 		t.Fatal(err)
 	}
 	a := completionAgent(j)
+	a.Cwd = r.Cwd
+	list := c.actions.list
+	c.actions.list = func(ctx context.Context, h Host) ([]AgentInfo, error) {
+		rows, err := list(ctx, h)
+		for i := range rows {
+			rows[i].Cwd = r.Cwd
+		}
+		return rows, err
+	}
 	payload, _ := json.Marshal(map[string]any{"result": map[string]any{"type": "agent_info", "agent": a}})
 	if err := os.MkdirAll(filepath.Join(h.Home, ".local", "bin"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a[:2]==['workspace','list']:\n print(json.dumps({'result':{'type':'workspace_list','workspaces':json.load(open(" + strconvQuote(seat) + "))}}))\nelif a[:2]==['agent','get']:\n print(" + strconvQuote(string(payload)) + ")\nelse:sys.exit(1)\n"
+	script := "#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a[:2]==['workspace','list']:\n print(json.dumps({'result':{'type':'workspace_list','workspaces':json.load(open(" + strconv.Quote(seat) + "))}}))\nelif a[:2]==['agent','get']:\n print(" + strconv.Quote(string(payload)) + ")\nelse:sys.exit(1)\n"
 	if err := os.WriteFile(filepath.Join(h.Home, ".local", "bin", "herdr"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +110,6 @@ func nativeCapacityFixture(t *testing.T, mode string) (*Coord, *Job, Host, agent
 	ref.StateChangeSeq = a.StateChangeSeq
 	return c, j, h.forJob(j), ref, seat, archives
 }
-
-func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 func ageRemoteMiss(j *Job) { j.LastMissAt = time.Now().Add(-time.Minute) }
 
@@ -284,5 +302,31 @@ func TestRemoteRunClosedInboxTeardownWithoutTUIAnchor(t *testing.T) {
 	}
 	if j.stopUnconfirmed() {
 		t.Fatal("closure exhausted retries instead of proving native release")
+	}
+	if _, err := os.Stat(j.Workdir); !os.IsNotExist(err) {
+		t.Fatal("closed missing-seat run skipped checkout cleanup")
+	}
+}
+
+func TestRemoteRunClosedInboxRetainsFailedTrustCleanup(t *testing.T) {
+	c, j, _, _, _, _ := nativeCapacityFixture(t, "trust-refused")
+	if c.teardownConfirmed(context.Background(), j.Issue, j, "teardown") {
+		t.Fatal("failed checkout trust removal reported successful teardown")
+	}
+	if c.st.Jobs[j.Issue] != j {
+		t.Fatal("failed trust cleanup lost its managed job")
+	}
+	if _, err := os.Stat(j.Workdir); err != nil {
+		t.Fatal("checkout deleted before trust removal")
+	}
+}
+
+func TestRemoteRunAdmissionClampPreservesLegacyDone(t *testing.T) {
+	c, j, _, _, _ := completionFixture(t)
+	ref := completionRef(j)
+	budget := c.admissionBudget(map[int]agentRef{j.Issue: ref})
+	c.reconcileRunCapacityBudget(budget)
+	if budget["codex"] != 1 {
+		t.Fatal("launch clamp consumed a legacy non-RC done slot")
 	}
 }

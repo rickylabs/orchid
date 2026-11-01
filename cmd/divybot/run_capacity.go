@@ -232,10 +232,30 @@ func (c *Coord) reconcileRunCapacityBudget(budget map[string]int) {
 	}
 	c.st.mu.Lock()
 	defer c.st.mu.Unlock()
-	counts := c.runCapacityCountsLocked()
-	for _, a := range []string{"codex", "claude"} {
-		if cap, computed := c.st.PrevCap[a]; computed {
-			budget[a] = min(budget[a], max(0, cap-counts[a].active()))
+	status := map[int]agentRef{}
+	for n, j := range c.st.Jobs {
+		if o := j.CapacityObservation; o != nil && time.Since(o.At) < fleetRecoveryEvery {
+			status[n] = o.Ref
 		}
 	}
+	running := c.admissionRunningLocked(status)
+	for _, a := range []string{"codex", "claude"} {
+		if cap, computed := c.st.PrevCap[a]; computed {
+			budget[a] = min(budget[a], max(0, cap-running[a]))
+		}
+	}
+}
+
+// Admission retains its existing non-RC and provider accounting. The same
+// predicate is used for the tick snapshot and its launch-boundary recheck.
+func (c *Coord) admissionRunningLocked(status map[int]agentRef) map[string]int {
+	running := map[string]int{}
+	for n, j := range c.st.Jobs {
+		ref, known := status[n]
+		_, completing := c.st.CompletedRuns[n]
+		if completing || occupiesAdmissionSlot(j, ref, known) {
+			running[accountKey(j.Agent)]++
+		}
+	}
+	return running
 }

@@ -2930,16 +2930,10 @@ type agentRef struct {
 // admissionBudget is each account's governor cap less its running count. It also
 // publishes the transport availability this tick's admission will act on.
 func (c *Coord) admissionBudget(status map[int]agentRef) map[string]int {
+	c.refreshRunCapacity(status)
 	caps := c.curCaps()
 	c.st.mu.Lock()
-	running := map[string]int{}
-	for n, j := range c.st.Jobs {
-		ref, known := status[n]
-		_, completing := c.st.CompletedRuns[n]
-		if completing || occupiesAdmissionSlot(j, ref, known) {
-			running[accountKey(j.Agent)]++
-		}
-	}
+	running := c.admissionRunningLocked(status)
 	c.st.mu.Unlock()
 	budget := map[string]int{}
 	for a, cp := range caps {
@@ -4301,81 +4295,82 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 	if j.RemoteCleanup != "" {
 		cause = j.RemoteCleanup
 	}
+	remoteReleaseEvidence := ""
 	if j.RemoteControl != nil {
 		check, cancel := context.WithTimeout(ctx, runCapacityReadBudget)
 		evidence := c.releaseMissingRemote(check, host, j, nil)
 		cancel()
 		if evidence != "" {
-			c.clearRemoteControl(j)
-			c.clearClaudeWorking(j)
-			log.Printf("issue #%d: torn down; capacity released evidence=%s", n, evidence)
-			return true
+			remoteReleaseEvidence = evidence
 		}
 	}
 	c.clearRemoteControl(j)
-	nativeCtx, nativeDone := context.WithTimeout(ctx, 20*time.Second)
-	nativeErr := host.stopRemoteRun(nativeCtx, j)
-	nativeDone()
-	if nativeErr != nil {
-		log.Printf("issue #%d: native stop unconfirmed reason=%s; capacity retained", n, closedGoalReason(nativeErr))
-		return false
-	}
-	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	c.bindOpenCodeLiveIdentity(cctx, host, j)
-	ws := j.Workspace
-	if j.RemoteControl != nil && ws == "" {
-		return false
-	}
-	if ws == "" {
-		// Resolve from the live fleet by issue cwd if we never recorded it.
-		if agents, err := host.agentList(cctx); err == nil {
-			for _, a := range agents {
-				if issueFromCwd(a.Cwd) == n {
-					ws = a.WorkspaceID
-					break
-				}
-			}
-		}
-	}
 	c.clearClaudeWorking(j)
-	if ws != "" {
-		// A short AGY run can close its source before the first supervision tick.
-		// Preserve its exact native join while the registered occupant still exists.
-		if j.Agent == "agy" {
-			c.bindAGYLiveIdentity(ctx, host, j)
-		}
-		// Capture a bound native process before closing the workspace. A failed
-		// capture never prevents teardown, but cannot create terminal evidence.
-		if !c.remoteTeardownOccupant(cctx, host, j) {
+	if remoteReleaseEvidence == "" {
+		nativeCtx, nativeDone := context.WithTimeout(ctx, 20*time.Second)
+		nativeErr := host.stopRemoteRun(nativeCtx, j)
+		nativeDone()
+		if nativeErr != nil {
+			log.Printf("issue #%d: native stop unconfirmed reason=%s; capacity retained", n, closedGoalReason(nativeErr))
 			return false
 		}
-		captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)
-		c.teardownStart(captureCtx, n, j, ws, cause)
-		captureDone()
-		if j.RemoteControl != nil {
-			var intent teardownIntent
-			record := filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record")
-			if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &intent) != nil || intent.DispatchKey != j.DispatchKey || intent.NativeSessionID != j.RemoteControl.NativeSessionID || intent.PaneID != j.Pane || intent.WorkspaceID != ws || intent.Cause != cause {
+		cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		defer cancel()
+		c.bindOpenCodeLiveIdentity(cctx, host, j)
+		ws := j.Workspace
+		if j.RemoteControl != nil && ws == "" {
+			return false
+		}
+		if ws == "" {
+			// Resolve from the live fleet by issue cwd if we never recorded it.
+			if agents, err := host.agentList(cctx); err == nil {
+				for _, a := range agents {
+					if issueFromCwd(a.Cwd) == n {
+						ws = a.WorkspaceID
+						break
+					}
+				}
+			}
+		}
+		c.clearClaudeWorking(j)
+		if ws != "" {
+			// A short AGY run can close its source before the first supervision tick.
+			// Preserve its exact native join while the registered occupant still exists.
+			if j.Agent == "agy" {
+				c.bindAGYLiveIdentity(ctx, host, j)
+			}
+			// Capture a bound native process before closing the workspace. A failed
+			// capture never prevents teardown, but cannot create terminal evidence.
+			if !c.remoteTeardownOccupant(cctx, host, j) {
 				return false
 			}
-			if !c.teardownObserveOne(cctx, intent) {
-				if !c.remoteTeardownOccupant(cctx, host, j) {
+			captureCtx, captureDone := context.WithTimeout(ctx, 12*time.Second)
+			c.teardownStart(captureCtx, n, j, ws, cause)
+			captureDone()
+			if j.RemoteControl != nil {
+				var intent teardownIntent
+				record := filepath.Join(c.cfg.Matrix.ReceiptRoot, j.DispatchKey, "record")
+				if readPrivateActionJSON(filepath.Join(record, "teardown-intent.json"), &intent) != nil || intent.DispatchKey != j.DispatchKey || intent.NativeSessionID != j.RemoteControl.NativeSessionID || intent.PaneID != j.Pane || intent.WorkspaceID != ws || intent.Cause != cause {
 					return false
 				}
-				_ = c.actionClose(cctx, host, ws)
 				if !c.teardownObserveOne(cctx, intent) {
+					if !c.remoteTeardownOccupant(cctx, host, j) {
+						return false
+					}
+					_ = c.actionClose(cctx, host, ws)
+					if !c.teardownObserveOne(cctx, intent) {
+						return false
+					}
+				}
+				if host.releaseRemoteResources(cctx, j) != nil || cctx.Err() != nil {
 					return false
 				}
+			} else {
+				closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
+				_ = host.closeWorkspace(closeCtx, ws)
+				closeDone()
+				c.teardownObservePending(ctx)
 			}
-			if host.releaseRemoteResources(cctx, j) != nil || cctx.Err() != nil {
-				return false
-			}
-		} else {
-			closeCtx, closeDone := context.WithTimeout(ctx, 12*time.Second)
-			_ = host.closeWorkspace(closeCtx, ws)
-			closeDone()
-			c.teardownObservePending(ctx)
 		}
 	}
 
@@ -4392,7 +4387,11 @@ func (c *Coord) teardownConfirmed(ctx context.Context, n int, j *Job, cause stri
 			return false
 		}
 	}
-	log.Printf("issue #%d: torn down (was on %s/%s)", n, j.Host, j.Label)
+	if remoteReleaseEvidence != "" {
+		log.Printf("issue #%d: torn down; capacity released evidence=%s", n, remoteReleaseEvidence)
+	} else {
+		log.Printf("issue #%d: torn down (was on %s/%s)", n, j.Host, j.Label)
+	}
 
 	// A torn-down job means its inbox stub closed — usually because the PR merged.
 	// If that PR was a PARTIAL fix (the worker wrote "Refs #N", so the upstream
