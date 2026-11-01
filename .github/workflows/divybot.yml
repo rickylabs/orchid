@@ -79,3 +79,14 @@ jobs:
         run: python3 scripts/check-run-recovery-mutations.py
       - name: Compiled native run capacity and reaper mutations
         run: python3 scripts/check-run-capacity-mutations.py
+  launch-attachment-mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Compiled Codex launch attachment and acceptance mutations
+        run: python3 scripts/check-launch-attachment-mutations.py
