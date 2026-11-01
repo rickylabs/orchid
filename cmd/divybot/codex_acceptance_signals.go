@@ -346,6 +346,21 @@ func (p *goalRPC) nextLine() ([]byte, bool, error) {
 	return p.scan.Bytes(), true, nil
 }
 
+// drainThrough reduces every frame received up to the watermark. Those lines
+// are already queued, so this is bounded and does not wait for new traffic.
+func (p *goalRPC) drainThrough(watermark int64) error {
+	for p.lineSeq < watermark {
+		line, ok, err := p.pump.next(&p.lineSeq)
+		if !ok {
+			return goalErrorOr(err)
+		}
+		if err := p.unsolicited(line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // unsolicited handles a frame that arrived with no request outstanding.
 func (p *goalRPC) unsolicited(line []byte) error {
 	var m map[string]json.RawMessage

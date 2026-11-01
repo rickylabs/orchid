@@ -827,12 +827,31 @@ func (h Host) acceptCodexPrompt(ctx context.Context, a *codexAcceptance, sent st
 		}
 	}
 	drain := func(m map[string]json.RawMessage) error {
-		if _, response := m["id"]; response {
+		var method string
+		_, response := m["id"]
+		_, request := m["method"]
+		if response && !request || json.Unmarshal(m["method"], &method) != nil {
 			return deliveryGap("drain")
 		}
-		var method string
-		if json.Unmarshal(m["method"], &method) != nil {
-			return deliveryGap("drain")
+		if response { // a server request after the fence: history, never answered
+			sig, ok := decodeServerRequest(method, m["params"])
+			if !ok || sig.Thread != a.run.NativeSessionID {
+				return nil
+			}
+			if err := j.append(journalRecord{Kind: "post-fence", Method: method, Turn: sig.Turn, Class: string(signalApproval)}); err != nil {
+				return deliveryGap("journal")
+			}
+			return nil
+		}
+		if sig, ok, err := decodeSignal(method, m["params"]); ok && sig.Thread == a.run.NativeSessionID {
+			if err != nil {
+				return deliveryGap("drain")
+			}
+			if sig.Kind == signalExit { // guard:drain-exit
+				_ = j.append(journalRecord{Kind: "post-fence", Method: method, Status: sig.Status, Class: "refused"})
+				return deliveryRefused("native-exit")
+			}
+			return nil
 		}
 		if method != "turn/started" && method != "turn/completed" {
 			return nil
@@ -1020,10 +1039,19 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 	if err := a.binding(ctx); err != nil { // guard:pre-effect-binding
 		return r.bindingRefused(err)
 	}
+	// Barrier: every frame already received is reduced before the effect, so
+	// a turn, active status, approval or exit that arrived during the binding
+	// check or the receipt write refuses with zero submits.
+	if err := p.drainThrough(p.pump.received.Load()); err != nil { // guard:pre-effect-barrier
+		return keepRefusal(err, deliveryGap("barrier"))
+	}
+	if a.expired(ctx) {
+		return deliveryRefused("deadline")
+	}
 	// 4: the single effect, multiplexed with frame consumption so native
 	// evidence that precedes its acknowledgment is journalled in order. A
 	// failed or lost acknowledgement is terminal whatever arrived first.
-	r.signals.begin(p.pump.received.Load())
+	r.signals.begin(p.lineSeq)
 	opErr, frameErr := p.whileWaiting(ctx, func() error { return submit(ctx) })
 	r.signals.ack(p.pump.received.Load())
 	if opErr != nil { // guard:lost-ack

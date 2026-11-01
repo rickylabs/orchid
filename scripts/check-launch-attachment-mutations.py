@@ -67,6 +67,13 @@ MUTATIONS = [
     ("reused process collapsed into binding-changed", ACCEPT,
      "if o == attachmentProcessReused { // guard:binding-typed", "if false {",
      "^TestAcceptancePreEffectBindingTyped$/^process-reused$"),
+    ("pre-effect barrier removed", ACCEPT,
+     "if err := p.drainThrough(p.pump.received.Load()); err != nil { // guard:pre-effect-barrier",
+     "if err := error(nil); err != nil {",
+     "^TestAcceptancePreEffectBarrier$"),
+    ("native exit after the fence ignored by the drain", ACCEPT,
+     "if sig.Kind == signalExit { // guard:drain-exit", "if false {",
+     "^TestAcceptancePostFenceExitRefused$"),
     ("signal refusal swallowed as a source gap", ACCEPT,
      'if g, ok := err.(goalError); ok && strings.HasPrefix(string(g), "delivery-unconfirmed-") { // guard:keep-signal-refusal',
      "if false {",
@@ -101,7 +108,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="attach-") as directory:
         root = Path(directory) / "source"
         shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(".git", ".llm"))
-        gate(root, "green control", "^(TestAttachment|TestAcceptanceSignal|TestAcceptance(Official|Duplicate|PreSubmit|NativeExit|NativeAhead|AheadOfAck|Approval|ItemSignal|PreEffect))", True)
+        gate(root, "green control", "^(TestAttachment|TestAcceptanceSignal|TestAcceptance(Official|Duplicate|PreSubmit|NativeExit|NativeAhead|AheadOfAck|Approval|ItemSignal|PreEffect|PostFence))", True)
         for label, name, before, after, selector in MUTATIONS:
             path = root / name
             original = path.read_text()

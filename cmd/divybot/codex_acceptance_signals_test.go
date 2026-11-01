@@ -207,13 +207,26 @@ func accStartedNotice(f *accFixture) map[string]any {
 	return accNotice("turn/started", f.run.NativeSessionID, accNewTurn, "inProgress")
 }
 
+// accAwaitJournal is a rendezvous: it returns once the consumer committed a
+// record of kind, so the test does not depend on a sleep.
+func accAwaitJournal(t *testing.T, h *accHarness, kind string) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		if len(accRecords(h, kind)) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no %s record was committed", kind)
+}
+
 // Native acceptance arriving before the submit's own reply is journalled in
 // order as ahead-of-ack, and the readback then accepts.
 func TestAcceptanceNativeAheadOfSubmitAck(t *testing.T) {
 	h := newAccHarness(t)
 	h.onSubmit = func() {
 		h.f.push(accStartedNotice(h.f))
-		time.Sleep(200 * time.Millisecond) // the reply is still outstanding
+		accAwaitJournal(t, h, "notice") // journalled while the reply is still outstanding
 	}
 	accAccepted(t, h, h.accept(accSent))
 	if !accHasClass(h, "notice", string(classAheadOfAck)) {
@@ -227,7 +240,7 @@ func TestAcceptanceAheadOfAckThenLostAck(t *testing.T) {
 	h.submitErr = errors.New("lost")
 	h.onSubmit = func() {
 		h.f.push(accStartedNotice(h.f))
-		time.Sleep(200 * time.Millisecond)
+		accAwaitJournal(t, h, "notice")
 	}
 	accRefused(t, h, h.accept(accSent), "submit-uncertain")
 	if h.submits != 1 || !accHasClass(h, "notice", string(classAheadOfAck)) || h.receipt().Reason != "submit-uncertain" {
@@ -417,5 +430,68 @@ func TestAcceptanceSourceLostDuringWake(t *testing.T) {
 	accRefused(t, h, h.accept(accSent), "")
 	if h.submits != 1 || h.receipt().State != "unconfirmed" {
 		t.Fatalf("submits=%d state=%s", h.submits, h.receipt().State)
+	}
+}
+
+// Frames already received before the effect are reduced first: a signal
+// arriving during the binding check or the attempted-receipt write refuses
+// with zero submits.
+func TestAcceptancePreEffectBarrier(t *testing.T) {
+	for _, point := range []string{"binding", "receipt-attempted-file"} {
+		t.Run(point, func(t *testing.T) {
+			h := newAccHarness(t)
+			arrive := func() {
+				h.f.push(accNotice("turn/started", h.f.run.NativeSessionID, "turn-foreign", "inProgress"))
+				time.Sleep(200 * time.Millisecond) // received by the pump, not yet reduced
+			}
+			if point == "binding" {
+				h.preBinding = func() error { arrive(); return nil }
+			} else {
+				h.acc.fs.hold = func(stage string) {
+					if stage == point {
+						arrive()
+					}
+				}
+			}
+			accRefused(t, h, h.accept(accSent), "pre-effect")
+			if h.submits != 0 || h.receipt().Reason != "baseline-active" {
+				t.Fatalf("submits=%d reason=%s", h.submits, h.receipt().Reason)
+			}
+		})
+	}
+}
+
+// A bound native exit after the fence is refused by the strict drain.
+func TestAcceptancePostFenceExitRefused(t *testing.T) {
+	h := newAccHarness(t)
+	accAfterFence(h, func(f *accFixture, c net.Conn) {
+		body, _ := json.Marshal(map[string]any{"method": "thread/closed", "params": map[string]any{"threadId": f.run.NativeSessionID}})
+		_ = nativeFixtureFrame(c, body, 1)
+	}, nil)
+	accRefused(t, h, h.accept(accSent), "native-exit")
+	if h.submits != 1 || !accHasClass(h, "post-fence", "refused") {
+		t.Fatalf("submits=%d post-fence=%+v", h.submits, accRecords(h, "post-fence"))
+	}
+}
+
+// Approval requests after the fence are history: bound ones journalled,
+// foreign ones ignored, none answered.
+func TestAcceptancePostFenceApprovalObserved(t *testing.T) {
+	h := newAccHarness(t)
+	accAfterFence(h, func(f *accFixture, c net.Conn) {
+		for _, v := range []any{
+			map[string]any{"id": 902, "method": "item/commandExecution/requestApproval", "params": map[string]any{"threadId": f.run.NativeSessionID, "turnId": accNewTurn, "itemId": "item-2"}},
+			map[string]any{"id": 903, "method": "item/fileChange/requestApproval", "params": map[string]any{"threadId": privateTestID(t), "turnId": "t", "itemId": "i"}},
+		} {
+			body, _ := json.Marshal(v)
+			_ = nativeFixtureFrame(c, body, 1)
+		}
+	}, nil)
+	accAccepted(t, h, h.accept(accSent))
+	h.f.mu.Lock()
+	replies := h.f.replies
+	h.f.mu.Unlock()
+	if replies != 0 || !accHasClass(h, "post-fence", string(signalApproval)) || len(accRecords(h, "post-fence")) != 1 {
+		t.Fatalf("replies=%d post-fence=%+v", replies, accRecords(h, "post-fence"))
 	}
 }

@@ -115,8 +115,8 @@ func (h Host) withJoinedCanonicalConnection(ctx context.Context, thread string, 
 		if decodeNativeJSON(line, &m) != nil || m == nil { // guard:drain-decode
 			return deliveryGap("drain")
 		}
-		if drain(m) != nil {
-			return deliveryGap("drain")
+		if err := drain(m); err != nil {
+			return keepRefusal(err, deliveryGap("drain"))
 		}
 	}
 	waitErr := cmd.Wait()
