@@ -82,3 +82,43 @@ measured production improvement. See the [measurement guide](../../github-superv
 
 Reconciliation: main advanced with the separate capacity change in PR 137.
 Its changed files do not overlap this repair; capacity remains outside the PR.
+
+
+## Inventory collision correction
+
+The next coordinator re-review found that the new broker method `run` could
+replace `Coord.run` in the name-keyed source inventory. Its random source-map
+order made the governor startup check nondeterministic. The broker method and
+its only caller now use `forwardWakes`; the inventory, governor test and
+coordinator remain unchanged. No compatibility alias is retained.
+
+On `1499dfb`, the existing test compiled and failed 12 of 20 repetitions. After
+the two-identifier rename, the unchanged test passes 20/20 normally and 20/20
+under the race detector:
+
+| Current correction gate | Actual result |
+| --- | --- |
+| `go test ./cmd/divybot -run '^TestRunPrimesGovernorBeforeFirstTick$' -count=20 -v` | Exit 0, 20 PASS, `ok orch/cmd/divybot 0.573s` |
+| Same test with `-race -count=20 -v` | Exit 0, 20 PASS, `ok orch/cmd/divybot 4.318s` |
+| Same test on isolated current-main merge, `-count=20 -v` | Exit 0, 20 PASS, `ok orch/cmd/divybot 0.585s` |
+| `go vet ./...` | Exit 0, no diagnostics |
+| `go build ./cmd/divybot` | Exit 0, no diagnostics |
+| Full plain suite | Exit 0, `ok orch/cmd/divybot 203.319s` |
+| Full race suite | Exit 0, `ok orch/cmd/divybot 221.193s` |
+| Whole-PR leak, whitespace and file-cap checks | Exit 0 |
+
+An initial test-container copy omitted the root JSON schema, causing one full
+suite attempt to fail. After correcting and verifying the complete tracked
+snapshot, the unchanged schema check and final full suites pass. No product
+code or test assertion changed for that setup correction.
+
+The method body is byte-for-byte unchanged; only its name and launch selector
+changed. Whole-repository search finds no old broker method or call. This
+mechanical correction receives the same supervisor's slice sign-off after the
+existing terminal feature evaluation. Reconciliation finds no new upstream
+change or overlap with the separate capacity merge. Runtime timing acceptance
+remains unproven as above.
+
+Inherited debt: the inventory still keys by unqualified function names. Future
+new methods must avoid collisions or the inventory must be redesigned; that
+broader change is unnecessary for this private-method correction.

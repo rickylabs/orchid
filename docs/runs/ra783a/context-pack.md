@@ -39,3 +39,13 @@ launch callbacks do not substitute for native start, and merge is not pickup.
 Read [the operator and extension guide](../../github-supervision.md) before
 extending the native-event predicate or broker. Webhooks never establish
 completion, current head, grants or admission.
+
+
+Latest coordinator correction: the broker's private `run` method collided with
+`Coord.run` in the name-keyed AST inventory. Its method and single caller are
+renamed to `forwardWakes`, with identical body and unchanged inventory/test.
+The previous head fails 12/20 repetitions; the fix passes 20/20 normally and
+20/20 with race instrumentation. Current vet/build pass; final full suites:
+plain and race both exit 0; the same inventory test also passes 20/20 on an isolated source merge of current main. See the worklog for exact outputs. This is a
+same-supervisor mechanical slice, without reopening the completed feature
+evaluation loop. Existing capacity ownership and native timing limits remain.

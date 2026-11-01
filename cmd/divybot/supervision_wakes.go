@@ -22,7 +22,7 @@ type supervisionWakes struct {
 
 func newSupervisionWakes(ctx context.Context, out chan<- struct{}, timing supervisionWakeTiming) *supervisionWakes {
 	w := &supervisionWakes{fleet: make(chan struct{}, 1), github: make(chan struct{}, 1), done: make(chan struct{})}
-	go w.run(ctx, out, timing)
+	go w.forwardWakes(ctx, out, timing)
 	return w
 }
 
@@ -36,7 +36,7 @@ func coalesceSupervisionWake(ch chan<- struct{}) {
 	}
 }
 
-func (w *supervisionWakes) run(ctx context.Context, out chan<- struct{}, timing supervisionWakeTiming) {
+func (w *supervisionWakes) forwardWakes(ctx context.Context, out chan<- struct{}, timing supervisionWakeTiming) {
 	defer close(w.done)
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
