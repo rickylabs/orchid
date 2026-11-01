@@ -345,6 +345,9 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 	if !fenced {
 		pending, err := c.completionPRPending(check, j)
 		if err != nil || pending {
+			if err == nil && j.RemoteControl != nil {
+				c.observeRemoteDone(check, host, j, ref)
+			}
 			return false // PR supervision continues, with no input to a done seat
 		}
 	}

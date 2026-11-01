@@ -57,6 +57,7 @@ def run():
    if previous['seq']>=seq:return
   except FileNotFoundError:pass
   record={'agent':agent,'name':label,'pane':pane,'workspace':workspace,'cwd':cwd,'terminal':a.get('terminal_id'),'session':sid,'event':kind,'seq':seq}
+  if kind=='SessionEnd' and isinstance(event.get('reason'),str):record['reason']=event['reason']
   fd,temp=tempfile.mkstemp(dir=directory)
   try:
    with os.fdopen(fd,'w') as f:json.dump(record,f);f.flush();os.fsync(f.fileno())

@@ -807,6 +807,7 @@ func retryPinsMatch(expected retryExpectation, cfg MatrixConfig, profile string,
 }
 
 func (c *Coord) matrixAttempt(ctx context.Context, n int, is Issue, target Target, budget map[string]int, d matrixAttemptDeps) (string, bool) {
+	c.reconcileRunCapacityBudget(budget)
 	report := d.report
 	if report == nil {
 		report = reportMatrixRefusal
