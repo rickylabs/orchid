@@ -256,6 +256,7 @@ type herdrFleet struct {
 	agents map[string][]AgentInfo
 	up     map[string]bool
 	wake   chan struct{}
+	wakes  *supervisionWakes
 }
 
 func (f *herdrFleet) publish(host string, agents []AgentInfo, up bool) {
@@ -266,13 +267,16 @@ func (f *herdrFleet) publish(host string, agents []AgentInfo, up bool) {
 	if known && !wasUp && !up {
 		return
 	}
-	select {
-	case f.wake <- struct{}{}:
-	default:
-	}
+	f.wakes.fleetChanged()
 }
-func (c *Coord) startHerdrFleet(ctx context.Context) {
-	c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+func (c *Coord) startHerdrFleet(ctx context.Context, policy ...supervisionWakeTiming) {
+	timing := supervisionWakeTiming{debounce: githubWakeDebounce, minSpacing: githubWakeMinSpacing}
+	if len(policy) == 1 {
+		timing = policy[0]
+	}
+	c.fleet = newHerdrFleet(ctx, c.herdrObserverHosts(), timing)
+	// All observation producers invalidate the same serialized supervision owner.
+	c.startGitHubEvents(ctx)
 	for name, host := range c.fleet.hosts {
 		go watchHerdrFleet(ctx, host.herdrEventConnection, host.agentSnapshot,
 			func(agents []AgentInfo, up bool) { c.fleet.publish(name, agents, up) })

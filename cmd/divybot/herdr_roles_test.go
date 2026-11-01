@@ -165,7 +165,7 @@ func TestHerdrRolesAdoptionSeparatesManualAndDispatchOccupants(t *testing.T) {
 			}
 			h := cfg.Hosts[0]
 			c := &Coord{cfg: &Config{Targets: []Target{{Label: "fixture", Repo: "example/work"}}}, st: &State{Jobs: map[int]*Job{}}, hosts: map[string]Host{h.Name: h}}
-			c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+			c.fleet = herdrFleetFixture(t, c.herdrObserverHosts())
 			manual, _ := h.forHerdrRole(role)
 			dispatch, _ := h.forHerdrRole("dispatch")
 			a := AgentInfo{Agent: "claude", Name: "claude-7", PaneID: "fixture-pane", WorkspaceID: "fixture-workspace", Cwd: "issue-7"}
@@ -204,7 +204,7 @@ func TestHerdrRolesAdoptionMatchesMachineAndPreservesLegacy(t *testing.T) {
 	}
 	h := cfg.Hosts[0]
 	c := &Coord{st: &State{Jobs: map[int]*Job{}}, hosts: map[string]Host{h.Name: h}}
-	c.fleet = &herdrFleet{hosts: c.herdrObserverHosts(), agents: map[string][]AgentInfo{}, up: map[string]bool{}, wake: make(chan struct{}, 1)}
+	c.fleet = herdrFleetFixture(t, c.herdrObserverHosts())
 	a := AgentInfo{Agent: "claude", Cwd: "issue-7"}
 	wrong, _ := h.forHerdrRole("dispatch")
 	wrong.HerdrMachine = "fixture"

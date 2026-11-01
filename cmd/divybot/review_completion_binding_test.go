@@ -78,7 +78,8 @@ func TestIdleClaudeAcquiresDelayedBindingWithoutContinuationInput(t *testing.T) 
 	h := Host{Name: j.Host, Home: home}
 	c := &Coord{cfg: &Config{Inbox: "fixture/inbox", Matrix: MatrixConfig{ReceiptRoot: root}}, hosts: map[string]Host{j.Host: h}, st: loadState(filepath.Join(home, "state.json"))}
 	c.st.Jobs[j.Issue] = j
-	c.fleet = &herdrFleet{hosts: map[string]Host{h.observerKey(): h}, agents: map[string][]AgentInfo{h.observerKey(): {a}}, up: map[string]bool{h.observerKey(): true}, wake: make(chan struct{}, 1)}
+	c.fleet = herdrFleetFixture(t, map[string]Host{h.observerKey(): h})
+	c.fleet.agents[h.observerKey()], c.fleet.up[h.observerKey()] = []AgentInfo{a}, true
 	if err := c.st.save(); err != nil {
 		t.Fatal(err)
 	}
