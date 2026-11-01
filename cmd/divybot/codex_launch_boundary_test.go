@@ -11,7 +11,7 @@ import (
 // Every attachment refusal keeps the closed outward reason and carries a
 // typed outcome. Rows are synthetic, in the daemon's real shapes.
 func TestAttachmentResumeRecordTypedOutcomes(t *testing.T) {
-	const p, q = "pid:7:canonical", "pid:9:embedded"
+	const p, q = "producer-canonical", "producer-embedded"
 	run := syntheticRemoteRun(t)
 	run.ClientVersion = "9.1.0"
 	th := run.NativeSessionID
