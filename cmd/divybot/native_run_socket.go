@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -131,19 +133,62 @@ func (c *Coord) serveNativeRunConnection(ctx context.Context, conn *net.UnixConn
 
 // Native identity is private: require a private canonical parent and never replace a foreign socket.
 func (c *Coord) listenNativeRuns(ctx context.Context, path string) (*net.UnixListener, error) {
+	listener, _, err := c.listenNativeRunsDone(ctx, path)
+	return listener, err
+}
+
+// errNativeRunLive marks an endpoint another listener still serves; it is never unlinked.
+var errNativeRunLive = errors.New("native-run endpoint live")
+
+// clearStaleNativeRun removes an endpoint left by a crash, kill or --once exit.
+// Only this UID's private 0600 socket that refuses connections is removed, and
+// only if the probed inode is still the one at the path.
+func clearStaleNativeRun(path string, uid int) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return errMatrix
+	}
+	if info.Mode().Perm() != 0600 || !ownerNativeOwned(info, uid) {
+		return errMatrix
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err == nil {
+		_ = conn.Close()
+		return errNativeRunLive
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return errMatrix // busy or unknown: treat as live
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(info, current) {
+		return errMatrix
+	}
+	if os.Remove(path) != nil {
+		return errMatrix
+	}
+	log.Printf("native-run-source replaced stale endpoint")
+	return nil
+}
+
+// listenNativeRunsDone also returns a channel closed once the endpoint is
+// released after ctx ends, so a short-lived caller can wait for its cleanup.
+func (c *Coord) listenNativeRunsDone(ctx context.Context, path string) (*net.UnixListener, <-chan struct{}, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errMatrix
+		return nil, nil, errMatrix
 	}
 	uid := os.Getuid()
 	if !ownerNativePrivateDir(filepath.Dir(path), uid) {
-		return nil, errMatrix
+		return nil, nil, errMatrix
 	}
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		return nil, errMatrix
+	if err := clearStaleNativeRun(path, uid); err != nil {
+		return nil, nil, err
 	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
-		return nil, errMatrix
+		return nil, nil, errMatrix
 	}
 	listener.SetUnlinkOnClose(false)
 	created, err := os.Lstat(path)
@@ -155,18 +200,24 @@ func (c *Coord) listenNativeRuns(ctx context.Context, path string) (*net.UnixLis
 	}
 	if err != nil || ownerNativeSetSocketOwner(path, created, uid) != nil {
 		cleanup()
-		return nil, errMatrix
+		return nil, nil, errMatrix
 	}
 	owned, err := os.Lstat(path)
-	if err != nil || !os.SameFile(created, owned) || owned.Mode()&os.ModeSocket == 0 || owned.Mode().Perm() != 0600 || !ownerNativeOwned(owned, uid) {
+	if err != nil || !os.SameFile(created, owned) || owned.Mode()&os.ModeSocket == 0 {
 		cleanup()
-		return nil, errMatrix
+		return nil, nil, errMatrix
+	}
+	if owned.Mode().Perm() != 0600 || !ownerNativeOwned(owned, uid) {
+		cleanup()
+		return nil, nil, errMatrix
 	}
 	c.st.mu.Lock()
 	c.st.nativeRunInbox = c.cfg.Inbox
 	c.st.nativeRuns = &nativeRunWatch{generation: c.instance, subs: map[chan struct{}]struct{}{}}
 	c.st.mu.Unlock()
+	released := make(chan struct{})
 	go func() {
+		defer close(released)
 		<-ctx.Done()
 		_ = listener.Close()
 		if current, err := os.Lstat(path); err == nil && os.SameFile(current, owned) {
@@ -188,16 +239,37 @@ func (c *Coord) listenNativeRuns(ctx context.Context, path string) (*net.UnixLis
 			}
 		}
 	}()
-	return listener, nil
+	return listener, released, nil
 }
 
-func (c *Coord) startNativeRunReads(ctx context.Context) bool {
+// startNativeRunReads never gates supervision. Without a usable endpoint the
+// native read is unavailable (no socket answers) and the coordinator keeps
+// ticking and resuming runs. The returned stop releases the endpoint and
+// waits for its owned-inode cleanup; it is safe to call more than once.
+func (c *Coord) startNativeRunReads(ctx context.Context) (stop func()) {
 	if c.cfg.NativeRunSocket == "" {
-		return true
+		return func() {}
 	}
-	if _, err := c.listenNativeRuns(ctx, c.cfg.NativeRunSocket); err != nil {
-		log.Printf("native-run-source unavailable")
-		return false
+	readCtx, cancel := context.WithCancel(ctx)
+	_, released, err := c.listenNativeRunsDone(readCtx, c.cfg.NativeRunSocket)
+	if err != nil {
+		cancel()
+		reason := "endpoint-refused"
+		if errors.Is(err, errNativeRunLive) {
+			reason = "endpoint-live"
+		}
+		log.Printf("native-run-source unavailable reason=%s; supervision continues", reason)
+		return func() {}
 	}
-	return true
+	return func() { cancel(); <-released }
+}
+
+// runOnce is the --once pass: one tick, then the read endpoint is removed
+// before exit so no stale socket is left for the next start.
+func (c *Coord) runOnce(ctx context.Context) {
+	stopReads := c.startNativeRunReads(ctx)
+	defer stopReads()
+	c.startOwnerNativeGrants(ctx)
+	c.tick(ctx)
+	c.st.save()
 }

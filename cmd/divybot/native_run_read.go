@@ -147,7 +147,8 @@ func (c *Coord) lookupNativeRuns(queries []nativeRunQuery) nativeRunLookup {
 
 func (s *State) lookupNativeRunsLocked(queries []nativeRunQuery, inbox string) nativeRunLookup {
 	w := s.nativeRuns
-	out := nativeRunLookup{ObservedAt: stamp(time.Now()), Type: "run_lookup", SchemaVersion: 1, Records: []nativeRunRecord{}, Missing: []nativeRunMissing{}}
+	out := nativeRunLookup{ObservedAt: stamp(time.Now()), Type: "run_lookup", SchemaVersion: 1,
+		Records: []nativeRunRecord{}, Missing: []nativeRunMissing{}}
 	if w != nil {
 		w.mu.Lock()
 		defer w.mu.Unlock()
@@ -168,17 +169,9 @@ func (s *State) lookupNativeRunsLocked(queries []nativeRunQuery, inbox string) n
 			if completed {
 				// No inbox fallback or receipt reconstruction for legacy completion fences.
 				record = fence.NativeRun
-				if fence.Phase != "retiring" && fence.Phase != "close-failed" && fence.Phase != "close-sent" && fence.Phase != "observed" {
-					reason = "binding_unavailable"
-				}
-				if record != nil && (record.DispatchKey != fence.DispatchKey || record.NativeSessionID != fence.NativeSessionID || record.Phase != "completed") {
+				reason = completedNativeRunReason(fence, record)
+				if j != nil && !activeMatchesCompletion(s.nativeRunRecordLocked(n, j, inbox), record, fence) {
 					reason = "identity_mismatch"
-				}
-				if j != nil {
-					active := s.nativeRunRecordLocked(n, j, inbox)
-					if active == nil || active.DispatchKey != fence.DispatchKey || active.NativeSessionID != fence.NativeSessionID || (record != nil && (active.Scope != record.Scope || active.Issue != record.Issue || active.Label != record.Label || active.Agent != record.Agent)) {
-						reason = "identity_mismatch"
-					}
 				}
 			} else if j != nil {
 				record = s.nativeRunRecordLocked(n, j, inbox)
@@ -205,6 +198,41 @@ func (s *State) lookupNativeRunsLocked(queries []nativeRunQuery, inbox string) n
 	return out
 }
 
+// completedNativeRunReason is the missing reason for a completion fence, or ""
+// when its retained identity stands on its own.
+func completedNativeRunReason(fence completedRun, record *nativeRunRecord) string {
+	reason := ""
+	switch fence.Phase {
+	case "retiring", "close-failed", "close-sent", "observed":
+	default:
+		reason = "binding_unavailable"
+	}
+	if record == nil {
+		return reason
+	}
+	if record.DispatchKey != fence.DispatchKey || record.NativeSessionID != fence.NativeSessionID {
+		return "identity_mismatch"
+	}
+	if record.Phase != "completed" {
+		return "identity_mismatch"
+	}
+	return reason
+}
+
+// A job still tracked under a completion fence must be the run the fence retained.
+func activeMatchesCompletion(active, record *nativeRunRecord, fence completedRun) bool {
+	if active == nil || active.DispatchKey != fence.DispatchKey || active.NativeSessionID != fence.NativeSessionID {
+		return false
+	}
+	if record == nil {
+		return true
+	}
+	if active.Scope != record.Scope || active.Issue != record.Issue {
+		return false
+	}
+	return active.Label == record.Label && active.Agent == record.Agent
+}
+
 func nativeRunScopeText(s string) bool {
 	if len(s) > 128 {
 		return false
@@ -216,22 +244,49 @@ func nativeRunScopeText(s string) bool {
 	}
 	return true
 }
-func validNativeRunRecord(r nativeRunRecord) bool {
-	if r.Phase == "completed" {
+
+func validNativeRunPhase(r nativeRunRecord) bool {
+	switch r.Phase {
+	case "active":
+		return r.CompletedAt == ""
+	case "completed":
 		at, e := time.Parse(time.RFC3339Nano, r.CompletedAt)
-		if e != nil || at.IsZero() || r.ObservedAt != r.CompletedAt {
-			return false
-		}
-	} else if r.CompletedAt != "" {
+		return e == nil && !at.IsZero() && r.ObservedAt == r.CompletedAt
+	}
+	return false
+}
+
+func validNativeRunRecord(r nativeRunRecord) bool {
+	if !validNativeRunPhase(r) {
 		return false
 	}
 	m := nativeRunLabel.FindStringSubmatch(r.Label)
-	return validNativeRunQuery(nativeRunQuery{r.Key, r.Label}) && len(m) == 3 && m[1] == r.Agent &&
-		digestPattern.MatchString(r.DispatchKey) && privateNativeID(r.NativeSessionID) &&
-		nativeRunRepo.MatchString(r.Issue.Repo) && len(r.Issue.Repo) <= 256 && r.Issue.Number > 0 && uint64(r.Issue.Number) <= nativeRunSafeInteger &&
-		r.Scope.Host != "" && r.Scope.Session != "" && nativeRunScopeText(r.Scope.Host) && nativeRunScopeText(r.Scope.Session) && nativeRunScopeText(r.Scope.Machine) &&
-		r.AgentID == actionOpaque("agent", "orchid-"+r.DispatchKey) && r.AssignmentID == actionOpaque("assignment", "orchid-"+r.DispatchKey) &&
-		r.SourceCommentID >= 0 && uint64(r.SourceCommentID) <= nativeRunSafeInteger && (r.SourceCommentID == 0 || strconv.FormatInt(r.SourceCommentID, 10) == r.Key) && (r.Phase == "active" || r.Phase == "completed")
+	if !validNativeRunQuery(nativeRunQuery{r.Key, r.Label}) || len(m) != 3 || m[1] != r.Agent {
+		return false
+	}
+	if !digestPattern.MatchString(r.DispatchKey) || !privateNativeID(r.NativeSessionID) {
+		return false
+	}
+	if !nativeRunRepo.MatchString(r.Issue.Repo) || len(r.Issue.Repo) > 256 {
+		return false
+	}
+	if r.Issue.Number <= 0 || uint64(r.Issue.Number) > nativeRunSafeInteger {
+		return false
+	}
+	if r.Scope.Host == "" || r.Scope.Session == "" || !nativeRunScopeText(r.Scope.Host) {
+		return false
+	}
+	if !nativeRunScopeText(r.Scope.Session) || !nativeRunScopeText(r.Scope.Machine) {
+		return false
+	}
+	opaque := "orchid-" + r.DispatchKey
+	if r.AgentID != actionOpaque("agent", opaque) || r.AssignmentID != actionOpaque("assignment", opaque) {
+		return false
+	}
+	if r.SourceCommentID < 0 || uint64(r.SourceCommentID) > nativeRunSafeInteger {
+		return false
+	}
+	return r.SourceCommentID == 0 || strconv.FormatInt(r.SourceCommentID, 10) == r.Key
 }
 
 // Caller holds State.mu. Native identity conflicts are unavailable, not a
@@ -258,7 +313,13 @@ func (s *State) nativeRunRecordLocked(n int, j *Job, inbox string) *nativeRunRec
 	} else if j.Home != nil {
 		comment = int64(n)
 	}
-	r := &nativeRunRecord{Key: strconv.Itoa(n), Issue: issue, DispatchKey: j.DispatchKey, NativeSessionID: native, Agent: j.Agent, Label: j.Label, Phase: "active", AgentID: actionOpaque("agent", "orchid-"+j.DispatchKey), AssignmentID: actionOpaque("assignment", "orchid-"+j.DispatchKey), SourceCommentID: comment, Scope: nativeRunScope{Host: j.Host, Session: j.HerdrScope.Session, Machine: j.HerdrScope.Machine}}
+	opaque := "orchid-" + j.DispatchKey
+	r := &nativeRunRecord{
+		Key: strconv.Itoa(n), Issue: issue, DispatchKey: j.DispatchKey, NativeSessionID: native,
+		Agent: j.Agent, Label: j.Label, Phase: "active", SourceCommentID: comment,
+		AgentID: actionOpaque("agent", opaque), AssignmentID: actionOpaque("assignment", opaque),
+		Scope: nativeRunScope{Host: j.Host, Session: j.HerdrScope.Session, Machine: j.HerdrScope.Machine},
+	}
 	if !validNativeRunRecord(*r) {
 		return nil
 	}

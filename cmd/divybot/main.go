@@ -2329,9 +2329,8 @@ func (c *Coord) startOwnerGrantsWithTargets(ctx context.Context) {
 }
 
 func (c *Coord) run(ctx context.Context) {
-	if !c.startNativeRunReads(ctx) {
-		return
-	}
+	stopReads := c.startNativeRunReads(ctx)
+	defer stopReads()
 	c.startOwnerGrantsWithTargets(ctx)
 	if c.cfg.OwnerNativeGrantPort != nil {
 		if c.ownerGrants == nil {
@@ -4736,12 +4735,7 @@ func main() {
 	startReaper(ctx.Done())
 
 	if *once {
-		if !c.startNativeRunReads(ctx) {
-			return
-		}
-		c.startOwnerNativeGrants(ctx)
-		c.tick(ctx)
-		c.st.save()
+		c.runOnce(ctx)
 		return
 	}
 	c.run(ctx)
