@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // authFixture is a Claude job bound to an exact occupant, a fake Herdr that
@@ -232,11 +233,11 @@ func TestVendorAuthUndurableFenceIsRetried(t *testing.T) {
 	}
 	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
 	_ = os.Chmod(dir, 0700)
-	if f.j.AuthSignal != "" || !authObservationDue(f.j, f.ref) {
+	if f.j.AuthSignal != "" || !authObservationDue(f.j, f.ref, time.Now()) {
 		t.Fatal("an undurable fence consumed the native change")
 	}
 	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
-	if !digestPattern.MatchString(f.j.AuthSignal) || authObservationDue(f.j, f.ref) {
+	if !digestPattern.MatchString(f.j.AuthSignal) || authObservationDue(f.j, f.ref, time.Now()) {
 		t.Fatal("the pending native change was not retried once persistence recovered")
 	}
 }
@@ -252,7 +253,7 @@ func TestVendorAuthUnreadableReceiptIsRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
-	if f.j.AuthSignal != "" || !authObservationDue(f.j, f.ref) {
+	if f.j.AuthSignal != "" || !authObservationDue(f.j, f.ref, time.Now()) {
 		t.Fatal("an unreadable receipt was taken as an observed absence")
 	}
 	if err := os.Chmod(receiptDir, 0700); err != nil {
@@ -265,7 +266,7 @@ func TestVendorAuthUnreadableReceiptIsRetried(t *testing.T) {
 	// An absent receipt is a completed observation with no outcome.
 	g := newAuthFixture(t)
 	g.c.superviseVendorAuth(context.Background(), g.host, g.j, g.ref, true, false)
-	if g.j.AuthSignal != "" || authObservationDue(g.j, g.ref) {
+	if g.j.AuthSignal != "" || authObservationDue(g.j, g.ref, time.Now()) {
 		t.Fatal("an absent receipt was retried or acted on")
 	}
 }
@@ -292,8 +293,8 @@ func TestVendorAuthSupervisionIgnoresDisplayedStatus(t *testing.T) {
 	}
 }
 
-// Remote Control Codex is read through the real goal RPC reader for a stopped
-// occupant, skipped only while its turn is in progress, and acted on once.
+// Remote Control Codex is read through the real goal RPC reader whatever
+// Herdr displays, including a stale "working", and is acted on once.
 func TestVendorAuthCodexThroughNativeReader(t *testing.T) {
 	c, j := capacityFixture(t)
 	j.RemoteControl = &remoteControlRun{}
@@ -313,20 +314,20 @@ func TestVendorAuthCodexThroughNativeReader(t *testing.T) {
 	t.Cleanup(func() { codexAuthConnect = prior })
 	ref := agentRef{Host: j.Host, Agent: "codex", Pane: j.Pane, Status: "working", StateChangeSeq: 1}
 	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
-	if connects != 0 {
-		t.Fatal("an in-progress Codex turn was read")
+	first := j.AuthSignal
+	if connects != 1 || !digestPattern.MatchString(first) {
+		t.Fatal("a failed unauthorized turn was not read while Herdr displayed working")
 	}
 	ref.Status, ref.StateChangeSeq = "done", 2
 	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
-	first := j.AuthSignal
-	if connects != 1 || !digestPattern.MatchString(first) {
-		t.Fatal("a stopped occupant's typed unauthorized turn was not acted on")
-	}
-	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
-	ref.StateChangeSeq = 3
 	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
 	if connects != 2 || j.AuthSignal != first {
 		t.Fatal("reads were not debounced or the same failed turn acted twice")
+	}
+	j.authObservedAt = time.Now().Add(-authObservationBackstop)
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	if connects != 3 || j.AuthSignal != first {
+		t.Fatal("the backstop did not re-read an unchanged cursor, or repeated the effect")
 	}
 	code, ref.StateChangeSeq = "serverOverloaded", 4
 	j.AuthSignal = ""
@@ -337,8 +338,77 @@ func TestVendorAuthCodexThroughNativeReader(t *testing.T) {
 	j.RemoteControl = nil
 	ref.StateChangeSeq = 5
 	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
-	if connects != 3 {
+	if connects != 4 {
 		t.Fatal("plain Codex, which has no typed auth source, was read")
+	}
+}
+
+// A new receipt behind unchanged Herdr counters is still a new native event:
+// the fleet's receipt sequence moves the cursor, and the backstop covers a
+// receipt the fleet did not read.
+func TestVendorAuthNewReceiptBehindUnchangedCounters(t *testing.T) {
+	f := newAuthFixture(t)
+	f.hook(t, map[string]any{"hook_event_name": "PermissionRequest", "tool_name": "Bash"})
+	fleet := func() uint64 {
+		a, err := f.host.agentInfoOf(context.Background(), f.j.Pane)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return agentVendorSeq(a)
+	}
+	f.ref.VendorSeq = fleet()
+	if f.ref.VendorSeq == 0 {
+		t.Fatal("fixture receipt not bound")
+	}
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	if f.j.AuthSignal != "" || authObservationDue(f.j, f.ref, time.Now()) {
+		t.Fatal("a non-auth receipt was acted on or left pending")
+	}
+	f.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	if f.j.AuthSignal != "" {
+		t.Fatal("fixture: the unchanged cursor should defer to the fleet or backstop")
+	}
+	f.ref.VendorSeq = fleet() // the next fleet read binds the new receipt
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	if !digestPattern.MatchString(f.j.AuthSignal) {
+		t.Fatal("a new native receipt behind unchanged Herdr counters was missed")
+	}
+	// The fleet does not read a receipt for a working occupant; the backstop does.
+	g := newAuthFixture(t)
+	g.hook(t, map[string]any{"hook_event_name": "UserPromptSubmit"})
+	g.c.superviseVendorAuth(context.Background(), g.host, g.j, g.ref, true, false)
+	g.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
+	g.j.authObservedAt = time.Now().Add(-authObservationBackstop)
+	g.c.superviseVendorAuth(context.Background(), g.host, g.j, g.ref, true, false)
+	if !digestPattern.MatchString(g.j.AuthSignal) {
+		t.Fatal("the backstop did not read a receipt the fleet never bound")
+	}
+}
+
+// The fleet pass carries the bound receipt sequence into the supervision ref.
+func TestFleetStatusCarriesVendorCursor(t *testing.T) {
+	c, j, _, _, _ := completionFixture(t)
+	a := completionAgent(j)
+	a.TerminalID, a.Cwd = "fixture-terminal", "/fixture/issue-7"
+	a.AgentSession = json.RawMessage(`{"agent":"codex","kind":"id","source":"herdr:codex","value":"thread-fixture"}`)
+	a.VendorEvent = &vendorLifecycleEvent{Agent: a.Agent, Name: a.Name, Pane: a.PaneID, Workspace: a.WorkspaceID, Cwd: a.Cwd,
+		Terminal: a.TerminalID, Session: "thread-fixture", Event: "Stop", Seq: 77}
+	observed := c.herdrObserverHosts()
+	c.fleet = herdrFleetFixture(t, observed)
+	publish := func() map[int]agentRef {
+		for key := range observed {
+			c.fleet.publish(key, []AgentInfo{a}, true)
+		}
+		status, _ := c.fleetStatus(context.Background())
+		return status
+	}
+	if ref := publish()[j.Issue]; !jobRefMatches(ref, j) || ref.VendorSeq != 77 {
+		t.Fatalf("fleet ref lost the native receipt cursor: %+v", ref)
+	}
+	a.VendorEvent.Terminal = "foreign-terminal"
+	if ref := publish()[j.Issue]; !jobRefMatches(ref, j) || ref.VendorSeq != 0 {
+		t.Fatal("an unbound receipt moved the native cursor")
 	}
 }
 

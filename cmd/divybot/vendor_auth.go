@@ -73,18 +73,36 @@ func codexAuthObservation(thread, turn, status, code string) vendorAuthObservati
 		Key: shaText([]byte("codex\x00" + thread + "\x00" + turn))}
 }
 
-// authObservationDue debounces reads to native state changes of this occupant.
-// A failed read or an undurable fence leaves the change pending for retry.
-func authObservationDue(j *Job, ref agentRef) bool {
-	return !j.authObserved || j.authObservedSeq != [2]uint64{ref.StateChangeSeq, ref.CompletionSeq}
+// authObservationBackstop bounds how long a change the native cursor did not
+// show can stay unread: Herdr's counters advance only on effective state
+// changes, and the fleet reads receipts only for stopped or blocked occupants.
+const authObservationBackstop = fleetRecoveryEvery
+
+// agentVendorSeq is the bound vendor receipt's sequence from the fleet read, or
+// 0 when that read bound none. It changes with every new native hook event.
+func agentVendorSeq(a AgentInfo) uint64 {
+	if a.VendorEvent == nil || !a.VendorEvent.matches(a) {
+		return 0
+	}
+	return a.VendorEvent.Seq
 }
 
-// superviseVendorAuth is supervision's one auth step for a matched occupant.
-// Herdr's displayed status never gates Claude, whose detected status can
-// disagree with its hook receipt. Remote Control Codex skips only "working",
-// whose newest turn is still in progress and so cannot be a failed turn.
+func authCursor(ref agentRef) [3]uint64 {
+	return [3]uint64{ref.StateChangeSeq, ref.CompletionSeq, ref.VendorSeq}
+}
+
+// authObservationDue reads again on any change of the native cursor (Herdr
+// state and completion counters and the bound receipt sequence) and otherwise
+// after the backstop. A failed read or an undurable fence stays pending.
+func authObservationDue(j *Job, ref agentRef, now time.Time) bool {
+	return !j.authObserved || j.authObservedSeq != authCursor(ref) || now.Sub(j.authObservedAt) >= authObservationBackstop
+}
+
+// superviseVendorAuth is supervision's one auth step for a matched occupant
+// that capacity recovery does not own. Herdr's displayed status never gates
+// it: the typed source itself says whether a session failed authentication.
 func (c *Coord) superviseVendorAuth(ctx context.Context, host Host, j *Job, ref agentRef, matched, recovering bool) {
-	if !matched || recovering || j == nil || rcCodex(j) && ref.Status == "working" {
+	if !matched || recovering || j == nil {
 		return
 	}
 	c.observeVendorAuth(ctx, host, j, ref)
@@ -93,7 +111,8 @@ func (c *Coord) superviseVendorAuth(ctx context.Context, host Host, j *Job, ref 
 // observeVendorAuth reads the transport's typed native source once per change.
 // A transport without one is never read: its auth state is unknown.
 func (c *Coord) observeVendorAuth(ctx context.Context, host Host, j *Job, ref agentRef) {
-	if c.dry || j == nil || j.Pane == "" || !authObservationDue(j, ref) {
+	now := time.Now()
+	if c.dry || j == nil || j.Pane == "" || !authObservationDue(j, ref, now) {
 		return
 	}
 	read, cancel := context.WithTimeout(ctx, 12*time.Second)
@@ -114,7 +133,7 @@ func (c *Coord) observeVendorAuth(ctx context.Context, host Host, j *Job, ref ag
 	if _, err := c.applyVendorAuth(ctx, host, j, observation); err != nil {
 		return // the fence is not durable: keep this change pending
 	}
-	j.authObserved, j.authObservedSeq = true, [2]uint64{ref.StateChangeSeq, ref.CompletionSeq}
+	j.authObserved, j.authObservedSeq, j.authObservedAt = true, authCursor(ref), now
 }
 
 var errAuthSourceUnavailable = errors.New("auth-source-unavailable")

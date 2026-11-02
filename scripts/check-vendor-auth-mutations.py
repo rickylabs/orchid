@@ -18,7 +18,7 @@ EVENT = "cmd/divybot/vendor_lifecycle_event.go"
 HOOK = "cmd/divybot/herdr_lifecycle.go"
 MAIN = "cmd/divybot/main.go"
 AGY_TESTS = "^(TestAGYStartupNeverReadsScreen|TestAGYOnboardingTypedFactRefusesBeforeSeat|TestAGYOnboardingReferencePreservesNativeState)$"
-AUTH_TESTS = "^(TestVendorAuth|TestStartupAndAuthBoundaryNeverReadsScreen)"
+AUTH_TESTS = "^(TestVendorAuth|TestStartupAndAuthBoundaryNeverReadsScreen|TestFleetStatusCarriesVendorCursor)"
 MUTATIONS = [
     ("typed onboarding false admitted", STARTUP, "if !*complete {", "if false {", AGY_TESTS),
     ("unproven onboarding admitted", TRUST, "if err := agyOnboardingComplete(cache); err != nil {", "if err := agyOnboardingComplete(cache); err != nil && false {", AGY_TESTS),
@@ -39,8 +39,11 @@ MUTATIONS = [
     ("untyped transports read", AUTH, "\t\treturn // no typed native auth source: unknown, no read", "\t\tobservation, err = claudeAuthRead(read, host, j)", AUTH_TESTS),
     ("terminal read reinstated in auth", AUTH, "\ta, err := host.agentInfoOf(ctx, j.Pane)", '\t_, _ = host.herdr(ctx, "agent", "read", j.Pane, "--lines", "4")\n\ta, err := host.agentInfoOf(ctx, j.Pane)', AUTH_TESTS),
     ("supervision auth observation removed", MAIN, "c.superviseVendorAuth(ctx, host, j, ref, matched, recovering)", "_ = ref", AUTH_TESTS),
-    ("stopped Codex occupants skipped", AUTH, 'rcCodex(j) && ref.Status == "working"', 'rcCodex(j) && ref.Status != "idle" && ref.Status != "blocked"', AUTH_TESTS),
-    ("Claude gated on displayed status", AUTH, '|| rcCodex(j) && ref.Status == "working"', '|| ref.Status == "working"', AUTH_TESTS),
+    ("displayed status gates auth", AUTH, "if !matched || recovering || j == nil {", 'if !matched || recovering || j == nil || ref.Status == "working" {', AUTH_TESTS),
+    ("fleet receipt cursor dropped", MAIN, "VendorSeq: agentVendorSeq(a)}", "VendorSeq: 0}", AUTH_TESTS),
+    ("receipt sequence ignored by debounce", AUTH, "ref.CompletionSeq, ref.VendorSeq}", "ref.CompletionSeq, 0}", AUTH_TESTS),
+    ("debounce backstop removed", AUTH, " || now.Sub(j.authObservedAt) >= authObservationBackstop", "", AUTH_TESTS),
+    ("unbound receipt moves the cursor", AUTH, "if a.VendorEvent == nil || !a.VendorEvent.matches(a) {", "if a.VendorEvent == nil {", AUTH_TESTS),
     ("unmatched occupant read", AUTH, "if !matched || recovering ||", "if recovering ||", AUTH_TESTS),
     ("undurable fence consumes the change", AUTH, "\tif _, err := c.applyVendorAuth(ctx, host, j, observation); err != nil {\n\t\treturn // the fence is not durable: keep this change pending\n\t}", "\t_, _ = c.applyVendorAuth(ctx, host, j, observation)", AUTH_TESTS),
     ("unreadable receipt taken as absent", AUTH, "\t\tif !read {", "\t\tif false && !read {", AUTH_TESTS),

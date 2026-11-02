@@ -406,7 +406,8 @@ type Job struct {
 	// pair debounces auth reads to native state changes (vendor_auth.go).
 	AuthSignal      string `json:"auth_signal,omitempty"`
 	authObserved    bool
-	authObservedSeq [2]uint64
+	authObservedSeq [3]uint64
+	authObservedAt  time.Time
 }
 
 type State struct {
@@ -2912,6 +2913,7 @@ type agentRef struct {
 	Workspace      string // teardown handle
 	StateChangeSeq uint64
 	CompletionSeq  uint64
+	VendorSeq      uint64 // bound vendor hook receipt sequence, a native event cursor (vendor_auth.go)
 }
 
 // A completed herdr turn remains a warm, supervised job. It no longer consumes
@@ -3002,7 +3004,7 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 			if n == 0 {
 				continue
 			}
-			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Cwd: a.Cwd, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Cwd: a.Cwd, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq, VendorSeq: agentVendorSeq(a)}
 			if j := jobs[n]; j != nil {
 				if !jobRefMatches(ref, j) {
 					continue

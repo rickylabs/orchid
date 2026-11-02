@@ -96,12 +96,20 @@ A later native event is its own outcome.
 A suspected auth failure never tears down, stops, re-prompts or redispatches a
 session.
 
-Reads are event-driven. Supervision reads a typed source once per Herdr
-state/completion sequence change, for every matched occupant that is not under
-capacity recovery. Herdr's displayed status never gates the Claude source, because its
-detected status can disagree with the hook receipt. Remote Control Codex is skipped
-only while `working`: its newest turn is still in progress, so it cannot yet be a
-failed turn.
+Reads are event-driven, with a bounded backstop. The adapter reads a typed source
+whenever the native cursor changes, for every matched occupant that is not under
+capacity recovery. Herdr's displayed status never gates the read: the typed source
+itself says whether a session failed authentication. The cursor has three parts:
+
+- Herdr's state counter;
+- Herdr's completion counter;
+- the bound hook receipt's sequence, which the fleet pass already reads for stopped
+  and blocked occupants.
+
+Herdr's counters advance only on effective state changes. A change the cursor
+cannot show is therefore read at the latest after a five-minute backstop, the same
+bound capacity recovery uses. Examples are a receipt replaced while Herdr shows a
+stale `working`, or a Codex turn that failed behind an unchanged status.
 
 A change stays pending, and is read again on the next tick, after any of these:
 
@@ -129,10 +137,12 @@ A change stays pending, and is read again on the next tick, after any of these:
 - **Pending changes are retried.** An undurable fence or an unreadable receipt leaves
   the same native change pending, and it is acted on once after recovery.
 - **The Codex path runs end to end.** Remote Control Codex goes through the real
-  goal-RPC reader: it is not read while `working`, and a stopped `done` occupant is
-  read and acted on once.
+  goal-RPC reader. It is read whatever Herdr displays, including a stale `working`,
+  and acted on once.
+- **A new receipt behind unchanged counters is caught.** It is read when the fleet's
+  receipt sequence moves, or by the backstop when the fleet did not read it.
 
-`scripts/check-vendor-auth-mutations.py` compiles 25 mutants. Each one reintroduces
+`scripts/check-vendor-auth-mutations.py` compiles 28 mutants. Each one reintroduces
 a screen read, an untyped value, a stale generation, a removed fence or an
 unbounded read. Every mutant must fail an assertion, and the restored tree must pass.
 
