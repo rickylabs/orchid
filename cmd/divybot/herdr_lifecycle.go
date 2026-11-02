@@ -25,6 +25,7 @@ def run():
  sid=event.get('session_id');kind=event.get('hook_event_name')
  if not isinstance(sid,str) or not sid or len(sid)>256 or any(c.isspace() or c in '/\\' for c in sid):return
  if event.get('agent_id') or event.get('cwd')!=cwd:return
+ failures=('authentication_failed','oauth_org_not_allowed','account_on_hold','verification_required','billing_error','rate_limit','overloaded','invalid_request','model_not_found','server_error','unknown','max_output_tokens','cloud_credential_error')
  states={'SessionStart':'idle','UserPromptSubmit':'working','PreToolUse':'working','PostToolUse':'working','PermissionRequest':'blocked','Stop':'idle','Interrupt':'idle','StopFailure':'blocked'}
  if kind not in states and kind!='SessionEnd':return
  if kind=='SessionStart' and event.get('source') not in ('startup','resume'):return
@@ -58,6 +59,8 @@ def run():
   except FileNotFoundError:pass
   record={'agent':agent,'name':label,'pane':pane,'workspace':workspace,'cwd':cwd,'terminal':a.get('terminal_id'),'session':sid,'event':kind,'seq':seq}
   if kind=='SessionEnd' and isinstance(event.get('reason'),str):record['reason']=event['reason']
+  # Claude's typed StopFailure error enum. Any other value is not recorded.
+  if kind=='StopFailure' and event.get('error') in failures:record['failure']=event['error']
   fd,temp=tempfile.mkstemp(dir=directory)
   try:
    with os.fdopen(fd,'w') as f:json.dump(record,f);f.flush();os.fsync(f.fileno())

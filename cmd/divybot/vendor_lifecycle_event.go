@@ -18,7 +18,17 @@ type vendorLifecycleEvent struct {
 	Session   string `json:"session"`
 	Event     string `json:"event"`
 	Reason    string `json:"reason,omitempty"`
-	Seq       uint64 `json:"seq"`
+	// Failure is Claude's typed StopFailure error, never terminal or message text.
+	Failure string `json:"failure,omitempty"`
+	Seq     uint64 `json:"seq"`
+}
+
+// claudeStopFailures is Claude Code's closed StopFailure error enum (hook input
+// field "error"); the hook records only these values.
+var claudeStopFailures = map[string]bool{
+	"authentication_failed": true, "oauth_org_not_allowed": true, "account_on_hold": true, "verification_required": true,
+	"billing_error": true, "rate_limit": true, "overloaded": true, "invalid_request": true, "model_not_found": true,
+	"server_error": true, "unknown": true, "max_output_tokens": true, "cloud_credential_error": true,
 }
 
 func vendorEventState(event string) string {
@@ -35,7 +45,8 @@ func vendorEventState(event string) string {
 
 func (e *vendorLifecycleEvent) matches(a AgentInfo) bool {
 	if e == nil || e.Seq == 0 || e.Agent != a.Agent || e.Name != a.Name || e.Pane != a.PaneID || e.Workspace != a.WorkspaceID ||
-		e.Cwd != a.Cwd || e.Terminal == "" || e.Terminal != a.TerminalID || !privateNativeID(e.Session) || vendorEventState(e.Event) == "" {
+		e.Cwd != a.Cwd || e.Terminal == "" || e.Terminal != a.TerminalID || !privateNativeID(e.Session) || vendorEventState(e.Event) == "" ||
+		e.Failure != "" && (e.Agent != "claude" || e.Event != "StopFailure" || !claudeStopFailures[e.Failure]) {
 		return false
 	}
 	var session struct{ Source, Agent, Kind, Value string }

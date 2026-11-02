@@ -402,6 +402,11 @@ type Job struct {
 	// Persisted, so a restart neither resets nor accelerates the bound.
 	LastStopMissAt time.Time `json:"last_stop_miss_at,omitempty"`
 	StopMisses     int       `json:"stop_misses,omitempty"`
+	// AuthSignal fences the last typed native auth event acted on; the in-memory
+	// pair debounces auth reads to native state changes (vendor_auth.go).
+	AuthSignal      string `json:"auth_signal,omitempty"`
+	authObserved    bool
+	authObservedSeq [2]uint64
 }
 
 type State struct {
@@ -1146,19 +1151,6 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		}
 		return awaitNativePrompt(ctx, before, p.observe, p.wait)
 	})
-}
-
-func (h Host) read(ctx context.Context, target string, lines int) string {
-	out, _ := h.herdr(ctx, "agent", "read", target, "--source", "recent", "--lines", strconv.Itoa(lines), "--format", "text")
-	if raw, err := herdrUnwrap(out); err == nil {
-		var r struct {
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(raw, &r) == nil && r.Text != "" {
-			return r.Text
-		}
-	}
-	return out
 }
 
 func (h Host) closeWorkspace(ctx context.Context, ws string) error {
@@ -3927,21 +3919,10 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		return
 	}
 
-	// Auth-dead detection: resync creds + escalate, but NEVER auto-teardown — a
-	// string match on pane scrollback is far too fragile to kill a live session
-	// over (stale 401s sit deep in scrollback; central auth-sync prevents real
-	// auth-death anyway). Read only the last few lines, and only when idle/blocked.
-	if matched && !recovering && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
-		rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
-		txt := host.read(rctx, j.Pane, 4)
-		rcancel()
-		if strings.Contains(txt, "Invalid bearer") || strings.Contains(txt, "Please run /login") {
-			log.Printf("issue #%d: possible auth-dead on %s — resyncing creds (no teardown)", n, host.Name)
-			sctx, scancel := context.WithTimeout(ctx, 30*time.Second)
-			_ = c.auth.syncToHost(sctx, host)
-			scancel()
-			c.notify(fmt.Sprintf("issue #%d possible auth-dead on %s", n, host.Name))
-		}
+	// Native auth failure: a typed vendor event resyncs credentials and notifies
+	// once, and never tears down a live session. Terminal text is never read.
+	if matched && !recovering && (ref.Status == "idle" || ref.Status == "blocked") {
+		c.observeVendorAuth(ctx, host, j, ref)
 	}
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
