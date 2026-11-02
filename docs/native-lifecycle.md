@@ -44,10 +44,17 @@ exact persisted prompt proof, reread on event invalidations. Codex retains its
 canonical native turn and durable delivery commit.
 
 Fresh OpenCode readiness precedes the first session-bearing prompt; its official
-plugin becomes authoritative after session selection. AGY readiness retains the
-server startup contract, while acceptance requires a new native user step from
+plugin becomes authoritative after session selection. AGY startup reads no screen:
+typed trust and onboarding preparation precede the workspace, one exact-occupant
+read follows registration, and acceptance requires a new native user step from
 its existing isolated store. Herdr events wake that read. Neither a displayed
 working state nor identity alone can supply this native acceptance proof.
+
+Claude's `StopFailure` hook also records its typed `error` enum in the private
+receipt. Only `authentication_failed` for the exact occupant and session, or a
+Remote Control Codex turn failed with `codexErrorInfo: unauthorized`, resyncs
+credentials and notifies, once per native event and never with teardown. See
+[native vendor startup and authentication](native-vendor-auth.md).
 
 ## Managed Codex capacity recovery
 

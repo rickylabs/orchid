@@ -167,15 +167,17 @@ copied by the dispatcher; the CLI can refresh that same store normally. Other
 native authentication inputs stay inherited, and missing credentials are never
 fabricated or entered automatically. The existing native onboarding cache is also
 bound by reference; completion flags are never fabricated and no history/cache
-tree is copied. Standing settings remain unchanged. Missing,
+tree is copied. The CLI's own typed `onboardingComplete` cache field is read once
+before any workspace: `false` refuses as `startup_blocked`, and a missing or invalid
+value refuses as unproven. Standing settings remain unchanged. Missing,
 unreadable or invalid settings and reused/symlink state refuse before seat creation.
 
-Before any AGY goal, bounded reads of the same stable owned occupant screen detect
-remaining folder consent, sign-in and measured color-scheme onboarding blockers,
-including dialogs Herdr can report as idle/ready. These return the existing `startup_blocked` class;
-uncertain reads/ownership remain failed registration or the original timeout.
-Readiness also requires the native built-in `? for shortcuts` composer hint;
-unfamiliar screens or custom status lines fail closed before a goal.
+Orchid never reads the AGY screen. After registration, one exact-occupant Herdr read
+confirms the agent, label, pane, workspace and checkout; Herdr `blocked` refuses as
+`startup_blocked`. AGY has no typed readiness or auth signal before its first
+conversation, so Herdr's display-derived start contract only fences input, and the
+goal is confirmed solely by a new native user step. Missing capabilities stay
+explicit unknowns; see [native vendor startup and authentication](docs/native-vendor-auth.md).
 There is no consent keypress, automatic retry or standing-config repair. Operators
 must keep effective settings, authentication and onboarding state readable by
 the native agent.
