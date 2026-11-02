@@ -691,6 +691,16 @@ type codexAcceptance struct {
 	fs       acceptanceFS
 	joined   joinedOptions
 	binding  func(context.Context) error // structured occupant/process check; no pane reads
+	// acceptedAt is when this operation certified the first accepted turn; zero until publish succeeds.
+	acceptedAt time.Time
+}
+
+// acceptedInstant is the certified first accepted-turn instant, or zero. nil-safe.
+func (a *codexAcceptance) acceptedInstant() time.Time {
+	if a == nil {
+		return time.Time{}
+	}
+	return a.acceptedAt
 }
 
 type acceptanceRun struct {
@@ -699,6 +709,8 @@ type acceptanceRun struct {
 	receipt  deliveryReceipt
 	journal  *deliveryJournal
 	accepted string
+	// acceptedAt is sampled where the native evidence certifies the turn, not at any later commit.
+	acceptedAt time.Time
 }
 
 func (a *codexAcceptance) clock() time.Time {
@@ -951,7 +963,7 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 		if a.expired(ctx) {
 			return deliveryRefused("deadline")
 		}
-		r.accepted = t.ID
+		r.accepted, r.acceptedAt = t.ID, a.clock()
 		return nil
 	}
 }
@@ -1007,5 +1019,6 @@ func (r *acceptanceRun) publish(ctx context.Context) error {
 		_ = j.append(journalRecord{Kind: "outcome", Outcome: "late"})
 		return deliveryRefused("deadline")
 	}
+	a.acceptedAt = r.acceptedAt // guard:task-start-certified only a published, on-time acceptance
 	return nil
 }
