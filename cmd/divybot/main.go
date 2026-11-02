@@ -986,10 +986,10 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)
 		if e != nil {
-			// Native facts first, before any screen-based refinement or cleanup.
+			// Native Herdr facts only; no vendor screen refines a start failure.
 			attempt.herdrStartError(out)
 			attempt.contextEnded(ctx)
-			return pane, ws, matrixSite("spawn.agent-start", h.registrationStartFailure(ctx, out, agent, label, cwd, pane, ws))
+			return pane, ws, matrixSite("spawn.agent-start", registrationFailure(out, ctx.Err()))
 		}
 		raw, e := herdrUnwrap(out)
 		if e == nil {
@@ -1007,7 +1007,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			return pane, ws, matrixSite("spawn.agent-envelope", registrationFailure(out, ctx.Err()))
 		}
 		if agent == "agy" {
-			if e := h.agyRegistrationCheck(ctx, label, cwd, pane, ws, true); e != nil {
+			if e := h.agyRegistrationCheck(ctx, label, cwd, pane, ws); e != nil {
 				return pane, ws, matrixSite("spawn.agy-readiness", e)
 			}
 		}

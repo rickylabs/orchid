@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -30,16 +29,4 @@ func managedInteractiveAgentArgs(agent string, o Overrides, cwd string) (string,
 	// forever: no daemon attach, no session, no registration.
 	args = append(args, "-c", "check_for_update_on_startup=false") // guard:skip-update-prompt
 	return kind, args, nil
-}
-
-// Classify startup from native Herdr errors. Screen text cannot refine it.
-func (h Host) registrationStartFailure(ctx context.Context, output, agent, label, cwd, pane, ws string) error {
-	failure := registrationFailure(output, ctx.Err())
-	if agent == "agy" && registrationFailureKind(failure) == "startup_timeout" && ctx.Err() == nil {
-		if blocked := h.agyRegistrationCheck(ctx, label, cwd, pane, ws, false); registrationFailureKind(blocked) == "startup_blocked" {
-			return blocked
-		}
-		return failure
-	}
-	return failure
 }

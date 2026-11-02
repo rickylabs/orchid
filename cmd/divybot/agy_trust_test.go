@@ -127,33 +127,45 @@ func TestAGYSettingsAndScopeFailClosedBeforeSeat(t *testing.T) {
 	}
 }
 
-func TestAGYTrustAndLoginBlockedBeforeGoal(t *testing.T) {
-	for _, mode := range []string{"agy-trust", "agy-login", "agy-onboarding", "agy-native-blocked", "agy-timeout", "agy-timeout-unknown", "agy-timeout-name-changed", "agy-foreign", "agy-name", "agy-pane", "agy-workspace", "agy-cwd", "agy-working", "agy-unknown", "agy-changing", "agy-not-ready", "agy-unreadable", "agy-malformed", "agy-oversized", "agy-empty", "agy-utf8", "agy-unknown-screen"} {
-		t.Run(mode, func(t *testing.T) {
+// The registered occupant is classified from Herdr's agent record only. Every
+// screen the synthetic pane could show — trust, sign-in, onboarding, localized,
+// unreadable or hostile — yields the same outcome, and the pane is never read.
+func TestAGYStartupNeverReadsScreen(t *testing.T) {
+	outcomes := map[string]string{
+		"": "", "agy-trust": "", "agy-login": "", "agy-onboarding": "", "agy-unknown-screen": "", "agy-localized": "",
+		"agy-unreadable": "", "agy-malformed": "", "agy-oversized": "", "agy-empty": "", "agy-utf8": "", "agy-changing": "",
+		"agy-native-blocked": "startup_blocked",
+		"agy-timeout":        "startup_timeout", "agy-timeout-unknown": "startup_timeout", "agy-timeout-name-changed": "startup_timeout",
+		"agy-foreign": "registration_failed", "agy-name": "registration_failed", "agy-pane": "registration_failed",
+		"agy-workspace": "registration_failed", "agy-cwd": "registration_failed", "agy-working": "registration_failed",
+		"agy-unknown": "registration_failed", "agy-not-ready": "registration_failed",
+	}
+	for mode, want := range outcomes {
+		t.Run("mode="+mode, func(t *testing.T) {
 			h, calls := registrationHost(t, mode)
 			cwd := t.TempDir()
 			writeFixture(t, filepath.Join(cwd, ".git", "info", "exclude"), "")
 			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", cwd, nil, "agy", Overrides{}, registrationReceipt(t, "agy", Overrides{}))
-			want := "registration_failed"
-			if mode == "agy-trust" || mode == "agy-login" || mode == "agy-onboarding" || mode == "agy-timeout" || mode == "agy-native-blocked" {
-				want = "startup_blocked"
+			if want == "" && err != nil || want != "" && (err == nil || registrationFailureKind(err) != want) {
+				t.Fatalf("AGY startup outcome = %q, want %q", registrationFailureKind(err), want)
 			}
-			if mode == "agy-timeout-unknown" || mode == "agy-timeout-name-changed" {
-				want = "startup_timeout"
-			}
-			if err == nil || registrationFailureKind(err) != want || pane != "w1:p1" || ws != "w1" || strings.Contains(err.Error(), "CANARY") {
-				t.Fatal("AGY startup lost blocking, ownership or privacy", registrationFailureKind(err))
+			if pane != "w1:p1" || ws != "w1" || err != nil && strings.Contains(err.Error(), "CANARY") {
+				t.Fatal("AGY startup lost ownership or privacy")
 			}
 			starts := 0
 			for _, call := range calls() {
-				if call[0] == "agent" && call[1] == "start" {
+				switch {
+				case call[0] == "agent" && call[1] == "start":
 					starts++
-				} else if call[0] == "agent" && call[1] == "get" || call[0] == "pane" && call[1] == "read" {
+				case call[0] == "pane" && call[1] == "read":
+					t.Fatal("AGY startup read the terminal screen")
+				case call[0] == "agent" && call[1] == "get":
 					if call[2] != pane {
-						t.Fatal("diagnostic read escaped owned pane")
+						t.Fatal("occupant read escaped owned pane")
 					}
-				} else if call[0] != "workspace" && !(call[0] == "pane" && call[1] == "run") {
-					t.Fatal("startup blocker received input")
+				case call[0] == "workspace", call[0] == "pane" && (call[1] == "run" || call[1] == "report-metadata"):
+				default:
+					t.Fatalf("AGY startup sent input: %q", call)
 				}
 			}
 			if starts != 1 {
@@ -167,11 +179,54 @@ func TestAGYReadinessPreservesCancellation(t *testing.T) {
 	h, _ := registrationHost(t, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if registrationFailureKind(h.agyRegistrationCheck(ctx, "fixture-agent", "/fixture/repo", "w1:p1", "w1", true)) != "startup_cancelled" {
+	if registrationFailureKind(h.agyRegistrationCheck(ctx, "fixture-agent", "/fixture/repo", "w1:p1", "w1")) != "startup_cancelled" {
 		t.Fatal("cancelled registration was relabelled or admitted")
 	}
 	if _, err := os.Stat(os.Getenv("REGISTRATION_CALLS")); !os.IsNotExist(err) {
 		t.Fatal("cancelled readiness check reached a native effect")
+	}
+}
+
+// The CLI's typed onboarding flag decides before any workspace: false is
+// blocked, everything that is not exactly true is unproven. No seat either way.
+func TestAGYOnboardingTypedFactRefusesBeforeSeat(t *testing.T) {
+	cases := map[string]string{
+		`{"onboardingComplete":true}`:                                    "",
+		`{"onboardingComplete":true,"consumerOnboardingComplete":false}`: "",
+		`{"onboardingComplete":false,"consumerOnboardingComplete":true}`: "startup_blocked",
+		`{"consumerOnboardingComplete":true}`:                            "registration_failed",
+		`{"onboardingComplete":"true"}`:                                  "registration_failed",
+		`{"onboardingComplete":null}`:                                    "registration_failed",
+		`{"onboardingComplete":1}`:                                       "registration_failed",
+		`{"onboardingComplete":true,"onboardingComplete":false}`:         "registration_failed",
+		`[true]`:             "registration_failed",
+		`PRIVATE-AGY-CANARY`: "registration_failed",
+		"{\"onboardingComplete\":true,\"x\":\"\xff\"}":                        "registration_failed",
+		`{"onboardingComplete":true}` + strings.Repeat(" ", agyOnboardingMax): "registration_failed",
+	}
+	for raw, want := range cases {
+		t.Run(want+"/"+strings.TrimSpace(raw[:min(len(raw), 48)]), func(t *testing.T) {
+			h, _ := registrationHost(t, "")
+			writeFixture(t, filepath.Join(h.Home, ".gemini", "antigravity-cli", "cache", "onboarding.json"), raw)
+			cwd := t.TempDir()
+			writeFixture(t, filepath.Join(cwd, ".git", "info", "exclude"), "")
+			pane, ws, err := h.spawnAgent(context.Background(), "fixture-agent", cwd, nil, "agy", Overrides{}, registrationReceipt(t, "agy", Overrides{}))
+			if want == "" {
+				if err != nil || pane != "w1:p1" {
+					t.Fatal("completed native onboarding was refused", err)
+				}
+				return
+			}
+			if err == nil || registrationFailureKind(err) != want || pane != "" || ws != "" || strings.Contains(err.Error(), "CANARY") {
+				t.Fatalf("onboarding outcome = %q, want %q before any seat", registrationFailureKind(err), want)
+			}
+			if _, statErr := os.Stat(os.Getenv("REGISTRATION_CALLS")); !os.IsNotExist(statErr) {
+				t.Fatal("onboarding refusal reached Herdr")
+			}
+			if _, statErr := os.Lstat(filepath.Join(cwd, ".divybot-agy")); !os.IsNotExist(statErr) {
+				t.Fatal("onboarding refusal left launch state")
+			}
+		})
 	}
 }
 
@@ -252,22 +307,20 @@ func TestAGYOnboardingReferencePreservesNativeState(t *testing.T) {
 				_ = os.Chmod(original, 0000)
 			}
 			_, err := h.prepareAGYTrust(context.Background(), cwd)
-			if mode == "dangling" || mode == "directory" || mode == "unreadable" {
+			if mode != "refresh" {
+				// Without the typed native flag, onboarding is unproven: refuse, never invent it.
 				if err == nil {
-					t.Fatal("invalid native onboarding reference was admitted")
+					t.Fatal("missing or invalid native onboarding state was admitted")
 				}
-				return
-			}
-			if err != nil {
-				t.Fatal("optional native onboarding state was refused")
-			}
-			link := filepath.Join(cwd, ".divybot-agy", "cache", "onboarding.json")
-			if mode == "missing" {
-				if _, err := os.Lstat(link); !os.IsNotExist(err) {
+				if _, statErr := os.Lstat(filepath.Join(cwd, ".divybot-agy")); !os.IsNotExist(statErr) {
 					t.Fatal("onboarding completion was invented")
 				}
 				return
 			}
+			if err != nil {
+				t.Fatal("completed native onboarding state was refused")
+			}
+			link := filepath.Join(cwd, ".divybot-agy", "cache", "onboarding.json")
 			// Synthetic native cache refresh follows the reference too.
 			value := `{"consumerOnboardingComplete":false}`
 			if os.WriteFile(link, []byte(value), 0600) != nil {
@@ -280,17 +333,6 @@ func TestAGYOnboardingReferencePreservesNativeState(t *testing.T) {
 				t.Fatal("refresh replaced the onboarding reference")
 			}
 		})
-	}
-}
-
-func TestAGYComposerRequiresBoundedPositiveEvidence(t *testing.T) {
-	for _, screen := range []string{"", "unknown idle screen", "\xff ? for shortcuts", strings.Repeat(" ", 64*1024) + "? for shortcuts"} {
-		if agyStartupComposer(screen) {
-			t.Fatal("uncertain screen admitted as composer")
-		}
-	}
-	if !agyStartupComposer("Antigravity\n > \n ? for shortcuts") {
-		t.Fatal("native source-backed idle hint refused")
 	}
 }
 
