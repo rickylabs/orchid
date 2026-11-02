@@ -18,9 +18,9 @@ import (
 //	onboarding the CLI's own typed cache field onboardingComplete, read before
 //	           any workspace exists: false is blocked, anything else unproven.
 //	auth       unknown: the CLI exposes no typed pre-conversation auth state.
-//	readiness  Herdr's agent-start contract for the exact occupant. For AGY it
-//	           is display-derived, so it may fence input but is never recorded
-//	           as a native fact.
+//	readiness  unknown: Herdr's agent-start contract and status are
+//	           display-derived for AGY. They may withhold input, never decide
+//	           a startup outcome or become a native fact.
 //
 // Native acceptance stays the new user step in the isolated store
 // (agy_prompt.go); a launch without it remains unconfirmed, never retried.
@@ -57,10 +57,11 @@ func agyOnboardingComplete(raw []byte) error {
 	return nil
 }
 
-// agyRegistrationCheck confirms that the registered pane is still this launch's
-// exact occupant. It reads Herdr's agent record once and never the screen.
-// Herdr's blocked status may only withhold the goal; idle/ready is Herdr's
-// display-derived start contract, and goal acceptance still needs native proof.
+// agyRegistrationCheck confirms only that the registered pane is still this
+// launch's exact occupant: one Herdr agent record, never the screen. AGY's
+// Herdr status is display-derived, so it decides no startup outcome here.
+// Goal delivery waits on it only to withhold input (waitAgent), and only the
+// new native user step confirms the goal.
 func (h Host) agyRegistrationCheck(ctx context.Context, label, cwd, pane, ws string) error {
 	unknown := func() error { return registrationFailure("", ctx.Err()) }
 	if ctx.Err() != nil {
@@ -70,13 +71,7 @@ func (h Host) agyRegistrationCheck(ctx context.Context, label, cwd, pane, ws str
 	if err != nil || ctx.Err() != nil || !agyStartupOccupant(a, label, cwd, pane, ws) {
 		return unknown()
 	}
-	switch {
-	case a.AgentStatus == "blocked":
-		return &agentRegistrationFailure{kind: "startup_blocked"}
-	case a.AgentStatus == "idle" && a.InteractiveReady:
-		return nil
-	}
-	return unknown()
+	return nil
 }
 
 func agyStartupOccupant(a AgentInfo, label, cwd, pane, ws string) bool {

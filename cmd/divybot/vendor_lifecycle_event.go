@@ -64,18 +64,33 @@ try:
   s=os.fstat(f.fileno());assert stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o600
   data=f.read(4097);assert len(data)<=4096
   print(data)
-except Exception:print('{}')
+except FileNotFoundError:print('{}')
+except Exception:print('{"unreadable":true}')
 `
 
 func (h Host) vendorLifecycle(ctx context.Context, a AgentInfo) *vendorLifecycleEvent {
+	event, _ := h.vendorLifecycleObserved(ctx, a)
+	return event
+}
+
+// vendorLifecycleObserved also reports whether the receipt source was read.
+// An absent, foreign or invalid receipt is a completed read with no event; a
+// failed command or an unreadable receipt is not, so a caller can retry it.
+func (h Host) vendorLifecycleObserved(ctx context.Context, a AgentInfo) (*vendorLifecycleEvent, bool) {
 	if (a.Agent != "claude" && a.Agent != "codex") || a.Cwd == "" || a.Name == "" || a.TerminalID == "" {
-		return nil
+		return nil, true
 	}
 	file := vendorLifecycleFile(a.Agent, a.Name, a.PaneID, a.WorkspaceID, a.Cwd)
 	out, err := h.runBounded(ctx, fmt.Sprintf("exec python3 -c %s %s", shq(vendorLifecycleRead), shq(file)))
-	var event vendorLifecycleEvent
-	if err != nil || len(out) > 4096 || strictJSON([]byte(out), &event) != nil || !event.matches(a) {
-		return nil
+	var unread struct {
+		Unreadable bool `json:"unreadable"`
 	}
-	return &event
+	if err != nil || len(out) > 4096 || json.Unmarshal([]byte(out), &unread) == nil && unread.Unreadable {
+		return nil, false
+	}
+	var event vendorLifecycleEvent
+	if strictJSON([]byte(out), &event) != nil || !event.matches(a) {
+		return nil, true
+	}
+	return &event, true
 }

@@ -74,3 +74,6 @@ orch.linux-*
 # herdr build artifact
 /orch-linux-herdr
 /divybot
+
+# Python bytecode from local guard-script runs
+__pycache__/

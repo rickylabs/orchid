@@ -127,18 +127,19 @@ func TestAGYSettingsAndScopeFailClosedBeforeSeat(t *testing.T) {
 	}
 }
 
-// The registered occupant is classified from Herdr's agent record only. Every
+// The registered occupant is checked from Herdr's agent record only. Every
 // screen the synthetic pane could show — trust, sign-in, onboarding, localized,
-// unreadable or hostile — yields the same outcome, and the pane is never read.
+// unreadable or hostile — and every displayed status yields the same outcome,
+// and the pane is never read. Only exact ownership and Herdr's start error count.
 func TestAGYStartupNeverReadsScreen(t *testing.T) {
 	outcomes := map[string]string{
 		"": "", "agy-trust": "", "agy-login": "", "agy-onboarding": "", "agy-unknown-screen": "", "agy-localized": "",
 		"agy-unreadable": "", "agy-malformed": "", "agy-oversized": "", "agy-empty": "", "agy-utf8": "", "agy-changing": "",
-		"agy-native-blocked": "startup_blocked",
-		"agy-timeout":        "startup_timeout", "agy-timeout-unknown": "startup_timeout", "agy-timeout-name-changed": "startup_timeout",
+		// AGY's Herdr status is display-derived: it decides no startup outcome.
+		"agy-native-blocked": "", "agy-working": "", "agy-unknown": "", "agy-not-ready": "",
+		"agy-timeout": "startup_timeout", "agy-timeout-unknown": "startup_timeout", "agy-timeout-name-changed": "startup_timeout",
 		"agy-foreign": "registration_failed", "agy-name": "registration_failed", "agy-pane": "registration_failed",
-		"agy-workspace": "registration_failed", "agy-cwd": "registration_failed", "agy-working": "registration_failed",
-		"agy-unknown": "registration_failed", "agy-not-ready": "registration_failed",
+		"agy-workspace": "registration_failed", "agy-cwd": "registration_failed",
 	}
 	for mode, want := range outcomes {
 		t.Run("mode="+mode, func(t *testing.T) {

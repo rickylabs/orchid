@@ -18,7 +18,7 @@ Two adapters own this boundary. To extend either one, read its file:
 | State | Meaning |
 | --- | --- |
 | `ready` | A native fact proves the vendor accepted work. For AGY this is the new user step in its isolated store (`agy_prompt.go`). |
-| `blocked` | A typed native fact says the vendor cannot proceed. Examples: AGY's `onboardingComplete: false`, or Herdr's `blocked` status, which can only withhold input. |
+| `blocked` | A typed native fact says the vendor cannot proceed, such as AGY's `onboardingComplete: false`. |
 | `unauthenticated` | A typed vendor event says the credential was rejected. |
 | `unknown` | Everything else, including every case where the vendor exposes no typed fact. Unknown has no effect. |
 
@@ -41,12 +41,16 @@ Orchid therefore uses these facts:
 | --- | --- | --- |
 | Trust | The per-launch settings overlay lists only the exact canonical checkout in `trustedWorkspaces`. | Prepared by construction. A preparation failure refuses before any workspace. |
 | Onboarding | The CLI's typed cache field `onboardingComplete`, read once and bounded to 64 KiB before any workspace. | `true` lets the launch continue. `false` refuses as `startup_blocked`. Missing, non-boolean, duplicated, oversized or invalid refuses as unproven. No seat is created in either refusal case. |
-| Occupant | One Herdr `agent get` for the registered pane. Agent, label, pane, workspace and checkout must match exactly. | A mismatch fails registration. Herdr `blocked` refuses as `startup_blocked`. Idle and interactive-ready passes Herdr's start contract. |
+| Occupant | One Herdr `agent get` for the registered pane. Agent, label, pane, workspace and checkout must match exactly. | A mismatch fails registration. The displayed Herdr status decides nothing here. |
 | Auth | None. The CLI exposes no typed pre-conversation auth state. | Unknown. |
 | Acceptance | A new native user step in the run's isolated store, woken by Herdr events. | The only `ready` proof. Without it the goal stays unconfirmed and is reported once, never retried. |
 
-For AGY, Herdr's idle/ready status is display-derived. Orchid uses it only to fence
-input. It is never recorded as a native fact, and it cannot confirm a goal.
+For AGY, Herdr's status and its start readiness are display-derived. Orchid uses
+them only to withhold input: goal delivery waits for Herdr idle/done before it types
+anything, and a blocked or never-ready pane receives no input. The goal then stays
+unconfirmed and is reported once. Herdr's own `agent start` error is reported as
+Herdr gives it, for example `startup_timeout`, and Orchid adds nothing from the screen.
+No displayed status is recorded as a native fact or confirms a goal.
 
 The screen checks are gone: trust, sign-in and onboarding marker groups, and the
 `? for shortcuts` composer requirement. So is the screen refinement of a startup
@@ -92,17 +96,27 @@ A later native event is its own outcome.
 A suspected auth failure never tears down, stops, re-prompts or redispatches a
 session.
 
-Reads are event-driven. Supervision reads a typed source only when the matched
-occupant is idle or blocked, and only once per Herdr state/completion sequence change.
-A failed read is retried on the next tick.
+Reads are event-driven. Supervision reads a typed source once per Herdr
+state/completion sequence change, for every matched occupant that is not under
+capacity recovery. Herdr's displayed status never gates the Claude source, because its
+detected status can disagree with the hook receipt. Remote Control Codex is skipped
+only while `working`: its newest turn is still in progress, so it cannot yet be a
+failed turn.
+
+A change stays pending, and is read again on the next tick, after any of these:
+
+- a failed Herdr read;
+- an unreadable receipt (as opposed to an absent or foreign one);
+- a failed connection;
+- an effect fence that could not be saved.
 
 ## Validation
 
 `go test ./cmd/divybot -run 'TestAGY|TestVendorAuth|TestStartupAndAuth'` covers:
 
 - **Screen text has no effect on readiness.** Trust, sign-in, onboarding, localized,
-  empty, invalid-UTF-8 and hostile screens all give the same startup outcome. The pane
-  is never read.
+  empty, invalid-UTF-8 and hostile screens, and every displayed Herdr status, all give
+  the same startup outcome. The pane is never read.
 - **Stale quoted errors trigger nothing.** `Invalid bearer`, `Please run /login` and
   localized text in prompts, assistant messages or error details stay unknown. So do
   receipts from another terminal, session, label or checkout.
@@ -112,8 +126,13 @@ A failed read is retried on the next tick.
   `unauthorized` yields `unauthenticated` with its provenance.
 - **Repeated or stale events cannot repeat effects.** Repeats, restarts and failed
   saves leave a single effect. The live job stays.
+- **Pending changes are retried.** An undurable fence or an unreadable receipt leaves
+  the same native change pending, and it is acted on once after recovery.
+- **The Codex path runs end to end.** Remote Control Codex goes through the real
+  goal-RPC reader: it is not read while `working`, and a stopped `done` occupant is
+  read and acted on once.
 
-`scripts/check-vendor-auth-mutations.py` compiles 20 mutants. Each one reintroduces
+`scripts/check-vendor-auth-mutations.py` compiles 25 mutants. Each one reintroduces
 a screen read, an untyped value, a stale generation, a removed fence or an
 unbounded read. Every mutant must fail an assertion, and the restored tree must pass.
 

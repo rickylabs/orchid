@@ -23,10 +23,9 @@ MUTATIONS = [
     ("typed onboarding false admitted", STARTUP, "if !*complete {", "if false {", AGY_TESTS),
     ("unproven onboarding admitted", TRUST, "if err := agyOnboardingComplete(cache); err != nil {", "if err := agyOnboardingComplete(cache); err != nil && false {", AGY_TESTS),
     ("failed onboarding read admitted", TRUST, "cache = nil // a missing or unreadable cache is unproven", 'cache = []byte(`{"onboardingComplete":true}`)', AGY_TESTS),
-    ("Herdr blocked admitted as unknown", STARTUP, 'case a.AgentStatus == "blocked":', 'case a.AgentStatus == "blocked" && false:', AGY_TESTS),
     ("foreign label admitted", STARTUP, "a.Cwd == cwd && a.Name == label", "a.Cwd == cwd", AGY_TESTS),
-    ("not-ready occupant admitted", STARTUP, 'a.AgentStatus == "idle" && a.InteractiveReady', 'a.AgentStatus == "idle"', AGY_TESTS),
-    ("screen read reinstated at startup", STARTUP, "\tswitch {\n\tcase a.AgentStatus", '\t_, _ = h.herdr(ctx, "pane", "read", pane, "--source", "visible")\n\tswitch {\n\tcase a.AgentStatus', AGY_TESTS),
+    ("display status gates registration", STARTUP, "\t\treturn unknown()\n\t}\n\treturn nil\n}", '\t\treturn unknown()\n\t}\n\tif a.AgentStatus != "idle" || !a.InteractiveReady {\n\t\treturn unknown()\n\t}\n\treturn nil\n}', AGY_TESTS),
+    ("screen read reinstated at startup", STARTUP, "\ta, err := h.agentInfoOf(ctx, pane)", '\t_, _ = h.herdr(ctx, "pane", "read", pane, "--source", "visible")\n\ta, err := h.agentInfoOf(ctx, pane)', AGY_TESTS),
     ("untyped Claude failure accepted", AUTH, 'e.Event != "StopFailure" || e.Failure != claudeAuthFailure', 'e.Event != "StopFailure"', AUTH_TESTS),
     ("hook records free-text errors", HOOK, "event.get('error') in failures", "isinstance(event.get('error'),str)", AUTH_TESTS),
     ("receipt failure enum unchecked", EVENT, "!claudeStopFailures[e.Failure]", "false", AUTH_TESTS),
@@ -39,7 +38,13 @@ MUTATIONS = [
     ("reads not debounced to native changes", AUTH, "return !j.authObserved || ", "return true || ", AUTH_TESTS),
     ("untyped transports read", AUTH, "\t\treturn // no typed native auth source: unknown, no read", "\t\tobservation, err = claudeAuthRead(read, host, j)", AUTH_TESTS),
     ("terminal read reinstated in auth", AUTH, "\ta, err := host.agentInfoOf(ctx, j.Pane)", '\t_, _ = host.herdr(ctx, "agent", "read", j.Pane, "--lines", "4")\n\ta, err := host.agentInfoOf(ctx, j.Pane)', AUTH_TESTS),
-    ("supervision auth observation removed", MAIN, "c.observeVendorAuth(ctx, host, j, ref)", "_ = ref", AUTH_TESTS),
+    ("supervision auth observation removed", MAIN, "c.superviseVendorAuth(ctx, host, j, ref, matched, recovering)", "_ = ref", AUTH_TESTS),
+    ("stopped Codex occupants skipped", AUTH, 'rcCodex(j) && ref.Status == "working"', 'rcCodex(j) && ref.Status != "idle" && ref.Status != "blocked"', AUTH_TESTS),
+    ("Claude gated on displayed status", AUTH, '|| rcCodex(j) && ref.Status == "working"', '|| ref.Status == "working"', AUTH_TESTS),
+    ("unmatched occupant read", AUTH, "if !matched || recovering ||", "if recovering ||", AUTH_TESTS),
+    ("undurable fence consumes the change", AUTH, "\tif _, err := c.applyVendorAuth(ctx, host, j, observation); err != nil {\n\t\treturn // the fence is not durable: keep this change pending\n\t}", "\t_, _ = c.applyVendorAuth(ctx, host, j, observation)", AUTH_TESTS),
+    ("unreadable receipt taken as absent", AUTH, "\t\tif !read {", "\t\tif false && !read {", AUTH_TESTS),
+    ("reader hides unreadable receipts", EVENT, "except Exception:print('{\"unreadable\":true}')", "except Exception:print('{}')", AUTH_TESTS),
 ]
 
 

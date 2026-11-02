@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -166,43 +167,178 @@ func TestVendorAuthStaleGenerationStaysUnknown(t *testing.T) {
 	}
 }
 
+func (f *authFixture) acted(t *testing.T, o vendorAuthObservation) bool {
+	t.Helper()
+	acted, err := f.c.applyVendorAuth(context.Background(), f.host, f.j, o)
+	if err != nil {
+		t.Fatal("fence save failed unexpectedly", err)
+	}
+	return acted
+}
+
 // The effect is reserved durably before it runs: repeated reads, a restart and
 // a failed save cannot repeat it; a new native event is a new outcome.
 func TestVendorAuthEffectRunsOncePerNativeEvent(t *testing.T) {
 	f := newAuthFixture(t)
 	f.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
 	first := f.observation(t)
-	if !f.c.applyVendorAuth(context.Background(), f.host, f.j, first) {
+	if !f.acted(t, first) {
 		t.Fatal("typed native auth failure had no effect")
 	}
-	if f.c.applyVendorAuth(context.Background(), f.host, f.j, first) || f.c.applyVendorAuth(context.Background(), f.host, f.j, f.observation(t)) {
+	if f.acted(t, first) || f.acted(t, f.observation(t)) {
 		t.Fatal("repeated native event repeated its effect")
 	}
 	f.c.st = loadState(f.c.st.path)
 	f.j = f.c.st.Jobs[7]
-	if f.j == nil || f.c.applyVendorAuth(context.Background(), f.host, f.j, first) {
+	if f.j == nil || f.acted(t, first) {
 		t.Fatal("restart repeated the effect or lost the live job")
 	}
-	if f.c.applyVendorAuth(context.Background(), f.host, f.j, unknownAuth) ||
-		f.c.applyVendorAuth(context.Background(), f.host, f.j, vendorAuthObservation{State: authUnauthenticated, Source: authSourceClaudeStopFailure, Key: "not-a-digest"}) {
+	if f.acted(t, unknownAuth) || f.acted(t, vendorAuthObservation{State: authUnauthenticated, Source: authSourceClaudeStopFailure, Key: "not-a-digest"}) {
 		t.Fatal("unknown or malformed observation had an effect")
 	}
 	f.hook(t, map[string]any{"hook_event_name": "UserPromptSubmit"})
 	f.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
 	second := f.observation(t)
-	if second.Key == first.Key || !f.c.applyVendorAuth(context.Background(), f.host, f.j, second) {
+	if second.Key == first.Key || !f.acted(t, second) {
 		t.Fatal("a new native auth event was not its own outcome")
 	}
 	if f.c.st.Jobs[7] != f.j {
 		t.Fatal("a suspected auth failure removed the live session")
+	}
+	if os.Geteuid() == 0 {
+		return // root bypasses the read-only state directory
 	}
 	third := vendorAuthObservation{State: authUnauthenticated, Source: authSourceCodexTurnError, Key: shaText([]byte("third"))}
 	if err := os.Chmod(filepath.Dir(f.c.st.path), 0500); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(filepath.Dir(f.c.st.path), 0700)
-	if os.Geteuid() != 0 && (f.c.applyVendorAuth(context.Background(), f.host, f.j, third) || f.j.AuthSignal != second.Key) {
-		t.Fatal("an undurable fence still ran the effect")
+	if acted, err := f.c.applyVendorAuth(context.Background(), f.host, f.j, third); acted || err == nil || f.j.AuthSignal != second.Key {
+		t.Fatal("an undurable fence still ran the effect or hid the failure")
+	}
+}
+
+// A fence that could not be saved leaves the native change pending: once
+// persistence recovers, the same change is read again and acted on once.
+func TestVendorAuthUndurableFenceIsRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the read-only state directory")
+	}
+	f := newAuthFixture(t)
+	f.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
+	dir := filepath.Dir(f.c.st.path)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	_ = os.Chmod(dir, 0700)
+	if f.j.AuthSignal != "" || !authObservationDue(f.j, f.ref) {
+		t.Fatal("an undurable fence consumed the native change")
+	}
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	if !digestPattern.MatchString(f.j.AuthSignal) || authObservationDue(f.j, f.ref) {
+		t.Fatal("the pending native change was not retried once persistence recovered")
+	}
+}
+
+// An unreadable receipt is not "no event": the change stays pending until the
+// receipt can be read, then its typed failure has its one outcome.
+func TestVendorAuthUnreadableReceiptIsRetried(t *testing.T) {
+	f := newAuthFixture(t)
+	f.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
+	a := f.agent
+	receiptDir := filepath.Dir(vendorLifecycleFile(a.Agent, a.Name, a.PaneID, a.WorkspaceID, a.Cwd))
+	if err := os.Chmod(receiptDir, 0755); err != nil { // fails the reader's private-mode check
+		t.Fatal(err)
+	}
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	if f.j.AuthSignal != "" || !authObservationDue(f.j, f.ref) {
+		t.Fatal("an unreadable receipt was taken as an observed absence")
+	}
+	if err := os.Chmod(receiptDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+	if !digestPattern.MatchString(f.j.AuthSignal) {
+		t.Fatal("the receipt's typed failure was lost after it became readable")
+	}
+	// An absent receipt is a completed observation with no outcome.
+	g := newAuthFixture(t)
+	g.c.superviseVendorAuth(context.Background(), g.host, g.j, g.ref, true, false)
+	if g.j.AuthSignal != "" || authObservationDue(g.j, g.ref) {
+		t.Fatal("an absent receipt was retried or acted on")
+	}
+}
+
+// Herdr's displayed status never gates the Claude source, and an unmatched or
+// recovering occupant is never read.
+func TestVendorAuthSupervisionIgnoresDisplayedStatus(t *testing.T) {
+	for _, status := range []string{"idle", "blocked", "done", "working", "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			f := newAuthFixture(t)
+			f.hook(t, map[string]any{"hook_event_name": "StopFailure", "error": "authentication_failed"})
+			f.ref.Status = status
+			_ = os.Remove(f.calls)
+			f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, false, false)
+			f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, true)
+			if len(f.herdrCalls(t)) != 0 || f.j.AuthSignal != "" {
+				t.Fatal("an unmatched or recovering occupant was read")
+			}
+			f.c.superviseVendorAuth(context.Background(), f.host, f.j, f.ref, true, false)
+			if !digestPattern.MatchString(f.j.AuthSignal) {
+				t.Fatalf("typed failure ignored while Herdr displayed %s", status)
+			}
+		})
+	}
+}
+
+// Remote Control Codex is read through the real goal RPC reader for a stopped
+// occupant, skipped only while its turn is in progress, and acted on once.
+func TestVendorAuthCodexThroughNativeReader(t *testing.T) {
+	c, j := capacityFixture(t)
+	j.RemoteControl = &remoteControlRun{}
+	j.Pane = "w1:p1"
+	connects := 0
+	code := "unauthorized"
+	prior := codexAuthConnect
+	codexAuthConnect = func(_ context.Context, _ Host, thread string, use func(*goalRPC) error) error {
+		connects++
+		p, _ := goalPort(response(2, capacityTurnResult("auth-turn", "failed", code)))
+		p.canonical = true
+		if thread != p.thread {
+			return errors.New("unbound thread")
+		}
+		return use(p)
+	}
+	t.Cleanup(func() { codexAuthConnect = prior })
+	ref := agentRef{Host: j.Host, Agent: "codex", Pane: j.Pane, Status: "working", StateChangeSeq: 1}
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	if connects != 0 {
+		t.Fatal("an in-progress Codex turn was read")
+	}
+	ref.Status, ref.StateChangeSeq = "done", 2
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	first := j.AuthSignal
+	if connects != 1 || !digestPattern.MatchString(first) {
+		t.Fatal("a stopped occupant's typed unauthorized turn was not acted on")
+	}
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	ref.StateChangeSeq = 3
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	if connects != 2 || j.AuthSignal != first {
+		t.Fatal("reads were not debounced or the same failed turn acted twice")
+	}
+	code, ref.StateChangeSeq = "serverOverloaded", 4
+	j.AuthSignal = ""
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	if j.AuthSignal != "" {
+		t.Fatal("a non-auth native failure produced an auth outcome")
+	}
+	j.RemoteControl = nil
+	ref.StateChangeSeq = 5
+	c.superviseVendorAuth(context.Background(), Host{Name: j.Host}, j, ref, true, false)
+	if connects != 3 {
+		t.Fatal("plain Codex, which has no typed auth source, was read")
 	}
 }
 
@@ -302,7 +438,7 @@ func TestStartupAndAuthBoundaryNeverReadsScreen(t *testing.T) {
 			t.Fatalf("supervision still matches terminal auth text: %s", banned)
 		}
 	}
-	if !strings.Contains(sources["main.go"], "c.observeVendorAuth(ctx, host, j, ref)") {
+	if !strings.Contains(sources["main.go"], "c.superviseVendorAuth(ctx, host, j, ref, matched, recovering)") {
 		t.Fatal("supervision lost its typed native auth observation")
 	}
 }

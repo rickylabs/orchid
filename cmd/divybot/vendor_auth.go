@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -73,9 +74,20 @@ func codexAuthObservation(thread, turn, status, code string) vendorAuthObservati
 }
 
 // authObservationDue debounces reads to native state changes of this occupant.
-// A failed read leaves the change unobserved, so the next tick retries it.
+// A failed read or an undurable fence leaves the change pending for retry.
 func authObservationDue(j *Job, ref agentRef) bool {
 	return !j.authObserved || j.authObservedSeq != [2]uint64{ref.StateChangeSeq, ref.CompletionSeq}
+}
+
+// superviseVendorAuth is supervision's one auth step for a matched occupant.
+// Herdr's displayed status never gates Claude, whose detected status can
+// disagree with its hook receipt. Remote Control Codex skips only "working",
+// whose newest turn is still in progress and so cannot be a failed turn.
+func (c *Coord) superviseVendorAuth(ctx context.Context, host Host, j *Job, ref agentRef, matched, recovering bool) {
+	if !matched || recovering || j == nil || rcCodex(j) && ref.Status == "working" {
+		return
+	}
+	c.observeVendorAuth(ctx, host, j, ref)
 }
 
 // observeVendorAuth reads the transport's typed native source once per change.
@@ -99,17 +111,35 @@ func (c *Coord) observeVendorAuth(ctx context.Context, host Host, j *Job, ref ag
 	if err != nil || read.Err() != nil {
 		return
 	}
+	if _, err := c.applyVendorAuth(ctx, host, j, observation); err != nil {
+		return // the fence is not durable: keep this change pending
+	}
 	j.authObserved, j.authObservedSeq = true, [2]uint64{ref.StateChangeSeq, ref.CompletionSeq}
-	c.applyVendorAuth(ctx, host, j, observation)
 }
 
+var errAuthSourceUnavailable = errors.New("auth-source-unavailable")
+
 // claudeAuthRead is one exact-occupant Herdr read with its lifecycle receipt.
+// When no event matched, the receipt is re-read once to tell an absent or
+// foreign receipt (observed) from one that could not be read (retry).
 func claudeAuthRead(ctx context.Context, host Host, j *Job) (vendorAuthObservation, error) {
 	a, err := host.agentInfoOf(ctx, j.Pane)
 	if err != nil {
 		return unknownAuth, err
 	}
+	if a.VendorEvent == nil {
+		event, read := host.vendorLifecycleObserved(ctx, a)
+		if !read {
+			return unknownAuth, errAuthSourceUnavailable
+		}
+		a.VendorEvent = event
+	}
 	return claudeAuthObservation(a, j), nil
+}
+
+// codexAuthConnect opens the bound thread's native connection (a test seam).
+var codexAuthConnect = func(ctx context.Context, host Host, thread string, use func(*goalRPC) error) error {
+	return host.withGoalConnection(ctx, thread, use)
 }
 
 // codexAuthRead is one bounded newest-turn read of the bound native thread.
@@ -119,7 +149,7 @@ func codexAuthRead(ctx context.Context, host Host, root, inbox string, j *Job) (
 		return unknownAuth, err
 	}
 	observation := unknownAuth
-	err = host.withGoalConnection(ctx, thread, func(p *goalRPC) error {
+	err = codexAuthConnect(ctx, host, thread, func(p *goalRPC) error {
 		turn, status, code, err := p.newestNativeTurn()
 		observation = codexAuthObservation(p.thread, turn, status, code)
 		return err
@@ -128,22 +158,23 @@ func codexAuthRead(ctx context.Context, host Host, root, inbox string, j *Job) (
 }
 
 // applyVendorAuth reserves the native event durably before its effect, so a
-// repeated read, a restart or a stale event cannot repeat it.
-func (c *Coord) applyVendorAuth(ctx context.Context, host Host, j *Job, o vendorAuthObservation) bool {
+// repeated read, a restart or a stale event cannot repeat it. It reports
+// whether the effect ran, and an error when the fence could not be saved.
+func (c *Coord) applyVendorAuth(ctx context.Context, host Host, j *Job, o vendorAuthObservation) (bool, error) {
 	if o.State != authUnauthenticated || !digestPattern.MatchString(o.Key) {
-		return false
+		return false, nil
 	}
 	c.st.mu.Lock()
 	if c.st.Jobs[j.Issue] != j || j.AuthSignal == o.Key {
 		c.st.mu.Unlock()
-		return false
+		return false, nil
 	}
 	prior := j.AuthSignal
 	j.AuthSignal = o.Key
 	if err := c.st.saveLocked(); err != nil {
 		j.AuthSignal = prior // no durable fence, no effect
 		c.st.mu.Unlock()
-		return false
+		return false, err
 	}
 	c.st.mu.Unlock()
 	log.Printf("issue #%d: native auth failure source=%s on %s — resyncing creds (no teardown)", j.Issue, o.Source, host.Name)
@@ -153,5 +184,5 @@ func (c *Coord) applyVendorAuth(ctx context.Context, host Host, j *Job, o vendor
 		cancel()
 	}
 	c.notify(fmt.Sprintf("issue #%d native auth failure on %s", j.Issue, host.Name))
-	return true
+	return true, nil
 }

@@ -173,10 +173,10 @@ value refuses as unproven. Standing settings remain unchanged. Missing,
 unreadable or invalid settings and reused/symlink state refuse before seat creation.
 
 Orchid never reads the AGY screen. After registration, one exact-occupant Herdr read
-confirms the agent, label, pane, workspace and checkout; Herdr `blocked` refuses as
-`startup_blocked`. AGY has no typed readiness or auth signal before its first
-conversation, so Herdr's display-derived start contract only fences input, and the
-goal is confirmed solely by a new native user step. Missing capabilities stay
+confirms the agent, label, pane, workspace and checkout. AGY has no typed readiness
+or auth signal before its first conversation, so Herdr's display-derived status only
+withholds input: nothing is typed until Herdr shows the pane idle. The goal is
+confirmed solely by a new native user step. Missing capabilities stay
 explicit unknowns; see [native vendor startup and authentication](docs/native-vendor-auth.md).
 There is no consent keypress, automatic retry or standing-config repair. Operators
 must keep effective settings, authentication and onboarding state readable by

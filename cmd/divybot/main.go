@@ -3921,9 +3921,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 
 	// Native auth failure: a typed vendor event resyncs credentials and notifies
 	// once, and never tears down a live session. Terminal text is never read.
-	if matched && !recovering && (ref.Status == "idle" || ref.Status == "blocked") {
-		c.observeVendorAuth(ctx, host, j, ref)
-	}
+	c.superviseVendorAuth(ctx, host, j, ref, matched, recovering)
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
 	// PR events may resume a matched, unfenced done worker; goal replays may not.
