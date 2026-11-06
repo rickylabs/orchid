@@ -110,10 +110,13 @@ func (h Host) preGoalRemoteIdentity(ctx context.Context, kind, label string, run
 	if err == nil {
 		run.IdentitySource = "codex-native-status"
 	}
-	current, currentErr := h.remoteTUIProcess(ctx, location.PaneID)
-	if err != nil || currentErr != nil || *process != *current || ctx.Err() != nil {
+	readTUI := func(ctx context.Context) (*remoteTUIProcess, error) { return h.remoteTUIProcess(ctx, location.PaneID) }
+	if err == nil {
+		err = checkTUIProcess(ctx, readTUI, process) // guard:attachment-process-continuity
+	}
+	if err != nil {
 		run.IdentitySource, run.Resume = "", nil
-		return goalError("remote-control-identity-unconfirmed")
+		return err
 	}
 	run.TUIProcess = process
 	if !run.HookConfirmed {
@@ -127,10 +130,10 @@ func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remot
 	if run == nil || location == nil {
 		return goalError("remote-control-identity-unconfirmed")
 	}
+	readTUI := func(ctx context.Context) (*remoteTUIProcess, error) { return h.remoteTUIProcess(ctx, location.PaneID) }
 	if run.IdentitySource == "codex-native-status" {
-		current, err := h.remoteTUIProcess(ctx, location.PaneID)
-		if err != nil || run.TUIProcess == nil || *current != *run.TUIProcess {
-			return goalError("remote-control-identity-unconfirmed")
+		if err := checkTUIProcess(ctx, readTUI, run.TUIProcess); err != nil {
+			return err
 		}
 	}
 	err := verifyCodexAttachment(ctx, label, run, location, func() (AgentInfo, error) { return h.agentInfoOf(ctx, location.PaneID) })
@@ -138,9 +141,8 @@ func (h Host) remoteAttachedStatus(ctx context.Context, label string, run *remot
 		return err
 	}
 	if run.IdentitySource == "codex-native-status" {
-		current, err := h.remoteTUIProcess(ctx, location.PaneID)
-		if err != nil || run.TUIProcess == nil || *current != *run.TUIProcess {
-			return goalError("remote-control-identity-unconfirmed")
+		if err := checkTUIProcess(ctx, readTUI, run.TUIProcess); err != nil {
+			return err
 		}
 	}
 	if ctx.Err() != nil {
@@ -227,61 +229,65 @@ for i,ts,pu,tgt,b in c.execute("select id,ts,process_uuid,target,feedback_log_bo
  if m and m.group(2)=='codex-tui':
   tui.add((pu,m.group(1)))
   if tgt=='codex_core::shell_snapshot' and b[m.end():].startswith(('resume_thread_with_history:thread_spawn','thread_spawn{otel.name="thread_spawn"}:')):spawned.append((i,ts,pu,m.group(1),m.group(3)))
-if len(creators)>1 or len(tui)>1:out('refused')
+if len(creators)>1 or len(tui)>1:out('refused',reason='ambiguous')
 if not creators or not spawned:out('pending')
 p=next(iter(creators))
 i,ts,pu,conn,v=spawned[0]
-if pu!=p or v!=ver:out('refused')
+if pu!=p or v!=ver:out('refused',reason='consumer-changed')
 pfx='app-server request: thread/turns/list connection_id=ConnectionId('+conn+') '
 if not c.execute("select 1 from logs where process_uuid=? and ts>=? and id>? and thread_id is null and target='codex_app_server::message_processor' and substr(feedback_log_body,1,?)=? limit 1",(p,ts,i,len(pfx),pfx)).fetchone():out('pending')
 out('proven',producer=hashlib.sha256(p.encode()).hexdigest(),connection=conn)
 `
 
-// codexResumeRecord reads the native resume record once.
-func (h Host) codexResumeRecord(ctx context.Context, run *remoteControlRun) (string, *codexResumeProof, error) {
+// codexResumeRecord reads the private resume record once and classifies it.
+func (h Host) codexResumeRecord(ctx context.Context, run *remoteControlRun) (attachmentOutcome, *codexResumeProof, error) {
 	if run == nil || !privateNativeID(run.NativeSessionID) || !codexVersionPattern.MatchString(run.ClientVersion) {
-		return "", nil, goalError("remote-control-identity-unconfirmed")
+		return attachmentUnreadable, nil, attachmentRefused(attachmentUnreadable)
 	}
 	script := fmt.Sprintf("export HOME=%s; exec python3 -c %s %s %s %s", shq(h.agentHome()), shq(codexResumeRecordPython),
 		shq(run.NativeSessionID), shq(run.ClientVersion), shq(codexGoalClientName))
 	out, err := h.runRemote(ctx, script)
 	var v struct {
 		State      string `json:"state"`
+		Reason     string `json:"reason"`
 		Producer   string `json:"producer"`
 		Connection string `json:"connection"`
 	}
 	if err != nil || len(out) > 512 || decodeNativeJSON([]byte(strings.TrimSpace(out)), &v) != nil {
-		return "", nil, goalError("remote-control-identity-unconfirmed")
+		return attachmentUnreadable, nil, attachmentRefused(attachmentUnreadable)
 	}
-	switch v.State {
-	case "pending", "refused":
-		return v.State, nil, nil
-	case "proven":
+	outcome := resumeRecordOutcome(v.State, v.Reason)
+	switch outcome {
+	case attachmentPending, attachmentAmbiguous, attachmentConsumerChanged:
+		return outcome, nil, nil
+	case attachmentPrivateLogProven:
 		proof := &codexResumeProof{Producer: v.Producer, Connection: v.Connection}
 		if !digestPattern.MatchString(proof.Producer) || !resumeConnectionPattern.MatchString(proof.Connection) {
-			return "", nil, goalError("remote-control-identity-unconfirmed")
+			return attachmentUnreadable, nil, attachmentRefused(attachmentUnreadable)
 		}
-		return v.State, proof, nil
+		return outcome, proof, nil
 	}
-	return "", nil, goalError("remote-control-identity-unconfirmed")
+	return attachmentUnreadable, nil, attachmentRefused(attachmentUnreadable)
 }
 
-// awaitCodexResumeIdentity waits, within the launch budget, for the native
+// awaitCodexResumeIdentity waits, within the launch budget, for the private
 // resume record of the pinned TUI on the prepared thread, and stores it in the
-// private run state. An ambiguous or foreign record refuses at once.
+// private run state. An ambiguous or foreign record refuses at once. The log
+// has no change notification, so this stays a bounded once-per-second read.
 func (h Host) awaitCodexResumeIdentity(ctx context.Context, run *remoteControlRun) error {
 	if run == nil || !privateNativeID(run.NativeSessionID) || !codexVersionPattern.MatchString(run.ClientVersion) { // guard:identity-version-pinned
-		return goalError("remote-control-identity-unconfirmed")
+		return attachmentRefused(attachmentUnreadable)
 	}
 	for ctx.Err() == nil {
-		state, proof, err := h.codexResumeRecord(ctx, run)
+		h.Stages.count(stageCountAttachmentReads)
+		outcome, proof, err := h.codexResumeRecord(ctx, run)
 		if err == nil {
-			switch state {
-			case "proven": // guard:resume-proven
+			switch outcome {
+			case attachmentPrivateLogProven: // guard:resume-proven
 				run.Resume = proof
 				return nil
-			case "refused":
-				return goalError("remote-control-identity-unconfirmed")
+			case attachmentAmbiguous, attachmentConsumerChanged:
+				return attachmentRefused(outcome)
 			}
 		}
 		select {
@@ -289,5 +295,5 @@ func (h Host) awaitCodexResumeIdentity(ctx context.Context, run *remoteControlRu
 		case <-time.After(time.Second):
 		}
 	}
-	return goalError("remote-control-identity-unconfirmed")
+	return attachmentRefused(attachmentDeadline)
 }

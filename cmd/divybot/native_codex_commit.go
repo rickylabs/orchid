@@ -113,13 +113,11 @@ func (h Host) remoteStructuredBinding(ctx context.Context, label string, r *remo
 		occupant = remoteStatusOccupant
 	}
 	if !occupant(raw, "codex", label, r.Cwd, r.NativeSessionID, location) {
-		return goalError("remote-control-identity-unconfirmed")
+		return attachmentRefused(attachmentConsumerChanged)
 	}
 	if r.IdentitySource == "codex-native-status" {
-		current, err := h.remoteTUIProcess(ctx, location.PaneID)
-		if err != nil || r.TUIProcess == nil || *current != *r.TUIProcess {
-			return goalError("remote-control-identity-unconfirmed")
-		}
+		readTUI := func(ctx context.Context) (*remoteTUIProcess, error) { return h.remoteTUIProcess(ctx, location.PaneID) }
+		return checkTUIProcess(ctx, readTUI, r.TUIProcess) // guard:binding-process-typed
 	}
 	return nil
 }

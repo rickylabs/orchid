@@ -55,6 +55,16 @@ type goalRPC struct {
 	serverVersion string
 	// Optional ordered journal for scoped turn notices; nil for other callers.
 	onTurnNotice func(remoteNativeTurn) error
+	// Opt-in for the one subscribed acceptance connection; zero for every other
+	// caller (codex_acceptance_signals.go).
+	pump            *framePump
+	lineSeq         int64    // receive sequence of the last consumed line
+	frameLimit      int      // frames per request; 0 keeps 128
+	optOut          []string // official initialize optOutNotificationMethods
+	observeOnly     bool     // only turn and signal frames; goal notices ignored
+	onSignal        func(method string, params json.RawMessage) error
+	onServerRequest func(method string, params json.RawMessage) error // observed, never answered
+	wake            bool                                              // a bound signal asked for a readback
 }
 
 func newGoalRPC(input io.Writer, output io.Reader, thread string) *goalRPC {
@@ -75,11 +85,12 @@ func (p *goalRPC) send(v any) error {
 	return nil
 }
 func (p *goalRPC) frame() (map[string]json.RawMessage, error) {
-	if !p.scan.Scan() {
+	line, ok, _ := p.nextLine()
+	if !ok {
 		return nil, goalError("goal-source-closed-or-frame-limit")
 	}
 	var m map[string]json.RawMessage
-	if decodeNativeJSON(p.scan.Bytes(), &m) != nil || m == nil {
+	if decodeNativeJSON(line, &m) != nil || m == nil {
 		return nil, goalError("goal-response-invalid")
 	}
 	return m, nil
@@ -91,6 +102,12 @@ func (p *goalRPC) notification(m map[string]json.RawMessage) error {
 	}
 	if method == "turn/started" || method == "turn/completed" {
 		return p.nativeTurnNotification(method, m["params"])
+	}
+	if p.observeOnly { // guard:observe-only
+		if p.onSignal != nil {
+			return p.onSignal(method, m["params"])
+		}
+		return nil
 	}
 	if method != "thread/goal/updated" && method != "thread/goal/cleared" {
 		return nil
@@ -151,7 +168,11 @@ func (p *goalRPC) request(method string, params any) (json.RawMessage, error) {
 	if e := p.send(map[string]any{"id": id, "method": method, "params": params}); e != nil {
 		return nil, e
 	}
-	for frames := 0; frames < 128; frames++ {
+	limit := 128
+	if p.frameLimit > 0 {
+		limit = p.frameLimit
+	}
+	for frames := 0; frames < limit; frames++ {
 		m, e := p.frame()
 		if e != nil {
 			return nil, e
@@ -159,6 +180,12 @@ func (p *goalRPC) request(method string, params any) (json.RawMessage, error) {
 		if raw, ok := m["id"]; ok {
 			var got int
 			_, request := m["method"]
+			if request && p.onServerRequest != nil {
+				if e := p.serverRequest(m); e != nil {
+					return nil, e
+				}
+				continue
+			}
 			_, result := m["result"]
 			_, failure := m["error"]
 			if json.Unmarshal(raw, &got) != nil || got != id || request || result == failure {
@@ -350,7 +377,11 @@ func (p *goalRPC) set(params map[string]any, intent goalIntent, status string) (
 	return nil, goalError("goal-notification-limit")
 }
 func (p *goalRPC) initialize() error {
-	raw, e := p.request("initialize", map[string]any{"clientInfo": map[string]string{"name": codexGoalClientName, "version": "1"}, "capabilities": map[string]bool{"experimentalApi": true}})
+	capabilities := map[string]any{"experimentalApi": true}
+	if len(p.optOut) > 0 {
+		capabilities["optOutNotificationMethods"] = p.optOut
+	}
+	raw, e := p.request("initialize", map[string]any{"clientInfo": map[string]string{"name": codexGoalClientName, "version": "1"}, "capabilities": capabilities})
 	if e != nil {
 		return e
 	}

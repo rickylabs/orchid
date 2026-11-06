@@ -8,7 +8,10 @@ permissions:
 jobs:
   matrix-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Serial guards exhausted 20m: PR140 job125001382382 at checkout trust;
+    # PR144 job125104509114 at Vet. Run41356270443 finished in 19m44s
+    # (Vet/Build 2s each). 40m gives bounded 2x headroom with every guard.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -81,3 +84,14 @@ jobs:
         run: python3 scripts/check-run-capacity-mutations.py
       - name: Compiled native run launch and task-start clock mutations
         run: python3 scripts/check-native-run-clock-mutations.py
+  launch-attachment-mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Compiled Codex launch attachment and acceptance mutations
+        run: python3 scripts/check-launch-attachment-mutations.py

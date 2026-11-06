@@ -23,6 +23,7 @@ import (
 // bridge (end mode). Only synthetic identifiers; no live endpoint.
 
 type accReply struct {
+	drop  bool           // write nothing and close: a lost acknowledgment
 	pre   []any          // notices written before the response
 	raw   []byte         // replaces the response frame body (bridge-valid text)
 	post  [][]byte       // text frames written in the same socket write as the response
@@ -47,6 +48,31 @@ type accFixture struct {
 	reply     func(f *accFixture, method string, params map[string]any, full int) *accReply
 	closed    chan struct{}
 	closeOnce sync.Once
+	// Subscription: resumeRefused answers thread/resume with a JSON-RPC error
+	// (the missing-capability case); methods records every request in order.
+	resumeRefused bool
+	methods       []string
+	initParams    map[string]any
+	resumeParams  map[string]any
+	replies       int        // client frames answering a server request (must stay 0)
+	live          []net.Conn // accepted connections, for frames pushed mid-operation
+}
+
+// push writes one text frame on the newest connection, in one write.
+func (f *accFixture) push(v any) {
+	body, _ := json.Marshal(v)
+	var out bytes.Buffer
+	_ = nativeFixtureFrame(&out, body, 1)
+	f.mu.Lock()
+	c := f.live[len(f.live)-1]
+	f.mu.Unlock()
+	_, _ = c.Write(out.Bytes())
+}
+
+func (f *accFixture) requested() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.methods...)
 }
 
 func accTurn(id, status string, items ...any) map[string]any {
@@ -140,6 +166,7 @@ func (f *accFixture) listen() {
 			}
 			f.mu.Lock()
 			f.conns++
+			f.live = append(f.live, c)
 			f.mu.Unlock()
 			go f.serve(c)
 		}
@@ -188,14 +215,33 @@ func (f *accFixture) serve(connection net.Conn) {
 		if json.Unmarshal(b, &q) != nil {
 			return
 		}
+		if q.ID != 0 && q.Method == "" {
+			f.mu.Lock()
+			f.replies++
+			f.mu.Unlock()
+			continue
+		}
 		if q.ID == 0 {
 			continue
 		}
+		f.mu.Lock()
+		f.methods = append(f.methods, q.Method)
+		if q.Method == "thread/resume" {
+			f.resumeParams = q.Params
+		}
+		f.mu.Unlock()
 		var result any = map[string]any{}
 		full := -1
 		switch q.Method {
 		case "initialize":
+			f.mu.Lock()
+			f.initParams = q.Params
+			f.mu.Unlock()
 			result = map[string]string{"userAgent": "fixture"}
+		case "thread/resume":
+			thread := remoteThreadFixture(f.run)
+			thread["thread"].(map[string]any)["status"] = map[string]string{"type": f.status}
+			result = thread
 		case "thread/read":
 			thread := remoteThreadFixture(f.run)
 			thread["thread"].(map[string]any)["status"] = map[string]string{"type": f.status}
@@ -219,6 +265,9 @@ func (f *accFixture) serve(connection net.Conn) {
 		if r == nil {
 			r = &accReply{}
 		}
+		if r.drop {
+			return
+		}
 		for _, notice := range r.pre {
 			body, _ := json.Marshal(notice)
 			if nativeFixtureFrame(connection, body, 1) != nil {
@@ -226,6 +275,9 @@ func (f *accFixture) serve(connection net.Conn) {
 			}
 		}
 		body := r.raw
+		if body == nil && q.Method == "thread/resume" && f.resumeRefused {
+			body = []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32601,"message":"fixture refusal"}}`, q.ID))
+		}
 		if body != nil {
 			body = bytes.ReplaceAll(body, []byte("%ID%"), []byte(fmt.Sprint(q.ID)))
 		}
@@ -259,7 +311,11 @@ type accHarness struct {
 	onSubmit  func()
 	binding   func(call int) error
 	calls     int
-	after     func(t *testing.T)
+	// The pre-effect binding check runs before the single submit; it is
+	// counted apart so post-submit call numbering stays stable.
+	preBinding func() error
+	preCalls   int
+	after      func(t *testing.T)
 }
 
 func newAccHarness(t *testing.T) *accHarness {
@@ -280,6 +336,13 @@ func newAccHarness(t *testing.T) *accHarness {
 	h.acc = &codexAcceptance{root: root, key: key, run: run, pane: "w1:p1", ws: "w1", host: "fixture-host",
 		deadline: time.Now().Add(20 * time.Second), every: 5 * time.Millisecond,
 		binding: func(ctx context.Context) error {
+			if h.submits == 0 {
+				h.preCalls++
+				if h.preBinding != nil {
+					return h.preBinding()
+				}
+				return nil
+			}
 			h.calls++
 			if h.binding != nil {
 				return h.binding(h.calls)

@@ -157,6 +157,7 @@ func (h Host) injectCodexGoal(ctx context.Context, target, goal string, expected
 			if h.codexGoalReadiness(ctx, ready, true).Value != "ready" {
 				return errPromptUnconfirmed
 			}
+			h.Stages.mark(stageMarkReady)
 			native = func(ctx context.Context, sent string, submit func(context.Context) error) error {
 				if _, err := p.observe(ctx); err != nil {
 					return err
