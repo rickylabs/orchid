@@ -43,6 +43,10 @@ type nativeRunRecord struct {
 	Label           string         `json:"label"`
 	Phase           string         `json:"phase"`
 	ObservedAt      string         `json:"observedAt"`
+
+	// Protocol v2. Frozen with the rest of the projection into a completion fence.
+	Launch    *nativeRunInstant `json:"launch,omitempty"`
+	TaskStart *nativeRunInstant `json:"taskStart,omitempty"`
 }
 
 type nativeRunMissing struct {
@@ -147,7 +151,7 @@ func (c *Coord) lookupNativeRuns(queries []nativeRunQuery) nativeRunLookup {
 
 func (s *State) lookupNativeRunsLocked(queries []nativeRunQuery, inbox string) nativeRunLookup {
 	w := s.nativeRuns
-	out := nativeRunLookup{ObservedAt: stamp(time.Now()), Type: "run_lookup", SchemaVersion: 1,
+	out := nativeRunLookup{ObservedAt: stamp(time.Now()), Type: "run_lookup", SchemaVersion: nativeRunSchemaVersion,
 		Records: []nativeRunRecord{}, Missing: []nativeRunMissing{}}
 	if w != nil {
 		w.mu.Lock()
@@ -257,7 +261,7 @@ func validNativeRunPhase(r nativeRunRecord) bool {
 }
 
 func validNativeRunRecord(r nativeRunRecord) bool {
-	if !validNativeRunPhase(r) {
+	if !validNativeRunPhase(r) || !validNativeRunInstant(r.Launch) || !validNativeRunInstant(r.TaskStart) {
 		return false
 	}
 	m := nativeRunLabel.FindStringSubmatch(r.Label)
@@ -318,7 +322,11 @@ func (s *State) nativeRunRecordLocked(n int, j *Job, inbox string) *nativeRunRec
 		Key: strconv.Itoa(n), Issue: issue, DispatchKey: j.DispatchKey, NativeSessionID: native,
 		Agent: j.Agent, Label: j.Label, Phase: "active", SourceCommentID: comment,
 		AgentID: actionOpaque("agent", opaque), AssignmentID: actionOpaque("assignment", opaque),
-		Scope: nativeRunScope{Host: j.Host, Session: j.HerdrScope.Session, Machine: j.HerdrScope.Machine},
+		Scope:  nativeRunScope{Host: j.Host, Session: j.HerdrScope.Session, Machine: j.HerdrScope.Machine},
+		Launch: nativeRunInstantOf(j.SpawnedAt, j.LaunchGeneration),
+	}
+	if j.TaskStart != nil {
+		r.TaskStart = nativeRunInstantOf(j.TaskStart.At, j.TaskStart.Generation)
 	}
 	if !validNativeRunRecord(*r) {
 		return nil

@@ -226,6 +226,9 @@ type journalRecord struct {
 	Turns      []string      `json:"turns,omitempty"`
 	Page       *pageEvidence `json:"page,omitempty"`
 	Outcome    string        `json:"outcome,omitempty"`
+	Method     string        `json:"method,omitempty"` // native signal method
+	Item       string        `json:"item,omitempty"`   // native signal item type
+	Recv       int64         `json:"receiveSeq,omitempty"`
 }
 
 // Append-only contiguous journal. A record is a decision input only after its
@@ -691,14 +694,30 @@ type codexAcceptance struct {
 	fs       acceptanceFS
 	joined   joinedOptions
 	binding  func(context.Context) error // structured occupant/process check; no pane reads
+	// acceptedAt is when this operation certified the first accepted turn; zero until publish succeeds.
+	acceptedAt time.Time
+}
+
+// acceptedInstant is the certified first accepted-turn instant, or zero. nil-safe.
+func (a *codexAcceptance) acceptedInstant() time.Time {
+	if a == nil {
+		return time.Time{}
+	}
+	return a.acceptedAt
 }
 
 type acceptanceRun struct {
-	acc      *codexAcceptance
-	dir      string
-	receipt  deliveryReceipt
-	journal  *deliveryJournal
-	accepted string
+	acc        *codexAcceptance
+	dir        string
+	receipt    deliveryReceipt
+	journal    *deliveryJournal
+	accepted   string
+	signals    *acceptanceSignals
+	stages     *launchStageClock
+	subscribed bool
+	lastClass  string
+	// acceptedAt is sampled where the native evidence certifies the turn, not at any later commit.
+	acceptedAt time.Time
 }
 
 func (a *codexAcceptance) clock() time.Time {
@@ -753,23 +772,98 @@ func (h Host) acceptCodexPrompt(ctx context.Context, a *codexAcceptance, sent st
 	}
 	r.journal = j
 	defer j.close()
+	r.stages = h.Stages
+	r.signals = newAcceptanceSignals(generation, a.run.NativeSessionID)
+	r.signals.onFirstTurn = func() { r.stages.mark(stageMarkFirstTurn) }
+	var rpc *goalRPC
+	// admit classifies one bound signal, commits it with its class, and only
+	// then applies it: a signal is a decision input only once journalled.
+	admit := func(sig nativeSignal, kind string) error {
+		if sig.Thread != a.run.NativeSessionID {
+			return nil // foreign daemon tenants are neither journalled nor decision inputs
+		}
+		sig.Generation, sig.Seq = generation, rpc.lineSeq
+		r.stages.count(stageCountSignals)
+		class, refusal := r.signals.classify(sig)
+		rec := journalRecord{Kind: kind, Method: sig.Method, Turn: sig.Turn, Status: sig.Status, Item: sig.Item, Recv: sig.Seq, Class: string(class)}
+		if refusal != nil {
+			rec.Class = "refused"
+		}
+		if err := j.append(rec); err != nil { // guard:signal-journal-first
+			return deliveryGap("journal")
+		}
+		if refusal != nil {
+			return refusal
+		}
+		r.signals.apply(sig, class)
+		if class == classDuplicate {
+			r.stages.count(stageCountDuplicates)
+		}
+		if wakes(sig) && class != classDuplicate {
+			rpc.wake = true
+		}
+		return nil
+	}
 	notice := func(n remoteNativeTurn) error {
 		if n.ThreadID != a.run.NativeSessionID {
 			return nil
 		}
-		if err := j.append(journalRecord{Kind: "notice", Turn: n.ID, Status: n.Status}); err != nil {
-			return deliveryGap("journal")
+		method := "turn/completed"
+		if n.Status == "inProgress" {
+			method = "turn/started"
+		}
+		if err := admit(nativeSignal{Thread: n.ThreadID, Kind: signalTurn, Method: method, Turn: n.ID, Status: n.Status}, "notice"); err != nil {
+			return err
 		}
 		j.notices = append(j.notices, n)
 		return nil
 	}
+	joined := a.joined
+	joined.signals = func(p *goalRPC) {
+		rpc = p
+		p.onSignal = func(method string, params json.RawMessage) error {
+			sig, ok, err := decodeSignal(method, params)
+			if !ok || err != nil && sig.Thread != "" && sig.Thread != a.run.NativeSessionID {
+				return nil
+			}
+			if err != nil { // guard:signal-strict
+				return err
+			}
+			return admit(sig, "signal")
+		}
+		p.onServerRequest = func(method string, params json.RawMessage) error {
+			if sig, ok := decodeServerRequest(method, params); ok {
+				return admit(sig, "signal")
+			}
+			return nil
+		}
+	}
 	drain := func(m map[string]json.RawMessage) error {
-		if _, response := m["id"]; response {
+		var method string
+		_, response := m["id"]
+		_, request := m["method"]
+		if response && !request || json.Unmarshal(m["method"], &method) != nil {
 			return deliveryGap("drain")
 		}
-		var method string
-		if json.Unmarshal(m["method"], &method) != nil {
-			return deliveryGap("drain")
+		if response { // a server request after the fence: history, never answered
+			sig, ok := decodeServerRequest(method, m["params"])
+			if !ok || sig.Thread != a.run.NativeSessionID {
+				return nil
+			}
+			if err := j.append(journalRecord{Kind: "post-fence", Method: method, Turn: sig.Turn, Class: string(signalApproval)}); err != nil {
+				return deliveryGap("journal")
+			}
+			return nil
+		}
+		if sig, ok, err := decodeSignal(method, m["params"]); ok && sig.Thread == a.run.NativeSessionID {
+			if err != nil {
+				return deliveryGap("drain")
+			}
+			if sig.Kind == signalExit { // guard:drain-exit
+				_ = j.append(journalRecord{Kind: "post-fence", Method: method, Status: sig.Status, Class: "refused"})
+				return deliveryRefused("native-exit")
+			}
+			return nil
 		}
 		if method != "turn/started" && method != "turn/completed" {
 			return nil
@@ -789,7 +883,9 @@ func (h Host) acceptCodexPrompt(ctx context.Context, a *codexAcceptance, sent st
 	}
 	h.RemoteRun = a.run
 	submitted := false
-	err = h.withJoinedCanonicalConnection(ctx, a.run.NativeSessionID, a.joined, notice, func(p *goalRPC) error {
+	err = h.withJoinedCanonicalConnection(ctx, a.run.NativeSessionID, joined, notice, func(p *goalRPC) error {
+		// Closing this connection ends its subscription; the strict joined
+		// drain still owns every frame after the fence.
 		return r.loop(ctx, p, sent, func(ctx context.Context) error {
 			submitted = true
 			return submit(ctx)
@@ -826,12 +922,20 @@ func (r *acceptanceRun) refuse(reason string, journal bool) {
 	}
 }
 
-func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submit func(context.Context) error) error {
-	a, j := r.acc, r.journal
-	// Baseline: native idle thread and an anchored or empty-complete page.
+// keepRefusal keeps a typed refusal raised by a signal during a request;
+// any other request failure becomes the given source gap.
+func keepRefusal(err error, gap error) error {
+	if g, ok := err.(goalError); ok && strings.HasPrefix(string(g), "delivery-unconfirmed-") { // guard:keep-signal-refusal
+		return err
+	}
+	return gap
+}
+
+// idleThread requires the native thread status idle (loaded, no turn).
+func idleThread(p *goalRPC) error {
 	raw, err := p.request("thread/read", map[string]any{"threadId": p.thread, "includeTurns": false})
 	if err != nil {
-		return deliveryGap("baseline")
+		return keepRefusal(err, deliveryGap("baseline"))
 	}
 	threadObj, ok := nativeObject(raw, "thread")
 	threadFields, ok2 := nativeObject(threadObj["thread"], "status")
@@ -843,9 +947,78 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 	if kind != "idle" { // guard:baseline-idle
 		return deliveryRefused("baseline-active")
 	}
-	raw, err = p.request("thread/turns/list", map[string]any{"threadId": p.thread, "limit": acceptancePageK, "sortDirection": "desc", "itemsView": "notLoaded"})
+	return nil
+}
+
+// subscribe rejoins the running prepared thread through the official
+// thread/resume (excludeTurns) so its signals reach this generation. The
+// response must still carry the exact prepared binding. A refusal is the
+// named missing capability: bounded polling continues, nothing is invented.
+// Codex has no running-only resume: a thread unloaded since the idle read is
+// cold-loaded here (docs/native-attachment.md, accepted debt).
+func (r *acceptanceRun) subscribe(p *goalRPC) error {
+	raw, err := p.request("thread/resume", map[string]any{"threadId": p.thread, "excludeTurns": true}) // guard:official-subscription
+	if err == goalError("goal-daemon-refused") {
+		if r.journal.append(journalRecord{Kind: "subscription", Outcome: codexResumeRefused}) != nil {
+			return deliveryGap("journal")
+		}
+		return nil
+	}
 	if err != nil {
-		return deliveryGap("baseline")
+		return keepRefusal(err, deliveryGap("subscription"))
+	}
+	if decodeRemoteThread(raw, r.acc.run, false) != nil { // guard:subscription-binding
+		return deliveryRefused("binding-changed")
+	}
+	if r.journal.append(journalRecord{Kind: "subscription", Outcome: "subscribed"}) != nil {
+		return deliveryGap("journal")
+	}
+	r.subscribed = true
+	r.stages.mark(stageMarkSubscribed)
+	return nil
+}
+
+// bindingRefused keeps the typed attachment outcome of a binding failure.
+func (r *acceptanceRun) bindingRefused(err error) error {
+	o := attachmentOutcomeOf(err)
+	if o == "" {
+		o = attachmentConsumerChanged
+	}
+	_ = r.journal.append(journalRecord{Kind: "binding", Class: string(o)})
+	if o == attachmentProcessReused { // guard:binding-typed
+		return deliveryRefused("process-reused")
+	}
+	return deliveryRefused("binding-changed")
+}
+
+// pending journals a change of typed pending class.
+func (r *acceptanceRun) pending(class string) error {
+	if class == r.lastClass {
+		return nil
+	}
+	r.lastClass = class
+	if r.journal.append(journalRecord{Kind: "pending", Class: class}) != nil {
+		return deliveryGap("journal")
+	}
+	return nil
+}
+
+func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submit func(context.Context) error) error {
+	a, j := r.acc, r.journal
+	// Baseline: native idle thread, the official subscription, idle again,
+	// and an anchored or empty-complete page.
+	if err := idleThread(p); err != nil {
+		return err
+	}
+	if err := r.subscribe(p); err != nil {
+		return err
+	}
+	if err := idleThread(p); err != nil {
+		return err
+	}
+	raw, err := p.request("thread/turns/list", map[string]any{"threadId": p.thread, "limit": acceptancePageK, "sortDirection": "desc", "itemsView": "notLoaded"})
+	if err != nil {
+		return keepRefusal(err, deliveryGap("baseline"))
 	}
 	page, err := decodeTurnPage(raw, false)
 	if err != nil {
@@ -858,6 +1031,7 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 	if err := j.append(journalRecord{Kind: "baseline", Page: &page}); err != nil {
 		return deliveryGap("journal")
 	}
+	r.stages.mark(stageMarkBaseline)
 	// 3: attempted, fully durable, before the effect.
 	next := r.receipt
 	next.State, next.Baseline = "attempted", base
@@ -868,16 +1042,59 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 		return deliveryRefused("receipt")
 	}
 	r.receipt = next
+	r.stages.mark(stageMarkAttempted)
 	if a.expired(ctx) {
 		return deliveryRefused("deadline")
 	}
-	// 4: the single effect. A failed or lost acknowledgement is terminal.
-	if err := submit(ctx); err != nil { // guard:lost-ack
+	// The consumer may have changed since attachment: check it immediately
+	// before the effect. A mismatch here means zero submits.
+	if err := a.binding(ctx); err != nil { // guard:pre-effect-binding
+		return r.bindingRefused(err)
+	}
+	// Barrier: every frame already received is reduced before the effect, so
+	// a turn, active status, approval or exit that arrived during the binding
+	// check or the receipt write refuses with zero submits.
+	if err := p.drainThrough(p.pump.received.Load()); err != nil { // guard:pre-effect-barrier
+		return keepRefusal(err, deliveryGap("barrier"))
+	}
+	if a.expired(ctx) {
+		return deliveryRefused("deadline")
+	}
+	// 4: the single effect, multiplexed with frame consumption so native
+	// evidence that precedes its acknowledgment is journalled in order. A
+	// failed or lost acknowledgement is terminal whatever arrived first.
+	r.signals.begin(p.lineSeq)
+	opErr, frameErr := p.whileWaiting(ctx, func() error { return submit(ctx) })
+	r.signals.ack(p.pump.received.Load())
+	if opErr != nil { // guard:lost-ack
 		return deliveryRefused("submit-uncertain")
+	}
+	if frameErr != nil {
+		return frameErr
+	}
+	r.stages.mark(stageMarkSubmitAcked)
+	wakesLeft := acceptanceMaxWakes
+	pause := func(class string) error {
+		if err := r.pending(class); err != nil {
+			return err
+		}
+		woke, err := p.awaitWake(ctx, a.every, wakesLeft > 0) // guard:event-wake
+		if err != nil {
+			return err
+		}
+		if woke {
+			wakesLeft--
+			r.stages.count(stageCountWakes)
+		}
+		if ctx.Err() != nil {
+			return deliveryRefused("deadline")
+		}
+		return nil
 	}
 	// Decode strictly, commit the complete evidence, then decide only from
 	// the committed copy.
 	read := func(kind string) (pageEvidence, int, error) {
+		r.stages.count(stageCountPageReads)
 		raw, err := p.request("thread/turns/list", map[string]any{"threadId": p.thread, "limit": acceptancePageK, "sortDirection": "desc", "itemsView": "full"})
 		if err != nil {
 			return pageEvidence{}, 0, err
@@ -910,8 +1127,12 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 			return err
 		}
 		if n == 0 { // VALID-PENDING: the only retryable state
-			if !goalSleep(ctx, a.every) {
-				return deliveryRefused("deadline")
+			class := pendingNoTurn
+			if r.signals.firstTurn != "" {
+				class = pendingReadback // native acceptance is ahead of the readback
+			}
+			if err := pause(class); err != nil {
+				return err
 			}
 			continue
 		}
@@ -921,8 +1142,8 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 		t := page.Turns[0]
 		// The app-server lists a new turn before its user message item: still pending.
 		if t.Status == "inProgress" && t.Items == 0 { // guard:candidate-materializing
-			if !goalSleep(ctx, a.every) {
-				return deliveryRefused("deadline")
+			if err := pause(pendingMaterializing); err != nil {
+				return err
 			}
 			continue
 		}
@@ -932,8 +1153,11 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 		if err := reconcile(t.ID); err != nil {
 			return err
 		}
+		if !r.signals.candidate(t.ID) { // guard:signal-candidate
+			return deliveryRefused("contradiction")
+		}
 		if err := a.binding(ctx); err != nil { // step 2
-			return deliveryRefused("binding-changed")
+			return r.bindingRefused(err)
 		}
 		fence, fn, err := read("fence") // guard:fence
 		if err != nil {
@@ -945,13 +1169,17 @@ func (r *acceptanceRun) loop(ctx context.Context, p *goalRPC, sent string, submi
 		if err := reconcile(t.ID); err != nil { // guard:final-reconcile
 			return err
 		}
+		if !r.signals.candidate(t.ID) {
+			return deliveryRefused("contradiction")
+		}
 		if err := a.binding(ctx); err != nil { // guard:binding-recheck
-			return deliveryRefused("binding-changed")
+			return r.bindingRefused(err)
 		}
 		if a.expired(ctx) {
 			return deliveryRefused("deadline")
 		}
-		r.accepted = t.ID
+		r.accepted, r.acceptedAt = t.ID, a.clock()
+		r.stages.mark(stageMarkAccepted)
 		return nil
 	}
 }
@@ -1007,5 +1235,6 @@ func (r *acceptanceRun) publish(ctx context.Context) error {
 		_ = j.append(journalRecord{Kind: "outcome", Outcome: "late"})
 		return deliveryRefused("deadline")
 	}
+	a.acceptedAt = r.acceptedAt // guard:task-start-certified only a published, on-time acceptance
 	return nil
 }

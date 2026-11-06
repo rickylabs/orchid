@@ -211,6 +211,9 @@ func nativeRunFrame(t *testing.T, line []byte) any {
 func TestNativeRunSchemaMatchesSocketOutput(t *testing.T) {
 	c, _, socket := nativeRunSocketFixture(t)
 	c.st.mu.Lock()
+	// Version 2 instants: 701 carries a launch and a first task start; 702 is unclocked.
+	c.st.Jobs[701].SpawnedAt, c.st.Jobs[701].LaunchGeneration = time.Now().Add(-time.Minute), clockGenerationA
+	c.st.Jobs[701].TaskStart = &clockedInstant{At: time.Now(), Generation: clockGenerationA}
 	completed := c.st.nativeRunRecordLocked(701, c.st.Jobs[701], c.cfg.Inbox)
 	completed.Phase, completed.ObservedAt = "completed", stamp(time.Now())
 	completed.CompletedAt = completed.ObservedAt
@@ -280,6 +283,9 @@ func TestNativeRunSchemaMatchesSocketOutput(t *testing.T) {
 	if json.Unmarshal(line, &lookup) != nil || len(lookup.Result.Records) != 2 || lookup.Result.Records[0].Phase != "completed" {
 		t.Fatal("fixture did not produce a completed record", string(line))
 	}
+	if r := lookup.Result.Records[0]; r.Launch == nil || r.TaskStart == nil || lookup.Result.Records[1].Launch != nil {
+		t.Fatal("fixture did not produce clocked and unclocked records", string(line))
+	}
 	for i, frame := range frames {
 		if !schema.ok(root, nativeRunFrame(t, frame)) {
 			t.Fatalf("socket frame %d does not match the published schema: %s", i, frame)
@@ -292,6 +298,19 @@ func TestNativeRunSchemaMatchesSocketOutput(t *testing.T) {
 		func(m map[string]any) { delete(nativeRunFirstRecord(m), "scope") },
 		func(m map[string]any) { nativeRunFirstRecord(m)["phase"] = "idle" },
 		func(m map[string]any) { m["result"].(map[string]any)["revision"] = float64(1 << 54) },
+		func(m map[string]any) { m["result"].(map[string]any)["schemaVersion"] = float64(1) },
+		func(m map[string]any) { nativeRunFirstRecord(m)["launch"].(map[string]any)["extra"] = true },
+		func(m map[string]any) { delete(nativeRunFirstRecord(m)["launch"].(map[string]any), "generation") },
+		func(m map[string]any) {
+			nativeRunFirstRecord(m)["launch"].(map[string]any)["at"] = "2026-11-02T08:30:15.123456Z"
+		},
+		func(m map[string]any) {
+			nativeRunFirstRecord(m)["taskStart"].(map[string]any)["at"] = "2026-11-02T08:30:15.123+01:00"
+		},
+		func(m map[string]any) {
+			nativeRunFirstRecord(m)["taskStart"].(map[string]any)["generation"] = "fixture-generation"
+		},
+		func(m map[string]any) { nativeRunFirstRecord(m)["launchedAt"] = "2026-11-02T08:30:15.123Z" },
 	} {
 		m := nativeRunFrame(t, frames[1]).(map[string]any)
 		drift(m)

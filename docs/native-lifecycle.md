@@ -26,6 +26,9 @@ prompt digest and delivery receipt checks remain authoritative for its managed
 Remote Control transport.
 
 Codex readiness and delivery no longer read its composer or trust-dialog text.
+The Codex TUI attachment proof, its named upstream gaps, the acceptance
+generation's official signals and the per-launch stage evidence are described in
+[Codex launch attachment and turn acceptance](native-attachment.md).
 Uncertain delivery never sends an extra Enter or repeats the prompt. Other
 vendor adapters retain their existing native receipts and completion fences.
 
