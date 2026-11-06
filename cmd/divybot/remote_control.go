@@ -202,13 +202,13 @@ func (h Host) remoteProof(ctx context.Context, kind, label string, r *remoteCont
 				return true, nil // guard:claude-proof-native-only
 			}
 			var connected bool
+			readTUI := func(ctx context.Context) (*remoteTUIProcess, error) { return h.remoteTUIProcess(ctx, location.PaneID) }
 			if err := h.remoteAttachedStatus(ctx, label, r, location); err != nil {
 				return false, err
 			}
 			if r.IdentitySource == "codex-native-status" {
-				current, e := h.remoteTUIProcess(ctx, location.PaneID)
-				if e != nil || r.TUIProcess == nil || *current != *r.TUIProcess {
-					return false, goalError("remote-control-identity-unconfirmed")
+				if e := checkTUIProcess(ctx, readTUI, r.TUIProcess); e != nil {
+					return false, e
 				}
 			}
 			err := h.withCanonicalConnection(ctx, r.NativeSessionID, func(p *goalRPC) error {
@@ -222,9 +222,8 @@ func (h Host) remoteProof(ctx context.Context, kind, label string, r *remoteCont
 				return nil
 			})
 			if r.IdentitySource == "codex-native-status" {
-				current, e := h.remoteTUIProcess(ctx, location.PaneID)
-				if e != nil || r.TUIProcess == nil || *current != *r.TUIProcess {
-					return false, goalError("remote-control-identity-unconfirmed")
+				if e := checkTUIProcess(ctx, readTUI, r.TUIProcess); e != nil {
+					return false, e
 				}
 			}
 			return connected, err

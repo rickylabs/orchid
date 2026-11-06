@@ -596,13 +596,14 @@ func TestAcceptanceJoinedFinalization(t *testing.T) {
 
 // End-mode EOF drain: a close frame still pending when stdin ends is drained
 // and refused. The fixture bridge stops reading the socket after the fence
-// response (6 forwarded responses), so the frame is pending at the EOF.
+// response (8 forwarded responses, including the subscription and its idle
+// re-read), so the frame is pending at the EOF.
 func TestAcceptanceEOFDrainsPendingClose(t *testing.T) {
 	old := "  ready,_,_=select.select([s,sys.stdin],[],[],10)"
 	if strings.Count(canonicalCodexBridge, old) != 1 || strings.Count(canonicalCodexBridge, " def forward(body):\n") != 1 {
 		t.Fatal("bridge fixture anchor drifted")
 	}
-	bridge := strings.Replace(canonicalCodexBridge, old, "  ready,_,_=select.select([s,sys.stdin] if FWD[0]<6 else [sys.stdin],[],[],10)", 1)
+	bridge := strings.Replace(canonicalCodexBridge, old, "  ready,_,_=select.select([s,sys.stdin] if FWD[0]<8 else [sys.stdin],[],[],10)", 1)
 	bridge = strings.Replace(bridge, " def forward(body):\n", " def forward(body):\n  FWD[0]+=1\n", 1)
 	bridge = strings.Replace(bridge, "def run():", "FWD=[0]\ndef run():", 1)
 	for _, pending := range []bool{false, true} {
