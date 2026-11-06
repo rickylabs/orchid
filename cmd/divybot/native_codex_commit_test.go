@@ -274,10 +274,10 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 		before := f.bytes()
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if f.c.commitRemoteCodexDelivery(ctx, future, f.j) == nil || !bytes.Equal(before, f.bytes()) || tuple(f.j) != pendingTuple || !goalDeliveryUnconfirmed(f.restart()) {
+		if f.c.commitRemoteCodexDelivery(ctx, future, f.j, time.Time{}) == nil || !bytes.Equal(before, f.bytes()) || tuple(f.j) != pendingTuple || !goalDeliveryUnconfirmed(f.restart()) {
 			t.Fatal("C3 refusal wrote or confirmed")
 		}
-		if f.c.commitRemoteCodexDelivery(context.Background(), time.Now().Add(-time.Second), f.j) == nil {
+		if f.c.commitRemoteCodexDelivery(context.Background(), time.Now().Add(-time.Second), f.j, time.Time{}) == nil {
 			t.Fatal("expired C3 committed")
 		}
 	})
@@ -285,7 +285,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 		f := newCommitFixture(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		f.c.st.fs = &stateFS{hold: func(string) { cancel() }}
-		if err := f.c.commitRemoteCodexDelivery(ctx, future, f.j); err != nil {
+		if err := f.c.commitRemoteCodexDelivery(ctx, future, f.j, time.Time{}); err != nil {
 			t.Fatalf("on-time C3 refused after its write: %v", err)
 		}
 		if tuple(f.j) != committedTuple || tuple(f.restart()) != committedTuple || !deliveryConfirmed(f.restart()) || goalDeliveryUnconfirmed(f.restart()) {
@@ -303,7 +303,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 			} else {
 				f.c.st.fs.rename = func(string, string) error { return fail }
 			}
-			if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j) == nil || !bytes.Equal(before, f.bytes()) {
+			if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{}) == nil || !bytes.Equal(before, f.bytes()) {
 				t.Fatal("pre-rename failure committed")
 			}
 			if tuple(f.j) != pendingTuple {
@@ -325,7 +325,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 		f.c.st.fs = &stateFS{syncDir: func(*os.File) error { return errors.New("injected") }}
 		var logs bytes.Buffer
 		restore := accCaptureLog(&logs)
-		err := f.c.commitRemoteCodexDelivery(context.Background(), future, f.j)
+		err := f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{})
 		restore()
 		if err != nil || tuple(f.j) != committedTuple || tuple(f.restart()) != committedTuple || !strings.Contains(logs.String(), "delivery-commit-durability-uncertain") {
 			t.Fatal("renamed commit with uncertain durability not committed")
@@ -340,7 +340,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 		f.c.st.fs = &stateFS{hold: func(string) { panic("crash") }}
 		func() {
 			defer func() { _ = recover() }()
-			_ = f.c.commitRemoteCodexDelivery(context.Background(), future, f.j)
+			_ = f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{})
 		}()
 		if _, err := os.Stat(f.path + ".tmp"); err != nil {
 			t.Fatal("crash fixture left no temp file")
@@ -359,7 +359,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 	t.Run("refused-then-blocking-saves-fail", func(t *testing.T) {
 		f := newCommitFixture(t)
 		f.c.st.fs = &stateFS{syncFile: func(*os.File) error { return errors.New("injected") }}
-		if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j) == nil {
+		if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{}) == nil {
 			t.Fatal("refused commit succeeded")
 		}
 		f.c.blockGoalDelivery(7, f.j)
@@ -369,7 +369,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 	})
 	t.Run("on-time-positive", func(t *testing.T) {
 		f := newCommitFixture(t)
-		if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j) != nil || goalDeliveryUnconfirmed(f.j) {
+		if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{}) != nil || goalDeliveryUnconfirmed(f.j) {
 			t.Fatal("on-time commit refused")
 		}
 		r := f.restart()
@@ -396,7 +396,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 			}
 			return file.Sync()
 		}}
-		if err := f.c.commitRemoteCodexDelivery(context.Background(), future, f.j); err != nil || calls != 1 {
+		if err := f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{}); err != nil || calls != 1 {
 			t.Fatalf("commit was not a single save: err=%v saves=%d", err, calls)
 		}
 		if r := f.restart(); tuple(r) != committedTuple {
@@ -407,7 +407,7 @@ func TestRemoteCodexCommitTransaction(t *testing.T) {
 		f := newCommitFixture(t)
 		before := f.bytes()
 		f.j.NativeGoal = nil
-		if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j) == nil || !bytes.Equal(before, f.bytes()) || f.j.GoalDelivery != "pending" {
+		if f.c.commitRemoteCodexDelivery(context.Background(), future, f.j, time.Time{}) == nil || !bytes.Equal(before, f.bytes()) || f.j.GoalDelivery != "pending" {
 			t.Fatal("nil native goal committed")
 		}
 	})

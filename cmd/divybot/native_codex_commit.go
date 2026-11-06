@@ -48,9 +48,10 @@ type stateSaveError struct {
 func (e stateSaveError) Error() string { return e.err.Error() }
 
 // The RC Codex delivery commit. C3 is the single linearization point: an
-// on-time decision recorded by one save of three fields. Nothing after C3 can
+// on-time decision recorded by one save of three fields, plus the certified
+// first accepted-turn instant when none is recorded yet. Nothing after C3 can
 // refuse; a failure before the rename restores every field under the lock.
-func (c *Coord) commitRemoteCodexDelivery(ctx context.Context, deadline time.Time, j *Job) error {
+func (c *Coord) commitRemoteCodexDelivery(ctx context.Context, deadline time.Time, j *Job, accepted time.Time) error {
 	if ctx.Err() != nil || !time.Now().Before(deadline) { // guard:c3
 		return errPromptUnconfirmed
 	}
@@ -60,14 +61,17 @@ func (c *Coord) commitRemoteCodexDelivery(ctx context.Context, deadline time.Tim
 		return errPromptUnconfirmed
 	}
 	priorDelivery, priorCommit := j.GoalDelivery, j.GoalDeliveryCommit
+	priorTaskStart := j.TaskStart
 	priorPrompt := j.NativeGoal.PromptConfirmed
 	j.GoalDelivery, j.GoalDeliveryCommit = "confirmed", deliveryCommitMark
 	j.NativeGoal.PromptConfirmed = true
+	c.recordTaskStartLocked(j, accepted)
 	err := c.st.saveLocked()
 	var saved stateSaveError
 	if err != nil && !(errors.As(err, &saved) && saved.afterRename) { // guard:before-rename
 		j.GoalDelivery, j.GoalDeliveryCommit = priorDelivery, priorCommit
 		j.NativeGoal.PromptConfirmed = priorPrompt
+		j.TaskStart = priorTaskStart
 		return errPromptUnconfirmed
 	}
 	if err != nil {

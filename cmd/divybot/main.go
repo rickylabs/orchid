@@ -373,7 +373,12 @@ type Job struct {
 	Goal                    string                   `json:"goal"`
 	PR                      int                      `json:"pr"`
 	SpawnedAt               time.Time                `json:"spawned_at"`
-	LastPoke                time.Time                `json:"last_poke"`
+	// LaunchGeneration is the source generation whose clock sampled SpawnedAt at registration;
+	// empty for adopted and legacy jobs, whose SpawnedAt is not a launch instant.
+	LaunchGeneration string `json:"launch_generation,omitempty"`
+	// TaskStart is the first certified accepted-turn instant (RC Codex native acceptance), set once.
+	TaskStart *clockedInstant `json:"task_start,omitempty"`
+	LastPoke  time.Time       `json:"last_poke"`
 	// FanoutNudgedAt is when we nudged this job's worker (on its PR merge) to fan
 	// out remaining work into sibling inbox issues. Teardown is deferred until the
 	// worker files a sibling stub or fanoutGraceWindow elapses — a single tick is
@@ -3706,6 +3711,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 		j.Deadline = time.Now().Add(45 * time.Minute)
 	}
 	c.st.mu.Lock()
+	c.recordLaunchClockLocked(j) // guard:launch-clock after registration, before goal delivery
 	c.st.Jobs[n] = j
 	delete(c.st.LaunchBlocks, n)
 	if err := c.st.saveLocked(); err != nil {
@@ -3772,7 +3778,7 @@ func (c *Coord) spawn(ctx context.Context, n int, is Issue, host Host, agent str
 		var confirmErr error
 		if remoteCodex {
 			deadline, _ := gctx.Deadline()
-			confirmErr = c.commitRemoteCodexDelivery(gctx, deadline, j)
+			confirmErr = c.commitRemoteCodexDelivery(gctx, deadline, j, host.Acceptance.acceptedInstant())
 		} else {
 			confirmErr = c.confirmGoalDelivery(gctx, j) // guard:confirm-caller
 		}
