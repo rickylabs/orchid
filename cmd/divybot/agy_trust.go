@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -72,6 +73,15 @@ func (h Host) prepareAGYTrustAt(ctx context.Context, cwd, root string, retained 
 		if unreadable {
 			return nil, agySettingsUnreadable
 		}
+	}
+	// The CLI's own typed onboarding flag replaces the removed screen check. An
+	// incomplete or unproven cache refuses here, before any workspace or agent.
+	cache, err := h.agyTrustCommand(ctx, "exec head -c "+strconv.Itoa(agyOnboardingMax+1)+" "+shq(onboarding)+" 2>/dev/null")
+	if err != nil {
+		cache = nil // a missing or unreadable cache is unproven
+	}
+	if err := agyOnboardingComplete(cache); err != nil {
+		return nil, err
 	}
 	raw, err := h.agyTrustCommand(ctx, "exec head -c 1048577 "+shq(settings)+" 2>/dev/null")
 	if err != nil {
@@ -151,69 +161,4 @@ func agyScopedSettings(raw []byte, cwd string) ([]byte, error) {
 	}
 	settings["trustedWorkspaces"], _ = json.Marshal([]string{cwd})
 	return json.Marshal(settings)
-}
-
-func agyStartupBlocker(screen string) bool {
-	if len(screen) == 0 || len(screen) > 64*1024 || !utf8.ValidString(screen) {
-		return false
-	}
-	text := strings.Join(strings.Fields(screen), " ")
-	trust := []string{"Accessing workspace:", "Do you trust the contents of this project?", "requires permission to read, edit, and execute files here.", "Confirm", "n / esc"}
-	login := []string{"Welcome to the Antigravity CLI.", "not signed in.", "Select login method:", "1. Google OAuth", "2. Use a Google Cloud project", "enter Select"}
-	onboarding := []string{"Welcome to Antigravity CLI!", "Choose your color scheme:", "colorblind-friendly light"}
-	for _, markers := range [][]string{trust, login, onboarding} {
-		found := true
-		for _, marker := range markers {
-			found = found && strings.Contains(text, marker)
-		}
-		if found {
-			return true
-		}
-	}
-	return false
-}
-
-// Installed 1.2.14 StatusLineModel.RenderBuiltIn (statusline.go:61) renders
-// this hint behind the idle/overlay guards. Require positive composer evidence
-// as well as Herdr readiness: its manifest marks first-run dialogs idle too.
-// Custom status lines or unfamiliar native versions fail closed.
-func agyStartupComposer(screen string) bool {
-	return len(screen) > 0 && len(screen) <= 64*1024 && utf8.ValidString(screen) &&
-		strings.Contains(strings.Join(strings.Fields(screen), " "), "? for shortcuts")
-}
-
-// Herdr's current AGY manifest reports idle/ready even on the sign-in screen.
-// Inspect only this freshly registered occupant before any goal can be sent.
-// A remaining trust/auth dialog is blocked; uncertain ownership/readiness fails
-// registration. The same bounded diagnostic refines a native startup timeout.
-func (h Host) agyRegistrationCheck(ctx context.Context, label, cwd, pane, ws string, registered bool) error {
-	unknown := func() error { return registrationFailure("", ctx.Err()) }
-	before, err := h.agentInfoOf(ctx, pane)
-	if err != nil || !agyStartupOccupant(before, label, cwd, pane, ws, registered) {
-		return unknown()
-	}
-	screen, err := h.visiblePromptScreen(ctx, pane)
-	if err != nil || strings.TrimSpace(screen) == "" || len(screen) > 64*1024 || !utf8.ValidString(screen) {
-		return unknown()
-	}
-	after, err := h.agentInfoOf(ctx, pane)
-	if err != nil || !agyStartupOccupant(after, label, cwd, pane, ws, registered) || before.Name != after.Name || before.StateChangeSeq != after.StateChangeSeq {
-		return unknown()
-	}
-	if ctx.Err() != nil {
-		return unknown()
-	}
-	if agyStartupBlocker(screen) || after.AgentStatus == "blocked" {
-		return &agentRegistrationFailure{kind: "startup_blocked"}
-	}
-	if registered && after.AgentStatus == "idle" && after.InteractiveReady && agyStartupComposer(screen) {
-		return nil
-	}
-	return unknown()
-}
-
-func agyStartupOccupant(a AgentInfo, label, cwd, pane, ws string, registered bool) bool {
-	return a.Agent == "agy" && a.PaneID == pane && a.WorkspaceID == ws && a.Cwd == cwd &&
-		(a.Name == label || (!registered && a.Name == "")) &&
-		(a.AgentStatus == "idle" || a.AgentStatus == "unknown" || a.AgentStatus == "blocked")
 }

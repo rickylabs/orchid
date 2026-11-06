@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -97,29 +96,6 @@ func deliverCodexPrompt(ctx context.Context, expected AgentInfo, goal string, d 
 		}
 	}
 	return errPromptUnconfirmed
-}
-
-// Herdr0.9.1 formats read output as plain text. Older adapters/fixtures may
-// expose result.text. Failed/malformed JSON envelopes never become screen proof.
-func (h Host) visiblePromptScreen(ctx context.Context, target string) (string, error) {
-	out, err := h.herdr(ctx, "pane", "read", target, "--source", "visible", "--lines", "60", "--format", "text")
-	if err != nil || len(out) > 64*1024 {
-		return "", errPromptUnconfirmed
-	}
-	if strings.HasPrefix(strings.TrimSpace(out), "{") {
-		raw, err := herdrUnwrap(out)
-		if err != nil {
-			return "", errPromptUnconfirmed
-		}
-		var r struct {
-			Text *string `json:"text"`
-		}
-		if json.Unmarshal(raw, &r) != nil || r.Text == nil {
-			return "", errPromptUnconfirmed
-		}
-		return *r.Text, nil
-	}
-	return out, nil
 }
 
 func (h Host) promptSnapshot(ctx context.Context, target string) (promptSnapshot, error) {

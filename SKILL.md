@@ -192,7 +192,9 @@ divybot re-adopts them by label on its next tick. Use systemctl, **never `pkill`
   # write that JSON to the coordinator's ~/.claude/.credentials.json, then:
   ssh <coordinator> "sudo systemctl restart orchid"
   ```
-  Then close/respawn the workers that died looping on 401.
+  Then close/respawn the workers that died looping on 401. divybot itself only
+  reacts to typed native auth events (`native auth failure source=...` in logs):
+  it resyncs creds and notifies once per event, never from terminal text.
 - **Workers not spawning, issues open.** Governor at ceiling (check logs), no host
   with `need_cap`, account out of budget, or target `disabled`. Confirm with the
   state file + `herdr agent list` per host.

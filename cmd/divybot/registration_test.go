@@ -71,7 +71,7 @@ elif args[:2]==['agent','start'] and '--kind' in args and args[args.index('--kin
   print(json.dumps({'error':{'code':'timeout','message':'synthetic auth reference missing'}}));sys.exit(1)
  onboarding=settings.parent/'cache'/'onboarding.json'
  expectedOnboarding=expected.parent/'cache'/'onboarding.json'
- if not onboarding.is_symlink() or onboarding.resolve()!=expectedOnboarding.resolve() or json.loads(onboarding.read_text()).get('consumerOnboardingComplete')!=True:
+ if not onboarding.is_symlink() or onboarding.resolve()!=expectedOnboarding.resolve() or json.loads(onboarding.read_text()).get('onboardingComplete')!=True:
   print(json.dumps({'error':{'code':'timeout','message':'synthetic onboarding reference missing'}}));sys.exit(1)
  if mode in ['agy-timeout','agy-timeout-unknown','agy-timeout-name-changed']:
   print(json.dumps({'error':{'code':'timeout','message':'PRIVATE-AGY-CANARY'}}));sys.exit(1)
@@ -101,6 +101,7 @@ elif args[:2]==['pane','read'] and any(a[:2]==['agent','start'] and '--kind' in 
  elif mode=='agy-login':print('Welcome to the Antigravity CLI. You are currently\nnot signed in.\nSelect login method:\n > 1. Google OAuth\n 2. Use a Google Cloud project\n ↑/↓ Navigate · enter Select')
  elif mode in ['agy-trust','agy-timeout','agy-timeout-name-changed']:print('Accessing workspace:\n/fixture/PRIVATE-AGY-CANARY\nDo you trust the contents of this project?\nAntigravity requires permission to read, edit, and execute files here.\nConfirm · n / esc')
  elif mode=='agy-unknown-screen':print('PRIVATE-AGY-CANARY unfamiliar startup dialog')
+ elif mode=='agy-localized':print('Antigravity\n > \n ? für Tastenkürzel')
  else:print('Antigravity\n > \n ? for shortcuts')
 elif args[:2]==['agent','start'] and mode=='needs-trust':
  native=args[args.index('--')+1:]
@@ -187,7 +188,7 @@ func TestRegistrationBeforeGoalUsesExactPaneAndConfiguredArgv(t *testing.T) {
 			got := calls()
 			wantCalls := 4
 			if kind == "agy" {
-				wantCalls = 7 // Exact occupant checks, followed by display metadata.
+				wantCalls = 5 // One exact occupant read, never a screen read, then display metadata.
 			}
 			if len(got) != wantCalls {
 				t.Fatalf("wanted workspace, environment, registration; got %d calls", len(got))

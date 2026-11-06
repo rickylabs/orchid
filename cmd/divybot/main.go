@@ -408,6 +408,12 @@ type Job struct {
 	// Persisted, so a restart neither resets nor accelerates the bound.
 	LastStopMissAt time.Time `json:"last_stop_miss_at,omitempty"`
 	StopMisses     int       `json:"stop_misses,omitempty"`
+	// AuthSignal fences the last typed native auth event acted on; the in-memory
+	// pair debounces auth reads to native state changes (vendor_auth.go).
+	AuthSignal      string `json:"auth_signal,omitempty"`
+	authObserved    bool
+	authObservedSeq [3]uint64
+	authObservedAt  time.Time
 }
 
 type State struct {
@@ -993,10 +999,10 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 		args = append(args, nativeArgs...)
 		out, e := h.herdr(ctx, args...)
 		if e != nil {
-			// Native facts first, before any screen-based refinement or cleanup.
+			// Native Herdr facts only; no vendor screen refines a start failure.
 			attempt.herdrStartError(out)
 			attempt.contextEnded(ctx)
-			return pane, ws, matrixSite("spawn.agent-start", h.registrationStartFailure(ctx, out, agent, label, cwd, pane, ws))
+			return pane, ws, matrixSite("spawn.agent-start", registrationFailure(out, ctx.Err()))
 		}
 		raw, e := herdrUnwrap(out)
 		if e == nil {
@@ -1015,7 +1021,7 @@ func (h Host) spawnAgent(ctx context.Context, label, cwd string, env map[string]
 			return pane, ws, matrixSite("spawn.agent-envelope", registrationFailure(out, ctx.Err()))
 		}
 		if agent == "agy" {
-			if e := h.agyRegistrationCheck(ctx, label, cwd, pane, ws, true); e != nil {
+			if e := h.agyRegistrationCheck(ctx, label, cwd, pane, ws); e != nil {
 				return pane, ws, matrixSite("spawn.agy-readiness", e)
 			}
 		}
@@ -1160,19 +1166,6 @@ func (h Host) injectGoal(ctx context.Context, target, goal string, native bool) 
 		}
 		return awaitNativePrompt(ctx, before, p.observe, p.wait)
 	})
-}
-
-func (h Host) read(ctx context.Context, target string, lines int) string {
-	out, _ := h.herdr(ctx, "agent", "read", target, "--source", "recent", "--lines", strconv.Itoa(lines), "--format", "text")
-	if raw, err := herdrUnwrap(out); err == nil {
-		var r struct {
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(raw, &r) == nil && r.Text != "" {
-			return r.Text
-		}
-	}
-	return out
 }
 
 func (h Host) closeWorkspace(ctx context.Context, ws string) error {
@@ -2934,6 +2927,7 @@ type agentRef struct {
 	Workspace      string // teardown handle
 	StateChangeSeq uint64
 	CompletionSeq  uint64
+	VendorSeq      uint64 // bound vendor hook receipt sequence, a native event cursor (vendor_auth.go)
 }
 
 // A completed herdr turn remains a warm, supervised job. It no longer consumes
@@ -3024,7 +3018,7 @@ func (c *Coord) fleetStatus(ctx context.Context) (map[int]agentRef, map[string]b
 			if n == 0 {
 				continue
 			}
-			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Cwd: a.Cwd, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq}
+			ref := agentRef{HerdrScope: h.herdrScope(), TerminalID: a.TerminalID, Host: h.Name, Cwd: a.Cwd, Agent: a.Agent, Status: a.AgentStatus, Pane: a.PaneID, Workspace: a.WorkspaceID, StateChangeSeq: a.StateChangeSeq, CompletionSeq: a.CompletionSeq, VendorSeq: agentVendorSeq(a)}
 			if j := jobs[n]; j != nil {
 				if !jobRefMatches(ref, j) {
 					continue
@@ -3950,22 +3944,9 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		return
 	}
 
-	// Auth-dead detection: resync creds + escalate, but NEVER auto-teardown — a
-	// string match on pane scrollback is far too fragile to kill a live session
-	// over (stale 401s sit deep in scrollback; central auth-sync prevents real
-	// auth-death anyway). Read only the last few lines, and only when idle/blocked.
-	if matched && !recovering && (ref.Status == "idle" || ref.Status == "blocked") && j.Pane != "" {
-		rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)
-		txt := host.read(rctx, j.Pane, 4)
-		rcancel()
-		if strings.Contains(txt, "Invalid bearer") || strings.Contains(txt, "Please run /login") {
-			log.Printf("issue #%d: possible auth-dead on %s — resyncing creds (no teardown)", n, host.Name)
-			sctx, scancel := context.WithTimeout(ctx, 30*time.Second)
-			_ = c.auth.syncToHost(sctx, host)
-			scancel()
-			c.notify(fmt.Sprintf("issue #%d possible auth-dead on %s", n, host.Name))
-		}
-	}
+	// Native auth failure: a typed vendor event resyncs credentials and notifies
+	// once, and never tears down a live session. Terminal text is never read.
+	c.superviseVendorAuth(ctx, host, j, ref, matched, recovering)
 
 	// PR poll + relay (orchid's existing polling, delivered via herdr send).
 	// PR events may resume a matched, unfenced done worker; goal replays may not.
