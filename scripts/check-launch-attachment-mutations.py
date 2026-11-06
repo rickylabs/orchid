@@ -78,6 +78,14 @@ MUTATIONS = [
      'if g, ok := err.(goalError); ok && strings.HasPrefix(string(g), "delivery-unconfirmed-") { // guard:keep-signal-refusal',
      "if false {",
      "^TestAcceptancePreSubmitTurnSignal$"),
+    ("signal received during the barrier left queued", SIGNALS,
+     "watermark = p.pump.received.Load() // guard:barrier-quiescent",
+     "watermark = p.lineSeq // guard:barrier-quiescent",
+     "^TestAcceptanceBarrierQuiescence$/^bound-(active|item)$"),
+    ("barrier frame budget bypassed", SIGNALS,
+     "if frames >= acceptanceFrameLimit { // guard:barrier-frame-bound",
+     "if false { // guard:barrier-frame-bound",
+     "^TestAcceptanceBarrierQuiescence$/^(duplicate|foreign)-flood$"),
 ]
 
 

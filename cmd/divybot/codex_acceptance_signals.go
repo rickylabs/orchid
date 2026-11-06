@@ -45,9 +45,10 @@ const (
 const (
 	acceptanceMaxWakes    = 64   // wake readbacks per acceptance; then interval polling only
 	acceptanceWakeBatch   = 32   // queued frames coalesced into one wake
-	acceptanceFrameLimit  = 1024 // frames per request on the subscribed connection
+	acceptanceFrameLimit  = 1024 // frames per request or pre-effect barrier
 	acceptancePumpBacklog = 256
 	codexResumeRefused    = "wake-capability-missing"
+	acceptanceBarrierBusy = "barrier-busy"
 )
 
 // High-volume streaming notifications the acceptance connection opts out of
@@ -346,10 +347,19 @@ func (p *goalRPC) nextLine() ([]byte, bool, error) {
 	return p.scan.Bytes(), true, nil
 }
 
-// drainThrough reduces every frame received up to the watermark. Those lines
-// are already queued, so this is bounded and does not wait for new traffic.
+// drainThrough also reduces frames received while draining the captured watermark.
+// It stops at observed quiescence or refuses after a bounded number of frames.
 func (p *goalRPC) drainThrough(watermark int64) error {
-	for p.lineSeq < watermark {
+	for frames := 0; ; frames++ {
+		if p.lineSeq >= watermark {
+			watermark = p.pump.received.Load() // guard:barrier-quiescent
+			if p.lineSeq >= watermark {
+				return nil
+			}
+		}
+		if frames >= acceptanceFrameLimit { // guard:barrier-frame-bound
+			return deliveryRefused(acceptanceBarrierBusy)
+		}
 		line, ok, err := p.pump.next(&p.lineSeq)
 		if !ok {
 			return goalErrorOr(err)
@@ -358,7 +368,6 @@ func (p *goalRPC) drainThrough(watermark int64) error {
 			return err
 		}
 	}
-	return nil
 }
 
 // unsolicited handles a frame that arrived with no request outstanding.

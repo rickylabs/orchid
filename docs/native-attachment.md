@@ -19,8 +19,8 @@ These sources are not a single vendor-native lifecycle proof.
 
 ## Upstream capability gaps
 
-The inventory was taken from the Codex CLI 0.166.0 app-server v2 schema with
-`codex app-server generate-json-schema`.
+The inventory was taken from the Codex CLI 0.166.0 app-server v2 schema and rechecked at 0.167.0
+with `codex app-server generate-json-schema`.
 
 - **`codex-app-server-v2-no-thread-subscriber-acknowledgment`.** No request lists the connections or
   clients subscribed to a thread, and no notification announces another client's `thread/resume` or its
@@ -62,7 +62,8 @@ Each acceptance owns one canonical connection, and that connection is the genera
    still carry the exact prepared id, cwd, model, effort, `approvalPolicy: never` and full-access sandbox.
 4. It requires `idle` again, and then reads the baseline page.
 5. A durable `attempted` receipt and a fresh occupant and TUI-process check follow. A mismatch here
-   means zero submits.
+   means zero submits. The receive barrier then drains to observed quiescence, including frames
+   received while earlier frames are reduced. Bound pre-effect activity refuses with zero submits.
 6. The single submit runs once. Frames keep being consumed while it is in flight.
 7. The exact-input readback, the fence read and the binding re-checks decide, as before.
 
@@ -81,6 +82,8 @@ Refusals are:
 
 - `stale-generation`.
 - `baseline-active`: a turn, active status or approval before the effect.
+- `barrier-busy`: the pre-effect barrier still has received frames after reducing 1,024 frames.
+  The private receipt and journal retain this reason; the outward refusal stays `pre-effect`.
 - `contradiction`: a second new turn.
 - `native-exit`: `thread/closed`, `notLoaded` or `systemError`.
 
@@ -89,11 +92,20 @@ user-item, turn, status or exit signal wakes one readback, after at most 32 queu
 coalesced. There are at most 64 wakes; after that, polling continues at the interval. A lost submit
 acknowledgment is `submit-uncertain` even when native evidence arrived first. No path submits twice.
 
+Quiescence means the consumed sequence caught up to the freshly observed receive counter. It is not
+composer readiness or an atomic server-side idle/submit guarantee: a scheduling window remains after
+the final counter observation and before submit begins. Duplicate and foreign traffic count toward
+the barrier's exact frame budget; a busy barrier refuses rather than draining without bound.
+
 ### Accepted debt
 
 Codex has no running-only rejoin. A thread unloaded between the idle read and the rejoin is therefore
 cold-loaded by Orchid's connection. The cost is bounded: TUI absence is still caught by the pre-effect
 and later binding checks and by the deadline, and nothing is ever re-sent.
+
+The strict post-fence drain journals approval requests but omits resolution-notification history.
+The cost is missing resolution evidence after the fence; acceptance is unchanged and no approval
+reply is sent. This history gap does not supply readiness, attachment or completion proof.
 
 ## Stage evidence
 
