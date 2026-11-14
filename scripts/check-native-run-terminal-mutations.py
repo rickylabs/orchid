@@ -12,6 +12,9 @@ TERMINAL = "cmd/divybot/native_run_terminal.go"
 RECONCILE = "cmd/divybot/native_run_reconcile.go"
 CLI = "cmd/divybot/native_run_reconcile_cli.go"
 MUTATIONS = [
+    ("timeout helper loses native goal pause", "cmd/divybot/main.go",
+     'c.transitionGoal(ctx, j, "paused")', '_ = ctx // mutant disconnects timeout goal lifecycle',
+     "^TestNativeGoalDispatchWiring$"),
     ("new assignment pins older same-key history", "cmd/divybot/native_run_retention.go",
      'j != nil && j.DispatchKey == key { // guard:terminal-retention-tracked',
      'j != nil { // guard:terminal-retention-tracked',
