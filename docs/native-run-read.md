@@ -50,4 +50,9 @@ Missing reasons are closed: `run_not_found`, `binding_unavailable`, `identity_mi
 
 Successful durable saves alone advance revision. Failed commits mark reads unavailable and wake observers at the same certified revision; consumers must accept nondecreasing revisions so health loss is delivered. A later successful save restores availability. The source serializes only the explicit safe projection, never goals, source bodies, seat handles, private operator paths or credentials.
 
+Assignment-end projections now live in an immutable dispatcher-owned store,
+independent of the temporary cleanup fence. See [durable assignment ends](native-run-completion.md)
+for lifecycle ownership, bounded dry-run reconciliation and rollout. The existing
+version 2 wire shape is unchanged; private end reasons do not enter its records.
+
 The Linux cross-UID admission and rejection fixtures run in the existing isolated root CI lane: `NATIVE_RUN_REQUIRE_ROOT=1 go test -race ./cmd/divybot -run '^TestNativeRun(ForeignUIDKernelPeer|ConfiguredUIDKernelPeer)$'`. They prove the configured observer can subscribe and look up through actual 2750/0660 permissions with the inherited group, while another kernel UID cannot read even with pathname access. Ordinary unprivileged runs explicitly skip that proof, rather than claiming it passed.

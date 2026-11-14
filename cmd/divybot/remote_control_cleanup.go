@@ -109,6 +109,9 @@ func (c *Coord) finishRemoteActionStop(ctx context.Context, h Host, dir string, 
 	if c.st.Jobs[j.Issue] != j {
 		return
 	}
+	if c.recordNativeEndLocked(j.Issue, j, "cancelled") != nil {
+		return
+	}
 	delete(c.st.Jobs, j.Issue)
 	if c.st.saveLocked() != nil {
 		c.st.Jobs[j.Issue] = j
