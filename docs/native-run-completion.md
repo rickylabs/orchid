@@ -10,7 +10,8 @@ The first identity, scope, source association, clock and reason are immutable.
 A failed write prevents release; a directory-sync error after rename retains
 the first bytes and keeps native readback unavailable until a successful save.
 Retries cannot erase or re-clock that possibly committed fact. Cleanup pruning,
-binding removal and process restart cannot remove the retained business fact.
+binding removal and process restart preserve retained facts. Count retention is
+separate from cleanup and never changes a retained fact.
 Lookups remain bounded point reads, without receipt or history enumeration.
 
 ## Source defect and lifecycle
@@ -28,7 +29,10 @@ The new source facts are written before authoritative cancellation/retirement,
 timeout or proved native disappearance releases tracking. Verified completion
 also retains its fact before cleanup. Valid legacy terminal fences are promoted
 before pruning, preserving their original clock. Terminal assignments receive
-no continuation input; uncertain native cleanup remains separate and tracked.
+no continuation input; cleanup and operator-timeout retries continue until
+confirmed or released by the existing stop bound, even if timeout source closure
+fails. A recorded end does not reject
+an otherwise authorized stop. Uncertain native cleanup remains separate and tracked.
 A completed vendor turn alone never establishes assignment completion.
 
 Missing screen detection only selects an ordinary-seat candidate. The existing
@@ -42,6 +46,28 @@ and `ended_unobserved`. They describe the dispatcher's end decision, not a quali
 verdict. In particular, `ended_unobserved` does not fabricate success or failure.
 Its clock is the first dispatcher observation of the end, not an invented historic
 finish time.
+
+## Terminal retention
+
+`native_terminal_limit` is a positive integer in the dispatcher configuration,
+with a default of **1000**. Every durable State save evicts the oldest terminal
+facts until the total is at that limit, ordered by completion-observation time
+with a deterministic dispatch-key tie break. Facts whose exact assignment is still tracked
+are never evicted: tracked jobs may temporarily take the total above the limit.
+The next saves converge to the limit as cleanup releases those jobs.
+
+An evicted fact loses its matching native-key index and synthetic
+`assignment_ended` launch block in the same commit. A newer assignment's index,
+a tracked job and other launch-block reasons are preserved. Failed saves before
+rename restore all three maps; an uncertain directory sync after rename retains
+the new snapshot. Existing oversized state is bounded on its first successful
+save with this version. This bounds the terminal store's contribution to the
+shared state file, without a scan on saves already within the limit.
+
+Retention is a finite history and synthetic launch-fence horizon. An evicted
+fact is no longer an immutable terminal association available from this store;
+missing evidence remains unknown. Reopened-issue and retry semantics, alongside
+the other non-blocking review findings, are tracked in [#147](https://github.com/rickylabs/orchid/issues/147).
 
 ## Bounded historical reconciliation
 

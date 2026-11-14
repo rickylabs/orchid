@@ -516,7 +516,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	c.st.mu.Lock()
 	j := c.st.Jobs[req.IssueNumber]
 	_, completing := c.st.CompletedRuns[req.IssueNumber]
-	completing = completing || c.st.nativeEndedLocked(j)
+	completing = completing || (req.Action != "stop" && c.st.nativeEndedLocked(j))
 	c.st.mu.Unlock()
 	if completing {
 		r.Outcome, r.Reason = "rejected", "agent_not_live"
@@ -610,7 +610,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	}
 	r.HerdrScope = j.HerdrScope
 	r.NativeRunID, r.Host, r.PaneID, r.WorkspaceID = runID, j.Host, j.Pane, j.Workspace
-	if j.RemoteCleanup != "" {
+	if j.RemoteCleanup != "" && (req.Action != "stop" || j.RemoteStopOperation != "") {
 		r.Outcome, r.Reason = "rejected", "agent_not_live"
 		return
 	}

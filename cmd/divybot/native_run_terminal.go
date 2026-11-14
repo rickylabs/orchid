@@ -7,7 +7,7 @@ import (
 )
 
 // Assignment ends are business facts, not workspace cleanup state. The immutable
-// dispatch-keyed fact survives pruning of CompletedRuns and SourceBindings.
+// dispatch-keyed fact survives cleanup and restart within configured retention.
 // Reason remains source-private: the existing v2 reader shape is unchanged.
 type nativeTerminalFact struct {
 	Record nativeRunRecord `json:"record"`

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"time"
 )
@@ -73,7 +74,7 @@ func (c *Coord) superviseRemoteCleanup(ctx context.Context, h Host, j *Job) {
 		}
 		cancel()
 		if err != nil {
-			return
+			log.Printf("issue #%d: timeout source notification unconfirmed; releasing ended cleanup", j.Issue)
 		}
 	}
 	c.st.mu.Lock()

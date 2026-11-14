@@ -143,11 +143,38 @@ func TestNativeTerminalLegacyFencePromotedBeforePruning(t *testing.T) {
 }
 
 func TestNativeTerminalOrdinaryCancellationPrecedesClose(t *testing.T) {
+	exerciseOrdinaryTerminalStop(t, false)
+}
+
+func TestNativeTerminalStopAcceptsRecordedEnd(t *testing.T) {
+	exerciseOrdinaryTerminalStop(t, true)
+}
+
+func exerciseOrdinaryTerminalStop(t *testing.T, alreadyEnded bool) {
+	t.Helper()
 	c, spool, receipts := actionFixture(t)
 	req := boundActionFixture(t, c, receipts)
 	j := c.st.Jobs[7]
 	j.NativeSessionID, j.Label = "fixture-native-session", "claude-7"
 	j.HerdrScope = &herdrScope{Session: "default"}
+	wantReason := "cancelled"
+	if alreadyEnded {
+		wantReason = "retired"
+		c.st.mu.Lock()
+		endErr := c.recordNativeEndLocked(7, j, wantReason)
+		c.st.mu.Unlock()
+		if endErr != nil {
+			t.Fatal(endErr)
+		}
+		j.RemoteControl = &remoteControlRun{NativeSessionID: j.NativeSessionID}
+		j.RemoteCleanup = "operator-timeout"
+		c.shadow = newNativeEvidenceShadow(time.Now)
+		binding := filepath.Join(receipts, j.DispatchKey, "record", "binding.json")
+		body, _ := json.Marshal(map[string]string{"NativeSessionID": j.NativeSessionID, "Repo": j.Repo})
+		if err := os.WriteFile(binding, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	c.actions.list = func(context.Context, Host) ([]AgentInfo, error) {
 		return []AgentInfo{{Agent: "claude", Name: j.Label, AgentStatus: "working", Cwd: "/fixture/issue-7", PaneID: j.Pane, WorkspaceID: j.Workspace,
 			AgentSession: json.RawMessage(`{"agent":"claude","kind":"id","source":"herdr:claude","value":"fixture-native-session"}`)}}, nil
@@ -158,7 +185,7 @@ func TestNativeTerminalOrdinaryCancellationPrecedesClose(t *testing.T) {
 	}
 	c.actions.close = func(context.Context, Host, string) error {
 		f := loadState(c.st.path).NativeTerminals[j.DispatchKey]
-		if f.Reason != "cancelled" || f.Record.CompletedAt == "" {
+		if f.Reason != wantReason || f.Record.CompletedAt == "" {
 			t.Fatal("workspace close preceded immutable cancellation")
 		}
 		closes++
@@ -166,8 +193,8 @@ func TestNativeTerminalOrdinaryCancellationPrecedesClose(t *testing.T) {
 	}
 	actionDrop(t, spool, req)
 	c.actionTick(context.Background())
-	if closes != 1 || c.st.Jobs[7] != nil || actionResult(t, receipts).Outcome != "accepted" {
-		t.Fatal("ordinary cancellation failed to retain its terminal fact")
+	if closes != 1 || (c.st.Jobs[7] != nil) != alreadyEnded || actionResult(t, receipts).Outcome != "accepted" {
+		t.Fatal("stop failed to retain its terminal fact or discarded managed cleanup tracking")
 	}
 }
 
@@ -300,11 +327,13 @@ func TestNativeTerminalRetirementPrecedesUncertainCleanup(t *testing.T) {
 	if loadState(c.st.path).NativeTerminals[j.DispatchKey].Record.CompletedAt == "" {
 		t.Fatal("retirement did not cross durable fence")
 	}
+	c.hosts[j.Host] = Host{Name: j.Host}
+	j.GoalDelivery = "pending"
 	sends := 0
 	c.actions.send = func(context.Context, Host, string, string) error { sends++; return nil }
 	c.superviseActive(context.Background(), 701, j, map[int]agentRef{}, Issue{})
-	if sends != 0 {
-		t.Fatal("ended assignment received continuation input")
+	if sends != 0 || j.GoalDelivery != "pending" {
+		t.Fatal("ended assignment received continuation or goal-delivery effects")
 	}
 }
 
