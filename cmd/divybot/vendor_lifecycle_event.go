@@ -18,7 +18,17 @@ type vendorLifecycleEvent struct {
 	Session   string `json:"session"`
 	Event     string `json:"event"`
 	Reason    string `json:"reason,omitempty"`
-	Seq       uint64 `json:"seq"`
+	// Failure is Claude's typed StopFailure error, never terminal or message text.
+	Failure string `json:"failure,omitempty"`
+	Seq     uint64 `json:"seq"`
+}
+
+// claudeStopFailures is Claude Code's closed StopFailure error enum (hook input
+// field "error"); the hook records only these values.
+var claudeStopFailures = map[string]bool{
+	"authentication_failed": true, "oauth_org_not_allowed": true, "account_on_hold": true, "verification_required": true,
+	"billing_error": true, "rate_limit": true, "overloaded": true, "invalid_request": true, "model_not_found": true,
+	"server_error": true, "unknown": true, "max_output_tokens": true, "cloud_credential_error": true,
 }
 
 func vendorEventState(event string) string {
@@ -35,7 +45,8 @@ func vendorEventState(event string) string {
 
 func (e *vendorLifecycleEvent) matches(a AgentInfo) bool {
 	if e == nil || e.Seq == 0 || e.Agent != a.Agent || e.Name != a.Name || e.Pane != a.PaneID || e.Workspace != a.WorkspaceID ||
-		e.Cwd != a.Cwd || e.Terminal == "" || e.Terminal != a.TerminalID || !privateNativeID(e.Session) || vendorEventState(e.Event) == "" {
+		e.Cwd != a.Cwd || e.Terminal == "" || e.Terminal != a.TerminalID || !privateNativeID(e.Session) || vendorEventState(e.Event) == "" ||
+		e.Failure != "" && (e.Agent != "claude" || e.Event != "StopFailure" || !claudeStopFailures[e.Failure]) {
 		return false
 	}
 	var session struct{ Source, Agent, Kind, Value string }
@@ -53,18 +64,33 @@ try:
   s=os.fstat(f.fileno());assert stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o600
   data=f.read(4097);assert len(data)<=4096
   print(data)
-except Exception:print('{}')
+except FileNotFoundError:print('{}')
+except Exception:print('{"unreadable":true}')
 `
 
 func (h Host) vendorLifecycle(ctx context.Context, a AgentInfo) *vendorLifecycleEvent {
+	event, _ := h.vendorLifecycleObserved(ctx, a)
+	return event
+}
+
+// vendorLifecycleObserved also reports whether the receipt source was read.
+// An absent, foreign or invalid receipt is a completed read with no event; a
+// failed command or an unreadable receipt is not, so a caller can retry it.
+func (h Host) vendorLifecycleObserved(ctx context.Context, a AgentInfo) (*vendorLifecycleEvent, bool) {
 	if (a.Agent != "claude" && a.Agent != "codex") || a.Cwd == "" || a.Name == "" || a.TerminalID == "" {
-		return nil
+		return nil, true
 	}
 	file := vendorLifecycleFile(a.Agent, a.Name, a.PaneID, a.WorkspaceID, a.Cwd)
 	out, err := h.runBounded(ctx, fmt.Sprintf("exec python3 -c %s %s", shq(vendorLifecycleRead), shq(file)))
-	var event vendorLifecycleEvent
-	if err != nil || len(out) > 4096 || strictJSON([]byte(out), &event) != nil || !event.matches(a) {
-		return nil
+	var unread struct {
+		Unreadable bool `json:"unreadable"`
 	}
-	return &event
+	if err != nil || len(out) > 4096 || json.Unmarshal([]byte(out), &unread) == nil && unread.Unreadable {
+		return nil, false
+	}
+	var event vendorLifecycleEvent
+	if strictJSON([]byte(out), &event) != nil || !event.matches(a) {
+		return nil, true
+	}
+	return &event, true
 }

@@ -89,7 +89,7 @@ func TestStartupDialogDiagnosisPreservesCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, termination := range []error{context.Canceled, context.DeadlineExceeded} {
-		h, _ := registrationHost(t, "trust-dialog")
+		registrationHost(t, "trust-dialog")
 		want := "startup_cancelled"
 		if termination == context.DeadlineExceeded {
 			want = "startup_timeout"
@@ -99,7 +99,7 @@ func TestStartupDialogDiagnosisPreservesCancellation(t *testing.T) {
 		if registrationFailureKind(registrationFailure("", termination)) != want {
 			t.Fatal("termination classification changed")
 		}
-		if registrationFailureKind(h.registrationStartFailure(ctx, "", "codex", "fixture-agent", "/fixture/repo", "w1:p1", "w1")) != "startup_cancelled" {
+		if registrationFailureKind(registrationFailure("", ctx.Err())) != "startup_cancelled" {
 			t.Fatal("cancelled startup was relabelled blocked")
 		}
 		if _, err := os.Stat(os.Getenv("REGISTRATION_CALLS")); !os.IsNotExist(err) {

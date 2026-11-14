@@ -58,9 +58,16 @@ func capacityRecoveryOwns(j *Job) bool {
 // Read only the newest native turn, distinguishing provider capacity from quota,
 // manual blockers and text that merely quotes an error. No screen input is read.
 func (p *goalRPC) capacityTurn() (string, string, bool, error) {
+	id, status, code, err := p.newestNativeTurn()
+	return id, status, status == "failed" && code == "serverOverloaded", err
+}
+
+// newestNativeTurn is the one bounded read of the bound thread's newest turn and
+// its typed error.codexErrorInfo. Recovery and the auth adapter each classify it.
+func (p *goalRPC) newestNativeTurn() (string, string, string, error) {
 	raw, err := p.request("thread/turns/list", map[string]any{"threadId": p.thread, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"})
 	if err != nil {
-		return "", "", false, err
+		return "", "", "", err
 	}
 	var response struct {
 		Data []struct {
@@ -72,22 +79,22 @@ func (p *goalRPC) capacityTurn() (string, string, bool, error) {
 		} `json:"data"`
 	}
 	if decodeNativeJSON(raw, &response) != nil || len(response.Data) != 1 {
-		return "", "", false, goalError("goal-turn-source-unavailable")
+		return "", "", "", goalError("goal-turn-source-unavailable")
 	}
 	turn := response.Data[0]
 	if !privateNativeID(turn.ID) || !p.nativeTurnAgrees(turn.ID, turn.Status) {
-		return "", "", false, goalError("goal-turn-source-unavailable")
+		return "", "", "", goalError("goal-turn-source-unavailable")
 	}
 	switch turn.Status {
 	case "failed", "completed", "interrupted", "inProgress":
 	default:
-		return "", "", false, goalError("goal-turn-source-unavailable")
+		return "", "", "", goalError("goal-turn-source-unavailable")
 	}
 	code := ""
 	if turn.Error != nil {
 		_ = json.Unmarshal(turn.Error.Code, &code)
 	}
-	return turn.ID, turn.Status, turn.Status == "failed" && code == "serverOverloaded", nil
+	return turn.ID, turn.Status, code, nil
 }
 
 // A narrow resume operation preserves the objective, budget and accumulated usage.
