@@ -65,6 +65,7 @@ type actionReceipt struct {
 
 type actionCalls struct {
 	notify            func(context.Context, Host, string, string) error
+	endEvidence       func(context.Context, *Job) (nativeEndEvidence, error)
 	completionPR      func(context.Context, *Job) (bool, error)
 	completed         func(context.Context, Host, *Job, string) (bool, error)
 	list              func(context.Context, Host) ([]AgentInfo, error)
@@ -171,7 +172,7 @@ func actionRequestValid(r actionRequest) string {
 		if len(r.Payload.Text) < 1 || len(r.Payload.Text) > 16000 || r.Payload.Reason != "" || r.Payload.TokenBudget != nil {
 			return "payload_invalid"
 		}
-	case "retry":
+	case "retry", "reconcile_end":
 		if r.Payload.Text != "" || r.Payload.Reason != "" || r.Payload.TokenBudget != nil {
 			return "payload_invalid"
 		}
@@ -350,12 +351,20 @@ func (c *Coord) actionTick(ctx context.Context) {
 		return
 	}
 	sort.Slice(names, func(i, j int) bool { return names[i].Name() < names[j].Name() })
+	reconciled := false
 	for _, entry := range names {
 		if ctx.Err() != nil {
 			return
 		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || !actionIDPattern.MatchString(strings.TrimSuffix(entry.Name(), ".json")) {
 			continue
+		}
+		var selected actionRequest
+		if readPrivateActionJSON(filepath.Join(c.cfg.ActionRequestRoot, "new", entry.Name()), &selected) == nil && selected.Action == "reconcile_end" {
+			if reconciled {
+				continue
+			}
+			reconciled = true
 		}
 		if err := c.actionOne(ctx, root, entry.Name()); err != nil {
 			log.Printf("action %s: %v", entry.Name(), err)
@@ -479,6 +488,27 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		r.Outcome, r.Reason = "rejected", "repository_mismatch"
 		return
 	}
+	if req.Action == "reconcile_end" {
+		c.st.mu.Lock()
+		j := c.st.Jobs[req.IssueNumber]
+		record := c.st.nativeRunRecordLocked(req.IssueNumber, j, c.cfg.Inbox)
+		if record == nil {
+			if f, ok := c.st.CompletedRuns[req.IssueNumber]; ok {
+				record = f.NativeRun
+			}
+		}
+		c.st.mu.Unlock()
+		if record == nil || record.AgentID != req.AgentID || record.AssignmentID != req.DispatchID {
+			r.Outcome, r.Reason = "rejected", "assignment_changed_or_unavailable"
+			return
+		}
+		result := c.reconcileNativeEnd(ctx, nativeRunQuery{record.Key, record.Label}, req.ExpectedAgentRevision, true)
+		r.Reason = result.Reason
+		if result.State == "recorded" || result.State == "already_recorded" {
+			r.Outcome = "accepted"
+		}
+		return
+	}
 	if req.Action == "retry" {
 		c.deliverRetryAction(ctx, req, r)
 		return
@@ -486,6 +516,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	c.st.mu.Lock()
 	j := c.st.Jobs[req.IssueNumber]
 	_, completing := c.st.CompletedRuns[req.IssueNumber]
+	completing = completing || (req.Action != "stop" && c.st.nativeEndedLocked(j))
 	c.st.mu.Unlock()
 	if completing {
 		r.Outcome, r.Reason = "rejected", "agent_not_live"
@@ -579,7 +610,7 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 	}
 	r.HerdrScope = j.HerdrScope
 	r.NativeRunID, r.Host, r.PaneID, r.WorkspaceID = runID, j.Host, j.Pane, j.Workspace
-	if j.RemoteCleanup != "" {
+	if j.RemoteCleanup != "" && (req.Action != "stop" || j.RemoteStopOperation != "") {
 		r.Outcome, r.Reason = "rejected", "agent_not_live"
 		return
 	}
@@ -601,6 +632,11 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 			}
 			previousCleanup, previousOperation := j.RemoteCleanup, j.RemoteStopOperation
 			j.RemoteCleanup, j.RemoteStopOperation = "teardown", req.OperationID
+			if c.recordNativeEndLocked(j.Issue, j, "cancelled") != nil {
+				c.st.mu.Unlock()
+				r.Reason = "stop_fence_unavailable"
+				return
+			}
 			c.st.LaunchBlocks[j.Issue] = launchBlock{Reason: "cockpit_stop", Notified: true}
 			err = c.st.saveLocked()
 			if err != nil {
@@ -639,6 +675,11 @@ func (c *Coord) deliverAction(ctx context.Context, dir string, req actionRequest
 		// Fence and remove tracking before closing. A close timeout may still
 		// have taken effect; the persisted block prevents automatic respawn.
 		c.st.mu.Lock()
+		if c.recordNativeEndLocked(j.Issue, j, "cancelled") != nil { // guard:ordinary-stop-terminal
+			c.st.mu.Unlock()
+			r.Reason = "stop_fence_unavailable"
+			return
+		}
 		if c.st.LaunchBlocks == nil {
 			c.st.LaunchBlocks = map[int]launchBlock{}
 		}

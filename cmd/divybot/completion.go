@@ -129,7 +129,7 @@ func (c *Coord) completionEvidence(ctx context.Context, h Host, j *Job, native s
 		if j.NativeGoal != nil && (err != nil || !goalAllowed) {
 			return false, err // a marked comment cannot override an active or unknown goal
 		}
-		if err == nil && complete {
+		if err == nil && complete && j.NativeGoal != nil && goalAllowed {
 			return true, nil
 		}
 	}
@@ -201,6 +201,12 @@ func (c *Coord) pruneCompletedRuns(allOpen map[int]bool, pollOK bool, state func
 		c.st.mu.Lock()
 		prior, ok := c.st.CompletedRuns[n]
 		if ok && prior.Phase == "observed" && c.st.Jobs[n] == nil {
+			if prior.NativeRun != nil && completedNativeRunReason(prior, prior.NativeRun) == "" && validNativeRunRecord(*prior.NativeRun) {
+				if c.st.publishNativeTerminalLocked(*prior.NativeRun, "ended_unobserved") != nil { // guard:retain-legacy-terminal
+					c.st.mu.Unlock()
+					continue
+				}
+			}
 			delete(c.st.CompletedRuns, n)
 			if c.st.saveLocked() != nil {
 				c.st.CompletedRuns[n] = prior
@@ -342,6 +348,30 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			return false
 		}
 	}
+	// An already committed assignment end is independent of its cleanup.
+	// Promote it only for the same currently idle native occupant; no turn
+	// stamp becomes completion evidence and no new work may be stopped.
+	if !fenced {
+		c.st.mu.Lock()
+		terminal, ok := c.st.NativeTerminals[j.DispatchKey]
+		if ok && validNativeTerminal(terminal) && c.st.Jobs[n] == j &&
+			activeMatchesCompletion(c.st.nativeRunRecordLocked(n, j, c.cfg.Inbox), &terminal.Record,
+				completedRun{DispatchKey: j.DispatchKey, NativeSessionID: terminal.Record.NativeSessionID}) {
+			copy := terminal.Record
+			fence = completedRun{NativeRun: &copy, DispatchKey: j.DispatchKey,
+				NativeSessionID: terminal.Record.NativeSessionID, StateChangeSeq: ref.StateChangeSeq, Phase: "retiring"}
+			if c.st.CompletedRuns == nil {
+				c.st.CompletedRuns = map[int]completedRun{}
+			}
+			c.st.CompletedRuns[n] = fence
+			if c.st.saveLocked() == nil {
+				fenced = true
+			} else {
+				delete(c.st.CompletedRuns, n)
+			}
+		}
+		c.st.mu.Unlock()
+	}
 	if !fenced {
 		pending, err := c.completionPRPending(check, j)
 		if err != nil || pending {
@@ -404,6 +434,12 @@ func (c *Coord) retireCompleted(ctx context.Context, n int, j *Job, ref agentRef
 			fence.NativeRun.Phase = "completed"
 			fence.NativeRun.ObservedAt = stamp(time.Now())
 			fence.NativeRun.CompletedAt = fence.NativeRun.ObservedAt
+		}
+		if fence.NativeRun != nil {
+			if err = c.st.publishNativeTerminalLocked(*fence.NativeRun, "assignment_completed"); err != nil {
+				c.st.mu.Unlock()
+				return false
+			}
 		}
 		c.st.CompletedRuns[n] = fence
 		err = c.st.saveLocked()

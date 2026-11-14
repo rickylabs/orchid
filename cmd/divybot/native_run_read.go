@@ -170,7 +170,10 @@ func (s *State) lookupNativeRunsLocked(queries []nativeRunQuery, inbox string) n
 			n, _ := strconv.Atoi(q.Key)
 			j := s.Jobs[n]
 			fence, completed := s.CompletedRuns[n]
-			if completed {
+			terminal, terminalReason := s.terminalNativeRunLocked(n, j, inbox)
+			if terminal != nil || terminalReason != "" {
+				record, reason = terminal, terminalReason
+			} else if completed {
 				// No inbox fallback or receipt reconstruction for legacy completion fences.
 				record = fence.NativeRun
 				reason = completedNativeRunReason(fence, record)

@@ -39,6 +39,7 @@ import (
 // ============================ config ============================
 
 type Config struct {
+	NativeTerminalLimit     int                      `json:"native_terminal_limit,omitempty"`
 	NativeRunSocket         string                   `json:"native_run_socket,omitempty"`
 	RemoteControl           RemoteControlConfig      `json:"remote_control"`
 	OwnerNativeGrantPort    *ownerNativePortConfig   `json:"owner_native_grant_port,omitempty"`
@@ -196,6 +197,7 @@ func (g Gov) fiveRateWindowDur() time.Duration { return durOr(g.FiveRateWindow, 
 func (g Gov) sampleIntervalDur() time.Duration { return durOr(g.SampleInterval, 90*time.Second) }
 
 func (c *Config) withDefaults() {
+	c.NativeTerminalLimit = c.nativeTerminalRetentionLimit()
 	c.RemoteControl.defaults()
 	for i := range c.Hosts {
 		c.Hosts[i].RemoteControl = &c.RemoteControl
@@ -253,6 +255,9 @@ func loadConfig(path string) (*Config, error) {
 	var fields map[string]json.RawMessage
 	if strictJSON(b, &fields) != nil {
 		return nil, fmt.Errorf("config object required")
+	}
+	if value, present := fields["native_terminal_limit"]; present && (string(value) == "null" || c.NativeTerminalLimit <= 0) {
+		return nil, fmt.Errorf("native_terminal_limit must be a positive integer")
 	}
 	if i := invalidMirrorAssignments(fields["targets"]); i >= 0 {
 		return nil, fmt.Errorf("targets[%d].mirror_assignments must be a JSON boolean", i)
@@ -411,15 +416,18 @@ type Job struct {
 }
 
 type State struct {
-	nativeRunInbox string
-	nativeRuns     *nativeRunWatch
-	CompletedRuns  map[int]completedRun `json:"completed_runs,omitempty"`
-	MatrixNotices  map[int]string       `json:"matrix_notices,omitempty"`
-	LaunchBlocks   map[int]launchBlock  `json:"launch_blocks,omitempty"`
-	RetryFlights   map[int]retryFlight  `json:"retry_flights,omitempty"`
-	mu             sync.Mutex
-	fs             *stateFS     // test-only durability fault injection; nil uses the OS
-	Jobs           map[int]*Job `json:"jobs"`
+	nativeTerminalLimit int
+	nativeRunInbox      string
+	nativeRuns          *nativeRunWatch
+	CompletedRuns       map[int]completedRun          `json:"completed_runs,omitempty"`
+	NativeTerminals     map[string]nativeTerminalFact `json:"native_terminals,omitempty"`
+	NativeTerminalKeys  map[int]string                `json:"native_terminal_keys,omitempty"`
+	MatrixNotices       map[int]string                `json:"matrix_notices,omitempty"`
+	LaunchBlocks        map[int]launchBlock           `json:"launch_blocks,omitempty"`
+	RetryFlights        map[int]retryFlight           `json:"retry_flights,omitempty"`
+	mu                  sync.Mutex
+	fs                  *stateFS     // test-only durability fault injection; nil uses the OS
+	Jobs                map[int]*Job `json:"jobs"`
 	// Continued counts how many CONTINUATION stubs we've re-filed per upstream ref
 	// ("owner/repo#N"), so a never-closing upstream can't churn forever. Persisted.
 	Continued map[string]int `json:"continued"`
@@ -441,21 +449,28 @@ type State struct {
 }
 
 func loadState(path string) *State {
+	b, _ := os.ReadFile(path)
+	return loadStateSnapshot(path, b)
+}
+
+func loadStateSnapshot(path string, b []byte) *State {
 	s := &State{Jobs: map[int]*Job{}, Continued: map[string]int{}, QuotaSamples: map[string][]QuotaSample{}, PrevCap: map[string]int{}, path: path}
-	if b, err := os.ReadFile(path); err == nil {
+	if len(b) > 0 {
 		var raw struct {
-			CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
-			MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
-			Jobs          map[int]*Job             `json:"jobs"`
-			LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
-			RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
-			Continued     map[string]int           `json:"continued"`
-			QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
-			PrevCap       map[string]int           `json:"prev_cap"`
-			Bindings      map[int]*sourceBinding   `json:"source_bindings,omitempty"`
-			Cursors       map[string]time.Time     `json:"source_cursors,omitempty"`
-			Starts        map[string]time.Time     `json:"source_starts,omitempty"`
-			Scans         map[string]sourceScan    `json:"source_scans,omitempty"`
+			CompletedRuns      map[int]completedRun          `json:"completed_runs,omitempty"`
+			NativeTerminals    map[string]nativeTerminalFact `json:"native_terminals,omitempty"`
+			NativeTerminalKeys map[int]string                `json:"native_terminal_keys,omitempty"`
+			MatrixNotices      map[int]string                `json:"matrix_notices,omitempty"`
+			Jobs               map[int]*Job                  `json:"jobs"`
+			LaunchBlocks       map[int]launchBlock           `json:"launch_blocks,omitempty"`
+			RetryFlights       map[int]retryFlight           `json:"retry_flights,omitempty"`
+			Continued          map[string]int                `json:"continued"`
+			QuotaSamples       map[string][]QuotaSample      `json:"quota_samples"`
+			PrevCap            map[string]int                `json:"prev_cap"`
+			Bindings           map[int]*sourceBinding        `json:"source_bindings,omitempty"`
+			Cursors            map[string]time.Time          `json:"source_cursors,omitempty"`
+			Starts             map[string]time.Time          `json:"source_starts,omitempty"`
+			Scans              map[string]sourceScan         `json:"source_scans,omitempty"`
 		}
 		if json.Unmarshal(b, &raw) == nil {
 			s.SourceBindings = raw.Bindings
@@ -463,6 +478,7 @@ func loadState(path string) *State {
 			s.SourceStarts = raw.Starts
 			s.SourceScans = raw.Scans
 			s.CompletedRuns = raw.CompletedRuns
+			s.NativeTerminals, s.NativeTerminalKeys = raw.NativeTerminals, raw.NativeTerminalKeys
 			s.MatrixNotices = raw.MatrixNotices
 			s.LaunchBlocks = raw.LaunchBlocks
 			s.RetryFlights = raw.RetryFlights
@@ -491,21 +507,30 @@ func (s *State) save() error {
 
 // saveLocked commits launch fences before an external effect can occur.
 func (s *State) saveLocked() (saveErr error) {
-	defer func() { s.publishNativeRunCommit(saveErr == nil) }()
+	pruned := s.pruneNativeTerminalsLocked() // guard:terminal-retention-save
+	defer func() {
+		var saved stateSaveError
+		if saveErr != nil && !(errors.As(saveErr, &saved) && saved.afterRename) {
+			s.restoreNativeTerminalPruneLocked(pruned)
+		}
+		s.publishNativeRunCommit(saveErr == nil)
+	}()
 	b, err := json.MarshalIndent(struct {
-		CompletedRuns map[int]completedRun     `json:"completed_runs,omitempty"`
-		MatrixNotices map[int]string           `json:"matrix_notices,omitempty"`
-		Jobs          map[int]*Job             `json:"jobs"`
-		Continued     map[string]int           `json:"continued"`
-		QuotaSamples  map[string][]QuotaSample `json:"quota_samples"`
-		PrevCap       map[string]int           `json:"prev_cap"`
-		LaunchBlocks  map[int]launchBlock      `json:"launch_blocks,omitempty"`
-		RetryFlights  map[int]retryFlight      `json:"retry_flights,omitempty"`
-		Bindings      map[int]*sourceBinding   `json:"source_bindings,omitempty"`
-		Cursors       map[string]time.Time     `json:"source_cursors,omitempty"`
-		Starts        map[string]time.Time     `json:"source_starts,omitempty"`
-		Scans         map[string]sourceScan    `json:"source_scans,omitempty"`
-	}{s.CompletedRuns, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights, s.SourceBindings, s.SourceCursors, s.SourceStarts, s.SourceScans}, "", "  ")
+		CompletedRuns      map[int]completedRun          `json:"completed_runs,omitempty"`
+		NativeTerminals    map[string]nativeTerminalFact `json:"native_terminals,omitempty"`
+		NativeTerminalKeys map[int]string                `json:"native_terminal_keys,omitempty"`
+		MatrixNotices      map[int]string                `json:"matrix_notices,omitempty"`
+		Jobs               map[int]*Job                  `json:"jobs"`
+		Continued          map[string]int                `json:"continued"`
+		QuotaSamples       map[string][]QuotaSample      `json:"quota_samples"`
+		PrevCap            map[string]int                `json:"prev_cap"`
+		LaunchBlocks       map[int]launchBlock           `json:"launch_blocks,omitempty"`
+		RetryFlights       map[int]retryFlight           `json:"retry_flights,omitempty"`
+		Bindings           map[int]*sourceBinding        `json:"source_bindings,omitempty"`
+		Cursors            map[string]time.Time          `json:"source_cursors,omitempty"`
+		Starts             map[string]time.Time          `json:"source_starts,omitempty"`
+		Scans              map[string]sourceScan         `json:"source_scans,omitempty"`
+	}{s.CompletedRuns, s.NativeTerminals, s.NativeTerminalKeys, s.MatrixNotices, s.Jobs, s.Continued, s.QuotaSamples, s.PrevCap, s.LaunchBlocks, s.RetryFlights, s.SourceBindings, s.SourceCursors, s.SourceStarts, s.SourceScans}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -2333,7 +2358,9 @@ func newCoord(cfg *Config) *Coord {
 	if cfg.cockpit == nil {
 		cfg.cockpit = &cockpitTargetSource{}
 	}
-	return &Coord{cfg: cfg, st: loadState(cfg.StateFile), auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID(), claudeLinks: &claudeLinkStore{}}
+	state := loadState(cfg.StateFile)
+	state.nativeTerminalLimit = cfg.nativeTerminalRetentionLimit()
+	return &Coord{cfg: cfg, st: state, auth: defaultAuth(), hosts: hosts, shadow: newNativeEvidenceShadow(time.Now), instance: newInstanceID(), claudeLinks: &claudeLinkStore{}}
 }
 
 // startOwnerGrantsWithTargets loads the cockpit targets before the owner-grant
@@ -2677,15 +2704,9 @@ func (c *Coord) tick(ctx context.Context) {
 	c.pruneCompletedRuns(allOpen, pollOK, func(n int) string { return c.issueState(ctx, n) })
 	c.reapRemoteRuns(ctx, status, up, allOpen)
 
-	// A persistently absent agent is an abandoned launch, not permission to retry.
-	// Fence it durably before removing tracking so a restart cannot respawn it.
-	type deadJob struct {
-		job  *Job
-		n    int
-		host string
-		ws   string
-	}
-	var dead []deadJob
+	// Agent observations select candidates; only complete native workspace
+	// absence may certify that an ordinary (non shared-daemon) seat ended.
+	var dead []*Job
 	c.st.mu.Lock()
 	for n, j := range c.st.Jobs {
 		if j.RemoteControl != nil {
@@ -2725,37 +2746,15 @@ func (c *Coord) tick(ctx context.Context) {
 		if j.Misses < deadMissThreshold {
 			continue
 		}
-		if c.st.LaunchBlocks == nil {
-			c.st.LaunchBlocks = map[int]launchBlock{}
-		}
-		c.st.LaunchBlocks[n] = launchBlock{Reason: "agent_disappeared"}
-		if c.st.saveLocked() != nil {
-			continue
-		}
-		dead = append(dead, deadJob{n: n, host: j.Host, ws: j.Workspace, job: j})
-		delete(c.st.Jobs, n)
+		dead = append(dead, j)
 	}
 	c.st.mu.Unlock()
-	// Close only the abandoned job's recorded workspace. Done outside the state
-	// lock because closeWorkspace is a network round-trip. No automatic respawn follows.
-	for _, d := range dead {
-		c.transitionGoal(ctx, d.job, "blocked")
-		c.st.blockLaunch(d.n, "agent_disappeared")
-		c.reportBlockedLaunch(ctx, d.n)
-		log.Printf("issue #%d: agent absent after supervision threshold; automatic relaunch abandoned", d.n)
-		if d.ws == "" {
-			continue
+	for _, j := range dead {
+		if c.abandonMissingNativeSeat(ctx, j) {
+			c.transitionGoal(ctx, j, "blocked")
+			c.reportBlockedLaunch(ctx, j.Issue)
+			log.Printf("issue #%d: native workspace absent; automatic relaunch abandoned", j.Issue)
 		}
-		host, ok := c.hosts[d.host]
-		host = host.forJob(d.job)
-		if !ok {
-			continue
-		}
-		cctx, ccancel := context.WithTimeout(ctx, 12*time.Second)
-		if err := host.closeWorkspace(cctx, d.ws); err != nil {
-			log.Printf("issue #%d: closing dead workspace %s failed: %v", d.n, d.ws, err)
-		}
-		ccancel()
 	}
 
 	// Admission budget = per-account governor cap − that account's running count.
@@ -3830,6 +3829,7 @@ func (c *Coord) supervise(ctx context.Context, n int, j *Job, status map[int]age
 func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[int]agentRef, is Issue) {
 	c.st.mu.Lock()
 	_, fenced := c.st.CompletedRuns[n]
+	ended := c.st.nativeEndedLocked(j)
 	c.st.mu.Unlock()
 	if fenced {
 		c.clearRemoteControl(j)
@@ -3842,6 +3842,14 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	}
 	if j.RemoteCleanup != "" {
 		c.superviseRemoteCleanup(ctx, host, j)
+		return
+	}
+	if ended { // guard:terminal-input-only — cleanup retries still own their effects
+		if !j.Deadline.IsZero() && time.Now().After(j.Deadline) {
+			c.superviseOperatorTimeout(ctx, n, j, host)
+		} else {
+			c.clearRemoteControl(j)
+		}
 		return
 	}
 	ref, known := status[n]
@@ -3921,32 +3929,7 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 	// it open would make the deleted job respawn on the very next tick. Retry =
 	// file a fresh inbox issue (or /swarm comment) with a longer timeout.
 	if !j.Deadline.IsZero() && time.Now().After(j.Deadline) {
-		if j.RemoteControl != nil {
-			if c.beginRemoteCleanup(j, "operator-timeout") {
-				c.superviseRemoteCleanup(ctx, host, j)
-			}
-			return
-		}
-		c.transitionGoal(ctx, j, "paused")
-		lanes := c.liveChildLanes(ctx, host, j)
-		log.Printf("issue #%d: operator timeout (%s) exceeded%s — tearing down", n, j.Overrides.Timeout, lanes)
-		cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
-		if _, binding := c.sourceBinding(n); binding {
-			// Never close the owner's source issue; end the binding instead.
-			c.replySource(cctx, n, "stopped", "operator-timeout", "", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded%s; agent torn down. To retry, post a new /swarm comment with a longer `timeout:`.", j.Overrides.Timeout, lanes))
-			c.closeSource(n, "stopped")
-		} else {
-			_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
-				"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded%s — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout, lanes))
-		}
-		ccancel()
-		cleaned := c.teardown(ctx, n, j, "operator-timeout")
-		c.st.mu.Lock()
-		if cleaned {
-			delete(c.st.Jobs, n)
-		}
-		c.st.mu.Unlock()
-		c.notify(fmt.Sprintf("issue #%d timed out (%s)", n, j.Overrides.Timeout))
+		c.superviseOperatorTimeout(ctx, n, j, host)
 		return
 	}
 
@@ -3989,6 +3972,43 @@ func (c *Coord) superviseActive(ctx context.Context, n int, j *Job, status map[i
 		log.Printf("issue #%d: BLOCKED (needs input) on %s", n, host.Name)
 		c.notify(fmt.Sprintf("issue #%d blocked — needs input", n))
 	}
+}
+
+// A terminal assignment still owns cleanup. This path also retries an ordinary
+// timeout when source closure failed, without resuming native work supervision.
+func (c *Coord) superviseOperatorTimeout(ctx context.Context, n int, j *Job, host Host) {
+	if c.dry {
+		return
+	}
+	if j.RemoteControl != nil {
+		if c.beginRemoteCleanup(j, "operator-timeout") {
+			c.superviseRemoteCleanup(ctx, host, j)
+		}
+		return
+	}
+	c.transitionGoal(ctx, j, "paused")
+	lanes := c.liveChildLanes(ctx, host, j)
+	log.Printf("issue #%d: operator timeout (%s) exceeded%s — tearing down", n, j.Overrides.Timeout, lanes)
+	cctx, ccancel := context.WithTimeout(ctx, 30*time.Second)
+	if _, binding := c.sourceBinding(n); binding {
+		// Never close the owner's source issue; end the binding instead.
+		c.replySource(cctx, n, "stopped", "operator-timeout", "", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded%s; agent torn down. To retry, post a new /swarm comment with a longer `timeout:`.", j.Overrides.Timeout, lanes))
+		c.closeSource(n, "stopped")
+	} else {
+		_, _ = run(cctx, "gh", "issue", "close", fmt.Sprint(n), "--repo", c.cfg.Inbox,
+			"--comment", fmt.Sprintf("⏱️ divybot: operator timeout of %s exceeded%s — agent torn down and issue closed. To retry, open a new inbox issue or /swarm comment with a longer `timeout:`.", j.Overrides.Timeout, lanes))
+	}
+	ccancel()
+	cleaned := c.teardown(ctx, n, j, "operator-timeout")
+	c.st.mu.Lock()
+	if cleaned && c.st.Jobs[n] == j {
+		delete(c.st.Jobs, n)
+		if c.st.saveLocked() != nil {
+			c.st.Jobs[n] = j
+		}
+	}
+	c.st.mu.Unlock()
+	c.notify(fmt.Sprintf("issue #%d timed out (%s)", n, j.Overrides.Timeout))
 }
 
 // strandedPokeInterval: an idle job with no PR is re-sent its brief at most this
@@ -4043,6 +4063,10 @@ func (c *Coord) pollPR(ctx context.Context, n int, j *Job, host Host, status str
 	// (warm target dir + sccache + context). This closes the merge→next-PR loop
 	// that was leaving v8x idle for 30+ min between commits.
 	if v.State == "MERGED" || v.State == "CLOSED" {
+		end := c.reconcileNativeEnd(ctx, nativeRunQuery{strconv.Itoa(n), j.Label}, "", true)
+		if end.State == "recorded" || end.State == "already_recorded" || end.Reason == "report_end_unproven" {
+			return
+		}
 		merged := v.State == "MERGED"
 		j.PR = 0
 		j.Track = tracker{}
@@ -4271,6 +4295,16 @@ func checksGreen(v *PRView) bool {
 // proof is retried on later ticks; after stopMissLimit misses the run ends
 // anyway, so it stops counting against the governor and admission.
 func (c *Coord) teardown(ctx context.Context, n int, j *Job, cause string) bool {
+	reason := "retired"
+	if cause == "operator-timeout" {
+		reason = "timed_out"
+	}
+	c.st.mu.Lock()
+	err := c.recordNativeEndLocked(n, j, reason)
+	c.st.mu.Unlock()
+	if err != nil {
+		return false
+	}
 	if c.teardownConfirmed(ctx, n, j, cause) {
 		return true
 	}
@@ -4725,6 +4759,9 @@ func truncate(s string, max int) string {
 // ============================ main ============================
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reconcile-completions" {
+		os.Exit(reconcileCompletionsCLI(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "herdr-worktree-create" {
 		os.Exit(herdrWorktreeCLI(os.Stdout))
 	}

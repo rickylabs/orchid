@@ -181,6 +181,9 @@ func (c *Coord) reapRemoteRuns(ctx context.Context, status map[int]agentRef, up 
 		cancel()
 		c.st.mu.Lock()
 		released := evidence != "" && reserved && c.st.Jobs[n] == j
+		if released && c.recordNativeEndLocked(n, j, "ended_unobserved") != nil {
+			released = false
+		}
 		if released {
 			delete(c.st.Jobs, n)
 			if c.st.saveLocked() != nil {
